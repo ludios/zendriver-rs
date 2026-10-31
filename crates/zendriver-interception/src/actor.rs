@@ -225,37 +225,50 @@ pub(crate) struct HeaderPair {
     pub(crate) value: String,
 }
 
-/// How many requests the actor remembers having given the proxy
-/// credentials. Chrome challenges a rejected request again right away, so
-/// only recent ones matter, and a long-lived tab doesn't grow the list.
+/// How many proxy challenges the actor remembers having answered with the
+/// credentials. Chrome repeats a rejected challenge right away, so only
+/// recent ones matter, and a long-lived tab doesn't grow the list.
 const REMEMBERED_AUTH_REQUESTS: usize = 64;
 
-/// The `authChallengeResponse` to send for a `Fetch.authRequired` event.
+/// The `authChallengeResponse` to send for the `Fetch.authRequired` event
+/// `event`.
 ///
 /// - `proxy_auth`: the `(user, password)` to give a proxy, if any.
-/// - `from_proxy`: whether a proxy sent the challenge
-///   (`authChallenge.source == "Proxy"`), rather than the server.
-/// - `first_try`: whether this request hasn't been given the credentials
-///   yet. Chrome challenges again after the proxy rejects them, so
-///   answering every time would loop forever.
+/// - `answered`: the challenges recently answered with them, each as
+///   request id, challenger and scheme, oldest first; updated here.
 ///
-/// Credentials go only to a proxy, and only once per request; a server's
-/// challenge gets `Default`, so a site can't collect the proxy credentials
-/// by answering 401.
+/// Credentials go only to a proxy (`authChallenge.source == "Proxy"`), and
+/// once per challenge: Chrome repeats a challenge whose credentials the
+/// proxy rejected, so it gets `CancelAuth` rather than a loop. A server's
+/// challenge gets `Default`, so a site can't collect the credentials by
+/// answering 401. A different proxy or scheme for the same request (PAC
+/// failover, a scheme fallback) counts as a new challenge.
 fn auth_response(
     proxy_auth: Option<&(String, String)>,
-    from_proxy: bool,
-    first_try: bool,
+    event: &Value,
+    answered: &mut VecDeque<String>,
 ) -> Value {
-    match proxy_auth {
-        Some((user, pass)) if from_proxy && first_try => json!({
-            "response": "ProvideCredentials",
-            "username": user,
-            "password": pass,
-        }),
-        Some(_) if from_proxy => json!({ "response": "CancelAuth" }),
-        _ => json!({ "response": "Default" }),
+    let challenge = &event["authChallenge"];
+    let Some((user, pass)) = proxy_auth.filter(|_| challenge["source"] == "Proxy") else {
+        return json!({ "response": "Default" });
+    };
+    let key = format!(
+        "{} {} {}",
+        event["requestId"], challenge["origin"], challenge["scheme"]
+    );
+    if answered.contains(&key) {
+        warn!(%key, "interception: the proxy rejected the credentials");
+        return json!({ "response": "CancelAuth" });
     }
+    if answered.len() == REMEMBERED_AUTH_REQUESTS {
+        answered.pop_front();
+    }
+    answered.push_back(key);
+    json!({
+        "response": "ProvideCredentials",
+        "username": user,
+        "password": pass,
+    })
 }
 
 /// Run the interception actor until `cancel` fires.
@@ -293,8 +306,7 @@ pub(crate) async fn run_actor(
     let enable_session = session.clone();
     let enable_patterns: Vec<Value> = patterns.iter().map(serialize_pattern).collect();
     let handle_auth_requests = proxy_auth.is_some();
-    // Requests recently given the proxy credentials, oldest first: a second
-    // challenge for one means the proxy rejected them.
+    // See `auth_response`.
     let mut answered: VecDeque<String> = VecDeque::new();
     tokio::spawn(async move {
         if let Err(e) = enable_session
@@ -344,21 +356,7 @@ pub(crate) async fn run_actor(
                     warn!("interception: Fetch.authRequired without requestId");
                     continue;
                 };
-                let from_proxy = ev_value
-                    .pointer("/authChallenge/source")
-                    .and_then(Value::as_str)
-                    == Some("Proxy");
-                let first_try = from_proxy && !answered.contains(&request_id);
-                if first_try {
-                    if answered.len() == REMEMBERED_AUTH_REQUESTS {
-                        answered.pop_front();
-                    }
-                    answered.push_back(request_id.clone());
-                }
-                if from_proxy && !first_try {
-                    warn!(%request_id, "interception: the proxy rejected the credentials");
-                }
-                let response = auth_response(proxy_auth.as_ref(), from_proxy, first_try);
+                let response = auth_response(proxy_auth.as_ref(), &ev_value, &mut answered);
                 if let Err(e) = session
                     .call(
                         "Fetch.continueWithAuth",
@@ -879,20 +877,34 @@ mod tests {
         conn.shutdown();
     }
 
-    /// Proxy credentials go to a proxy's first challenge only: a server's
-    /// challenge gets `Default`, and a repeat challenge (the proxy rejected
-    /// them) gets `CancelAuth`.
+    /// Proxy credentials go to a proxy's challenge once: a repeat (the
+    /// proxy rejected them) gets `CancelAuth`, another proxy or scheme for
+    /// the same request gets them again, and a server's challenge or a
+    /// tab without credentials gets `Default`.
     #[test]
-    fn auth_response_gives_credentials_to_a_proxy_once() {
+    fn auth_response_gives_credentials_to_each_proxy_challenge_once() {
         let creds = ("u".to_string(), "p".to_string());
-        let response = |auth, from_proxy, first_try| {
-            auth_response(auth, from_proxy, first_try)["response"].clone()
+        let mut answered = VecDeque::new();
+        let event = |source: &str, origin: &str| {
+            json!({
+                "requestId": "R1",
+                "authChallenge": { "source": source, "origin": origin, "scheme": "basic" },
+            })
         };
-        assert_eq!(response(Some(&creds), true, true), "ProvideCredentials");
-        assert_eq!(response(Some(&creds), true, false), "CancelAuth");
-        assert_eq!(response(Some(&creds), false, true), "Default");
-        assert_eq!(response(None, true, true), "Default");
-        assert_eq!(auth_response(Some(&creds), true, true)["password"], "p");
+        let mut respond =
+            |auth, event: Value| auth_response(auth, &event, &mut answered)["response"].clone();
+        assert_eq!(
+            respond(Some(&creds), event("Proxy", "a")),
+            "ProvideCredentials"
+        );
+        assert_eq!(respond(Some(&creds), event("Proxy", "a")), "CancelAuth");
+        assert_eq!(
+            respond(Some(&creds), event("Proxy", "b")),
+            "ProvideCredentials"
+        );
+        assert_eq!(respond(Some(&creds), event("Server", "c")), "Default");
+        assert_eq!(respond(None, event("Proxy", "d")), "Default");
+        assert_eq!(answered.len(), 2);
     }
 
     #[tokio::test]

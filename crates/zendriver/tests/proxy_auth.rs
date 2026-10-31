@@ -6,6 +6,8 @@
 
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use zendriver::Browser;
 use zendriver_testkit::{
     FixtureServer, PROXY_PASSWORD, PROXY_USER, SITE_A, eval, launch_for_test, load,
@@ -70,12 +72,14 @@ async fn rejected_proxy_credentials_are_tried_once() {
         .expect("the navigation never finished")
         .expect("wait_for_load");
     tokio::time::sleep(Duration::from_secs(1)).await;
+    // One without credentials, one with the wrong ones, then no more.
     let tries = server.requests_to("/plain");
-    assert!(
-        tries.len() <= 2,
-        "{} requests reached the proxy: {tries:?}",
-        tries.len()
-    );
+    let sent: Vec<_> = tries
+        .iter()
+        .map(|r| r.header("proxy-authorization"))
+        .collect();
+    let wrong = format!("Basic {}", BASE64.encode(format!("{PROXY_USER}:wrong")));
+    assert_eq!(sent, [None, Some(wrong.as_str())], "{tries:?}");
     assert_ne!(eval(&tab, "document.title").await, "Plain");
     browser.close().await;
 }

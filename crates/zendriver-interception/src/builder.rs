@@ -135,7 +135,9 @@ impl<'tab> InterceptBuilder<'tab> {
     /// credentials once: if the proxy challenges it again, which means it
     /// rejected them, the challenge is cancelled and the request fails. A
     /// challenge from the server (HTTP 401) gets `Default`, never these
-    /// credentials, so a site can't collect them.
+    /// credentials, so a site can't collect them. To log into a site's own
+    /// HTTP auth, add an `Authorization` header to its requests with
+    /// [`modify_request`](Self::modify_request).
     ///
     /// Compose with rules: an `InterceptBuilder` configured with
     /// `handle_proxy_auth` and `block` / `redirect` / `respond` rules
@@ -345,7 +347,7 @@ impl<'tab> InterceptBuilder<'tab> {
             // 1. Rules need Chrome to actually pause requests — without a
             //    pattern `Fetch.enable` attaches to nothing and every rule is a
             //    silent no-op.
-            // 2. `handleAuthRequests: true` (the proxy / HTTP-auth path):
+            // 2. `handleAuthRequests: true` (the proxy-auth path):
             //    Chrome (~M132+) REJECTS `Fetch.enable { patterns: [],
             //    handleAuthRequests: true }` with CDP error -32602 "Can't
             //    specify empty patterns with handleAuth set". Older Chrome
@@ -699,7 +701,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_auth_scoped_to_document_composes_with_rules() {
+    async fn handle_proxy_auth_scoped_to_document_composes_with_rules() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
 

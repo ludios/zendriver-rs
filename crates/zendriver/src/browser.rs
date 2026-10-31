@@ -679,7 +679,8 @@ pub struct BrowserBuilder {
     /// credentials), set via [`BrowserBuilder::proxy`]. Emitted as
     /// `--proxy-server=` at launch and mirrored by `geo_auto`'s probe.
     pub(crate) proxy: Option<crate::proxy::ParsedProxy>,
-    /// Optional `(username, password)` for proxy / HTTP basic-auth handling.
+    /// Optional `(username, password)` to answer the proxy's auth
+    /// challenges with (never a site's).
     /// Only honored when the `interception` feature is enabled; when present
     /// at launch, an interception actor is spawned on the main tab session
     /// that auto-replies to `Fetch.authRequired`. See cdpdriver/zendriver#208.

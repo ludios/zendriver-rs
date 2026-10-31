@@ -555,6 +555,18 @@ excluded = "crate-root re-export of the above builder; same non-goal"
 api = "zendriver::browser::BrowserBuilder::proxy"
 covered = "browser_open.proxy"
 
+# ── InterceptBuilder::handle_proxy_auth (renamed from handle_auth) ──────────
+# Answers only a proxy's challenges now, once per challenge. Not in the
+# zendriver baseline (only the `InterceptBuilder` re-export is), so recorded
+# by hand: browser_open's proxy credentials reach it via BrowserBuilder.
+[[entry]]
+api = "zendriver_interception::builder::InterceptBuilder::handle_proxy_auth"
+covered = "browser_open.proxy"
+
+[[entry]]
+api = "zendriver_interception::builder::InterceptBuilder::handle_proxy_auth_scoped_to_document"
+excluded = "Document-only variant of handle_proxy_auth; browser_open wires the match-all one"
+
 [[entry]]
 api = "zendriver::browser::BrowserBuilder::geo_auto"
 covered = "browser_open.geo_auto / browser_open.geo_endpoint"
