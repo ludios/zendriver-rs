@@ -15,4 +15,21 @@ properties:
     description: "When `true`, include the trimmed page HTML in the response."
     type: boolean
     default: false
+  wait_for:
+    description: "Post-navigation wait strategy. Default: `load`."
+    $ref: "#/$defs/WaitFor"
+    default: load
 additionalProperties: false
+$defs:
+  WaitFor:
+    description: "Wait strategy options for `browser_goto`, `browser_back`,\n`browser_forward` and `browser_reload`."
+    oneOf:
+      - description: "Wait for the page to finish loading (its `load` event, or the end of\na navigation that has none, like a back-forward-cache restore)."
+        type: string
+        const: load
+      - description: Wait until the network has been idle for ~500ms (5s outer timeout).
+        type: string
+        const: idle
+      - description: Return immediately after the navigation request is dispatched.
+        type: string
+        const: none

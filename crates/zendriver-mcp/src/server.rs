@@ -128,7 +128,7 @@ impl ZendriverServer {
     /// Step back one entry in the current tab's history.
     #[tool(
         name = "browser_back",
-        description = "Step back one entry in the current tab's history, and wait for that page's `load` event."
+        description = "Step back one entry in the current tab's history. `wait_for` as for `browser_goto` (default `load`: wait for the page to finish loading)."
     )]
     pub async fn browser_back(
         &self,
@@ -140,7 +140,7 @@ impl ZendriverServer {
     /// Step forward one entry in the current tab's history.
     #[tool(
         name = "browser_forward",
-        description = "Step forward one entry in the current tab's history, and wait for that page's `load` event."
+        description = "Step forward one entry in the current tab's history. `wait_for` as for `browser_goto` (default `load`: wait for the page to finish loading)."
     )]
     pub async fn browser_forward(
         &self,
@@ -154,7 +154,7 @@ impl ZendriverServer {
     /// Reload the current tab.
     #[tool(
         name = "browser_reload",
-        description = "Reload the current tab, and wait for its `load` event. Set `ignore_cache: true` for a hard reload that bypasses the HTTP cache. `return_snapshot: true` includes the trimmed page HTML."
+        description = "Reload the current tab. `wait_for` as for `browser_goto` (default `load`: wait for the page to finish loading). Set `ignore_cache: true` for a hard reload that bypasses the HTTP cache. `return_snapshot: true` includes the trimmed page HTML."
     )]
     pub async fn browser_reload(
         &self,

@@ -84,11 +84,13 @@ pub struct GotoInput {
     pub return_snapshot: bool,
 }
 
-/// Wait strategy options for `browser_goto`.
+/// Wait strategy options for `browser_goto`, `browser_back`,
+/// `browser_forward` and `browser_reload`.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitFor {
-    /// Wait for the `load` event to fire.
+    /// Wait for the page to finish loading (its `load` event, or the end of
+    /// a navigation that has none, like a back-forward-cache restore).
     #[default]
     Load,
     /// Wait until the network has been idle for ~500ms (5s outer timeout).
@@ -101,17 +103,14 @@ const fn default_wait() -> WaitFor {
     WaitFor::Load
 }
 
-/// Navigate the current tab to a URL.
-pub async fn goto(
-    state: Arc<Mutex<SessionState>>,
-    input: GotoInput,
+/// Wait as `wait_for` says for the navigation that `tab` last started, then
+/// report the page it reached.
+async fn waited_output(
+    tab: &zendriver::Tab,
+    wait_for: WaitFor,
+    return_snapshot: bool,
 ) -> Result<NavOutput, ErrorData> {
-    let s = state.lock().await;
-    let tab = current_tab(&s).await?;
-    tab.goto(&input.url)
-        .await
-        .map_err(|e| map_error(McpServerError::from(e)))?;
-    match input.wait_for {
+    match wait_for {
         WaitFor::Load => tab
             .wait_for_load()
             .await
@@ -122,7 +121,20 @@ pub async fn goto(
             .map_err(|e| map_error(McpServerError::from(e)))?,
         WaitFor::None => {}
     }
-    nav_output(&tab, input.return_snapshot).await
+    nav_output(tab, return_snapshot).await
+}
+
+/// Navigate the current tab to a URL.
+pub async fn goto(
+    state: Arc<Mutex<SessionState>>,
+    input: GotoInput,
+) -> Result<NavOutput, ErrorData> {
+    let s = state.lock().await;
+    let tab = current_tab(&s).await?;
+    tab.goto(&input.url)
+        .await
+        .map_err(|e| map_error(McpServerError::from(e)))?;
+    waited_output(&tab, input.wait_for, input.return_snapshot).await
 }
 
 // ---------- browser_back / _forward / _reload -----------------------------
@@ -131,24 +143,15 @@ pub async fn goto(
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryInput {
+    /// Post-navigation wait strategy. Default: `load`.
+    #[serde(default = "default_wait")]
+    pub wait_for: WaitFor,
     /// When `true`, include the trimmed page HTML in the response.
     #[serde(default)]
     pub return_snapshot: bool,
 }
 
-/// Wait for the navigation that `tab`'s last history step or reload
-/// started, then report the page it reached.
-async fn loaded_output(
-    tab: &zendriver::Tab,
-    return_snapshot: bool,
-) -> Result<NavOutput, ErrorData> {
-    tab.wait_for_load()
-        .await
-        .map_err(|e| map_error(McpServerError::from(e)))?;
-    nav_output(tab, return_snapshot).await
-}
-
-/// Step back one entry in the tab's history and wait for the page to load.
+/// Step back one entry in the tab's history, and wait as `wait_for` says.
 pub async fn back(
     state: Arc<Mutex<SessionState>>,
     input: HistoryInput,
@@ -158,11 +161,11 @@ pub async fn back(
     tab.back()
         .await
         .map_err(|e| map_error(McpServerError::from(e)))?;
-    loaded_output(&tab, input.return_snapshot).await
+    waited_output(&tab, input.wait_for, input.return_snapshot).await
 }
 
-/// Step forward one entry in the tab's history and wait for the page to
-/// load.
+/// Step forward one entry in the tab's history, and wait as `wait_for`
+/// says.
 pub async fn forward(
     state: Arc<Mutex<SessionState>>,
     input: HistoryInput,
@@ -172,7 +175,7 @@ pub async fn forward(
     tab.forward()
         .await
         .map_err(|e| map_error(McpServerError::from(e)))?;
-    loaded_output(&tab, input.return_snapshot).await
+    waited_output(&tab, input.wait_for, input.return_snapshot).await
 }
 
 /// Arg block for `browser_reload`.
@@ -183,13 +186,16 @@ pub struct ReloadInput {
     /// (normal soft reload).
     #[serde(default)]
     pub ignore_cache: bool,
+    /// Post-navigation wait strategy. Default: `load`.
+    #[serde(default = "default_wait")]
+    pub wait_for: WaitFor,
     /// When `true`, include the trimmed page HTML in the response.
     #[serde(default)]
     pub return_snapshot: bool,
 }
 
-/// Reload the current page, optionally bypassing the cache, and wait for it
-/// to load.
+/// Reload the current page, optionally bypassing the cache, and wait as
+/// `wait_for` says.
 pub async fn reload(
     state: Arc<Mutex<SessionState>>,
     input: ReloadInput,
@@ -208,7 +214,7 @@ pub async fn reload(
             .await
             .map_err(|e| map_error(McpServerError::from(e)))?;
     }
-    loaded_output(&tab, input.return_snapshot).await
+    waited_output(&tab, input.wait_for, input.return_snapshot).await
 }
 
 /// Document-ready milestone `browser_wait_for_load` can target.

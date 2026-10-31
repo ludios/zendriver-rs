@@ -23,9 +23,9 @@ required:
   - url
 $defs:
   WaitFor:
-    description: "Wait strategy options for `browser_goto`."
+    description: "Wait strategy options for `browser_goto`, `browser_back`,\n`browser_forward` and `browser_reload`."
     oneOf:
-      - description: "Wait for the `load` event to fire."
+      - description: "Wait for the page to finish loading (its `load` event, or the end of\na navigation that has none, like a back-forward-cache restore)."
         type: string
         const: load
       - description: Wait until the network has been idle for ~500ms (5s outer timeout).
