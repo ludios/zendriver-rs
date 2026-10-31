@@ -1,5 +1,7 @@
 # zendriver-rs — project instructions
 
+For guidance on how to program and make commits, @AGENTS.md takes precedence over anything here.
+
 ## Before every push (REQUIRED)
 
 CI fails the PR on formatting or lint regressions, so run these locally and fix
