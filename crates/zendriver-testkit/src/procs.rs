@@ -25,8 +25,13 @@ use sysinfo::{
 };
 use zendriver::{Browser, CallError};
 
-/// How often [`ChromeTree::wait_gone`] looks again.
+/// How often [`ChromeTree::wait_gone`] and [`ChromeTree::launched_by`] look
+/// again.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How long [`ChromeTree::launched_by`] waits for the browser process to
+/// appear.
+const LAUNCHED_WITHIN: Duration = Duration::from_secs(10);
 
 /// `(type, pid)` of each process Chrome reports for itself.
 async fn chrome_process_ids(browser: &Browser) -> Result<Vec<(String, Pid)>, CallError> {
@@ -138,7 +143,39 @@ impl ChromeTree {
             .into_iter()
             .find_map(|(kind, pid)| (kind == "browser").then_some(pid))
             .expect("SystemInfo.getProcessInfo lists no browser process");
-        let system = scan().await;
+        Self::of_browser_process(&scan().await, browser_pid)
+    }
+
+    /// Identify the one Chrome that process `parent` launched, for a Chrome
+    /// with no [`Browser`] handle in this process, such as an MCP server's.
+    /// Its browser process is the child of `parent` that has a
+    /// `--user-data-dir` switch and no `--type`. Panics unless exactly one
+    /// such child is running within a few seconds.
+    pub async fn launched_by(parent: u32) -> Self {
+        let parent = Pid::from_u32(parent);
+        let deadline = tokio::time::Instant::now() + LAUNCHED_WITHIN;
+        loop {
+            let system = scan().await;
+            let browsers: Vec<Pid> = processes(&system)
+                .filter(|p| p.parent() == Some(parent))
+                .filter(|p| {
+                    let line = command_line(p);
+                    user_data_dir_switch(&line).is_some() && !line.contains(" --type=")
+                })
+                .map(Process::pid)
+                .collect();
+            match browsers[..] {
+                [browser_pid] => return Self::of_browser_process(&system, browser_pid),
+                [] if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                }
+                _ => panic!("expected one Chrome launched by process {parent}, found {browsers:?}"),
+            }
+        }
+    }
+
+    /// The tree whose browser process is `browser_pid`.
+    fn of_browser_process(system: &System, browser_pid: Pid) -> Self {
         let process = system
             .process(browser_pid)
             .unwrap_or_else(|| panic!("Chrome browser process {browser_pid} isn't running"));
@@ -154,7 +191,7 @@ impl ChromeTree {
             user_data_dir_switch: switch.to_string(),
             seen: HashSet::new(),
         };
-        tree.remember(&system, [browser_pid]);
+        tree.remember(system, [browser_pid]);
         tree
     }
 
@@ -170,6 +207,19 @@ impl ChromeTree {
                 Vec::new()
             }
         };
+        self.record(listed).await
+    }
+
+    /// [`ChromeTree::snapshot`] for a Chrome with no [`Browser`] handle in
+    /// this process: records only the processes the command lines tie to
+    /// this Chrome, which on Linux is all of them.
+    pub async fn snapshot_by_command_line(&mut self) -> usize {
+        self.record(Vec::new()).await
+    }
+
+    /// Record `listed` and every process the command lines tie to this
+    /// Chrome; return how many of this Chrome's processes are alive.
+    async fn record(&mut self, listed: Vec<Pid>) -> usize {
         let system = scan().await;
         self.remember(&system, listed);
         self.survivors(&system).len()
@@ -191,6 +241,15 @@ impl ChromeTree {
                 return Err(survivors.into_iter().map(describe).collect());
             }
             tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Kill (SIGKILL) every process of this Chrome that's still running, so
+    /// that a test which found survivors doesn't leave them behind.
+    pub async fn kill_survivors(&self) {
+        let system = scan().await;
+        for process in self.survivors(&system) {
+            process.kill();
         }
     }
 
