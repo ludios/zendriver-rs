@@ -1031,10 +1031,10 @@ impl Tab {
     /// # Errors
     ///
     /// Returns [`ZendriverError::Timeout`] when the main frame is still
-    /// loading after 30s; [`ZendriverError::Navigation`] if the page's
-    /// socket dies first (Chrome closed it, or crashed). Shutting the
-    /// connection down from this side (closing the `Browser`) doesn't end
-    /// the wait early.
+    /// loading after 30s; [`ZendriverError::Navigation`] if Chrome closes
+    /// the tab's connection first (for example because Chrome exited). A
+    /// connection that zendriver itself shuts down cleanly doesn't end the
+    /// wait early: it runs to the timeout.
     ///
     /// # Examples
     ///
