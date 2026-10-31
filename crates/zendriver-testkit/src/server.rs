@@ -136,23 +136,39 @@ async fn plain(headers: HeaderMap, params: Params) -> Html<String> {
     let title = params.get("title").map_or("Plain", String::as_str);
     let heading = escape_html(title);
     let host = escape_html(&host_and_port(&headers).0);
+    let link = escape_html(
+        params
+            .get("link")
+            .map_or("/plain?title=Linked", String::as_str),
+    );
     page(
         title,
         "",
         &format!(
             r#"<h1 id="heading">{heading}</h1>
 <p id="host">{host}</p>
-<a id="link" href="/plain?title=Linked">Linked page</a>"#
+<a id="link" href="{link}">Linked page</a>"#
         ),
     )
 }
 
 async fn slow_load(params: Params) -> Html<String> {
+    tokio::time::sleep(Duration::from_millis(number(&params, "first_byte_ms", 0))).await;
     let delay_ms = number(&params, "delay_ms", 1000);
     let iframe = if number(&params, "iframe", 0) != 0 {
         r#"<iframe id="child" name="child" src="/frame-child"></iframe>"#
     } else {
         ""
+    };
+    let image = format!("/slow-resource?delay_ms={delay_ms}");
+    // Set while parsing, so the image still holds up `load`.
+    let image = if number(&params, "fresh", 0) != 0 {
+        format!(
+            r#"<img id="slow" width="1" height="1">
+<script>document.getElementById('slow').src = '{image}&nonce=' + Math.random();</script>"#
+        )
+    } else {
+        format!(r#"<img id="slow" src="{image}" width="1" height="1">"#)
     };
     page(
         "Slow load",
@@ -160,7 +176,7 @@ async fn slow_load(params: Params) -> Html<String> {
         &format!(
             r#"<h1 id="heading">Slow load</h1>
 {iframe}
-<img id="slow" src="/slow-resource?delay_ms={delay_ms}" width="1" height="1">"#
+{image}"#
         ),
     )
 }
@@ -176,14 +192,17 @@ async fn slow_resource(params: Params) -> impl IntoResponse {
     )
 }
 
-async fn form() -> Html<String> {
+async fn form(params: Params) -> Html<String> {
+    let action = escape_html(params.get("action").map_or("/form-result", String::as_str));
     page(
         "Form",
         "",
-        r#"<form id="form" action="/form-result" method="get">
+        &format!(
+            r#"<form id="form" action="{action}" method="get">
 <input id="q" name="q" autofocus>
 <button id="submit" type="submit">Search</button>
-</form>"#,
+</form>"#
+        ),
     )
 }
 
@@ -459,10 +478,10 @@ fn canned_routes() -> Router {
 ///
 /// | Route | What it is |
 /// |-------|------------|
-/// | `/plain?title=T` | A page titled `T` (default `Plain`) with `#heading`, `#host`, and a `#link` to `/plain?title=Linked` |
-/// | `/slow-load?delay_ms=N&iframe=1` | Its `#slow` image takes `N` ms (default 1000), so `load` fires late; `iframe=1` adds a fast `#child` iframe that finishes first |
+/// | `/plain?title=T&link=L` | A page titled `T` (default `Plain`) with `#heading`, `#host`, and a `#link` to `L` (default `/plain?title=Linked`) |
+/// | `/slow-load?delay_ms=N&iframe=1&first_byte_ms=F&fresh=1` | Its `#slow` image takes `N` ms (default 1000), so `load` fires late; `iframe=1` adds a fast `#child` iframe that finishes first; the document itself is sent after `F` ms (default 0); `fresh=1` gives the image a new URL on every load, so no cache can answer it, not even on back/forward or reload |
 /// | `/slow-resource?delay_ms=N` | The image behind `/slow-load`: a GIF sent after `N` ms, `no-store` |
-/// | `/form` | `#form` with input `#q` that GETs `/form-result` on submit (Enter or `#submit`) |
+/// | `/form?action=A` | `#form` with input `#q` that GETs `A` (default `/form-result`) on submit (Enter or `#submit`); a GET form replaces `A`'s query with `q=...` |
 /// | `/form-result?q=V` | Titled `Form result`; shows `V` in `#q` |
 /// | `/redirect/N` | `N` (at least 1) 302s, then `/plain?title=Redirected` |
 /// | `/iframe-same-origin` | `#child` iframe of `/frame-child` on the same origin |
