@@ -257,9 +257,12 @@ async fn check(profile: &str, builder: BrowserBuilder) {
     let results = eval(&tab, &invariants_js()).await;
     browser.close().await;
 
+    // A missing result (say, a body that returns undefined, which JSON
+    // drops) counts as broken, not as holding.
+    let missing = Value::String("no result".to_string());
     let broken: BTreeMap<&str, &Value> = INVARIANTS
         .iter()
-        .map(|(name, _)| (*name, &results[name]))
+        .map(|(name, _)| (*name, results.get(name).unwrap_or(&missing)))
         .filter(|(_, result)| !result.is_null())
         .collect();
     let known: Vec<&str> = KNOWN_BUGS
