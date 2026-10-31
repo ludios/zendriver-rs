@@ -128,5 +128,12 @@ MCP features (plus `fingerprints`).
 Real-Chrome tests share their fixtures through `zendriver-testkit`
 (unpublished, dev-only): `FixtureServer` (canned local pages, with `a.test` /
 `b.test` as two sites), `launch_for_test` (headless, captured logs, and a
-check on close that Chrome's whole process tree exited), and timing helpers.
-Prefer it to a hand-rolled `Browser::builder()` + `MockServer`.
+check on close that Chrome's whole process tree exited), timing helpers, and
+the stealth consistency probe. Prefer it to a hand-rolled
+`Browser::builder()` + `MockServer`. `zendriver-mcp`'s real-Chrome tests
+drive the built server through `tests/support/`.
+
+A real-Chrome test that reproduces an open bug is named `known_bug_*` and
+`#[ignore]`d, with the bug in the reason; the fix deletes both. The stealth
+tests (`stealth_probe.rs`, `stealth_conformance.rs`) list known-broken cases
+in a `KNOWN_BUGS` table instead, and fail when a listed case starts passing.
