@@ -32,8 +32,9 @@ clicks). The error message includes which check failed.
 Common causes:
 
 - **Visibility** — element has `display: none`, `visibility: hidden`,
-  or zero bounding box. Use `tab.find().css("...").visible_only()` to
-  skip these during the query.
+  or zero bounding box, or scrolling can't bring it into the viewport
+  (e.g. `left: -9999px`). Use `tab.find().css("...").visible_only()` to
+  skip the first kind during the query.
 - **Hit-test failure** — a modal overlay sits above the element. Close
   the overlay first, or pass `ClickOptions { force: true, ..default() }`
   to bypass the check.

@@ -21,6 +21,14 @@ one of which already exists.
 
 Unblocks the `check_visible` split, its rustdoc, and the three book pages that were waiting.
 
+**Superseded in this fork (2026-10-31).** `visible_only` now means rendered too, the same
+predicate as `is_visible`; only the actionability gate, which scrolls first, requires the
+viewport. A find poll can't scroll, so a viewport filter made `find_all().visible_only()`
+silently return only the on-screen rows, and it made the MCP selector tools (which default
+`visible_only` to true) fail on anything below the fold. A "reachable by scrolling" test was
+tried and dropped: it misjudged nested scroll containers, RTL pages, `overflow-x: hidden`
+and quirks mode.
+
 ## 2. `Frame::name()` / `Frame::id()` may break — APPROVED
 
 Make `FrameInner::name` and `frame_id` interior-mutable and let `Frame::name()` become an

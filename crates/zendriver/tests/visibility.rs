@@ -1,11 +1,13 @@
-//! What counts as visible, against real Chrome. For `visible_only`:
-//! rendered, and somewhere the page can scroll to, in the viewport or not.
-//! For `is_visible`: rendered, and in the viewport now.
+//! What counts as visible, against real Chrome. `visible_only` and
+//! `is_visible`: rendered, wherever the element is. An action: also in the
+//! viewport, after scrolling the element there.
 
 #![cfg(feature = "integration-tests")]
 #![allow(clippy::panic)]
 
-use zendriver::{Browser, Element};
+use std::time::Duration;
+
+use zendriver::{Browser, Element, ZendriverError};
 use zendriver_testkit::{FixtureServer, launch_for_test, load};
 
 async fn id(el: &Element) -> String {
@@ -16,7 +18,7 @@ async fn id(el: &Element) -> String {
 }
 
 #[tokio::test]
-async fn visible_only_keeps_below_the_fold_but_not_off_the_page() {
+async fn visible_only_and_is_visible_ignore_where_the_element_is() {
     let server = FixtureServer::start().await;
     let browser = launch_for_test(Browser::builder()).await;
     let tab = browser.main_tab();
@@ -33,18 +35,41 @@ async fn visible_only_keeps_below_the_fold_but_not_off_the_page() {
     for el in &visible {
         ids.push(id(el).await);
     }
-    assert_eq!(ids, ["below"], "visible_only(true)");
+    assert_eq!(ids, ["off-page", "below", "skipped"], "visible_only(true)");
 
-    // `is_visible` is about the viewport, now.
-    let below = tab.find().css("#below").one().await.expect("#below");
-    assert!(
-        !below.is_visible().await.expect("is_visible"),
-        "#below before scrolling"
-    );
-    below.scroll_into_view().await.expect("scroll_into_view");
-    assert!(
-        below.is_visible().await.expect("is_visible"),
-        "#below after scrolling"
-    );
+    let all = tab.find_all().css("button").many().await.expect("buttons");
+    for el in &all {
+        let id = id(el).await;
+        let visible = el.is_visible().await.expect("is_visible");
+        assert_eq!(visible, ids.contains(&id), "is_visible() of #{id}");
+    }
+    browser.close().await;
+}
+
+#[tokio::test]
+async fn an_action_needs_the_element_in_the_viewport() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url("127.0.0.1", "/below-fold")).await;
+
+    // Scrolling brings both into the viewport; `#skipped`'s section renders
+    // once it's there.
+    for id in ["#below", "#skipped"] {
+        let el = tab.find().css(id).one().await.expect(id);
+        el.click()
+            .await
+            .unwrap_or_else(|e| panic!("click {id}: {e}"));
+    }
+
+    // Scrolling can't reach `left: -9999px`.
+    let off_page = tab.find().css("#off-page").one().await.expect("#off-page");
+    let res = tokio::time::timeout(Duration::from_secs(10), off_page.click()).await;
+    match res {
+        Ok(Err(ZendriverError::NotActionable(_, reason))) => {
+            assert!(reason.contains("visible"), "{reason}");
+        }
+        other => panic!("expected NotActionable for #off-page, got {other:?}"),
+    }
     browser.close().await;
 }

@@ -21,20 +21,18 @@
 //! not execute it, and a mutation that rewrites a clause into something
 //! equally well-formed but wrong passes them.
 //!
-//! The live-Chrome tier reaches part of that, and does not gate a merge.
-//! `tests/find_visible_only.rs` (gated on the `integration-tests` feature)
-//! drives `visible_only(true)` against a real browser, so `check_visible`'s
-//! `display: none` path does execute there — but every test in that file is
-//! `#[ignore]`d, and the per-PR integration job runs plain
-//! `cargo nextest run -E 'kind(test)'` with no `--run-ignored`. So it runs
-//! only in the scheduled `nightly-ignored-tests` lane, which carries
-//! `continue-on-error: true`.
+//! The live-Chrome tests reach part of that. `tests/visibility.rs` runs per
+//! PR and executes `check_visible` for both kinds of caller: the opacity
+//! walk (through a slot and a shadow host), `content-visibility: auto`, and
+//! the gate's viewport clause. `tests/element_world_regressions.rs` covers
+//! the viewport clause in quirks mode and under a spoofed `innerHeight`.
+//! `tests/find_visible_only.rs` covers `visible_only` with frames, but its
+//! tests are `#[ignore]`d, so they run only in the scheduled
+//! `nightly-ignored-tests` lane, which carries `continue-on-error: true`.
 //!
-//! Nothing else is covered behaviorally: the opacity, viewport and
-//! quirks-mode clauses are pinned only by the source-text assertions below,
-//! and `check_stable` / `check_enabled` / `check_receives_pointer` have no
-//! live fixture at all. Widening any of those clauses means writing the
-//! fixture that would catch the mistake; do not assume one is waiting.
+//! `check_stable` / `check_enabled` / `check_receives_pointer` have no live
+//! fixture at all. Widening any of those means writing the fixture that
+//! would catch the mistake; do not assume one is waiting.
 
 use std::time::Duration;
 
@@ -129,36 +127,38 @@ impl ActionabilityCheck {
 /// Where [`check_visible`] requires an element to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Within {
-    /// Anywhere the page can scroll to: an element below the fold counts,
-    /// one positioned outside the page (e.g. `left: -9999px`) doesn't.
-    /// For finding elements.
-    Page,
-    /// Inside the layout viewport now: for `Element::is_visible`, and for
-    /// an action after it has scrolled the element into view.
+    /// No position test: an element below the fold, scrolled out of view
+    /// inside a container, or placed off the page (`left: -9999px`) counts.
+    /// For finding elements and `Element::is_visible`, which can't scroll.
+    Anywhere,
+    /// Inside the layout viewport now: for an action, after it has scrolled
+    /// the element into view.
     Viewport,
 }
 
-/// `true` iff the element is rendered, and placed `within` the page or the
-/// viewport. An element is visible when all of the following hold:
+/// `true` iff the element is rendered, and placed `within` the viewport
+/// when asked. An element is visible when all of the following hold:
 ///
 /// - it is attached to the document (`isConnected`);
 /// - it passes the platform's own `Element.checkVisibility` test with
-///   `opacityProperty` + `visibilityProperty` + `contentVisibilityAuto`,
-///   which covers `display: none`, `visibility: hidden` / `collapse`,
-///   `content-visibility`, and `opacity: 0` on the element **or any
-///   ancestor**;
+///   `opacityProperty` + `visibilityProperty`, which covers `display: none`,
+///   `content-visibility: hidden`, `visibility: hidden` / `collapse`, and
+///   `opacity: 0` on the element **or any ancestor**. Only for
+///   [`Within::Viewport`] does it also pass `contentVisibilityAuto`, which
+///   rejects content that a `content-visibility: auto` section skips
+///   rendering while it is off screen;
 /// - it has a positive bounding box;
-/// - its bounding box **intersects** the viewport (for [`Within::Viewport`])
-///   or the page's scrollable area (for [`Within::Page`]) — any overlap
-///   counts, so a partially-scrolled-in element still passes;
+/// - for [`Within::Viewport`], its bounding box **intersects** the viewport
+///   — any overlap counts, so a partially-scrolled-in element still passes;
 /// - its *effective* opacity — the product of its own computed opacity and
-///   every ancestor's — is at least 1%.
+///   that of every ancestor in the flat tree (through slots and shadow
+///   hosts) — is at least 1%.
 ///
 /// The last two are the reason this isn't just a `checkVisibility` call.
 /// `checkVisibility` only rejects an *exact* `opacity: 0`, so the standard
 /// `opacity: 0.001` scraping honeypot passes it while being invisible to a
 /// human; and `checkVisibility` says nothing about where the element sits
-/// relative to the viewport or the page.
+/// relative to the viewport.
 ///
 /// Requires Chrome 121+, not 105+. `Element.checkVisibility` itself shipped
 /// in 105, but the three option names passed below (`opacityProperty`,
@@ -173,7 +173,7 @@ pub(crate) enum Within {
 /// effective-opacity loop below is independent of that and still holds.
 ///
 /// Live callers: the `visible_only` filter in `FindBuilder`/`FindAllBuilder`
-/// (`query::mod`), with [`Within::Page`]; `Element::is_visible` and the
+/// (`query::mod`) and `Element::is_visible`, with [`Within::Anywhere`]; the
 /// actionability gate ([`wait_actionable`]), with [`Within::Viewport`].
 pub(crate) async fn check_visible(el: &Element, within: Within) -> Result<bool> {
     let js = r#"
@@ -185,28 +185,17 @@ pub(crate) async fn check_visible(el: &Element, within: Within) -> Result<bool> 
             // ancestor — none of which the hand-rolled predecessor caught, since it
             // only ever read the element's own computed style, and its layout probe
             // reported a false negative for `position: fixed`.
+            // `contentVisibilityAuto` only after scrolling: before it, a
+            // `content-visibility: auto` section below the fold is skipped
+            // and would read as hidden.
             if (!el.checkVisibility({
                 opacityProperty: true,
                 visibilityProperty: true,
-                contentVisibilityAuto: true
+                contentVisibilityAuto: inViewport
             })) return false;
 
             const rect = el.getBoundingClientRect();
             if (rect.width <= 0 || rect.height <= 0) return false;
-
-            // Within the page: the bbox, moved from viewport to page
-            // coordinates, must overlap the area the page scrolls over.
-            // `scrollingElement` is `documentElement` in standards mode and
-            // `body` in quirks mode, and none of its fields are spoofed.
-            const page = document.scrollingElement;
-            if (!inViewport && page) {
-                const left = rect.left + page.scrollLeft;
-                const top = rect.top + page.scrollTop;
-                if (left + rect.width <= 0 || top + rect.height <= 0
-                    || left >= page.scrollWidth || top >= page.scrollHeight) {
-                    return false;
-                }
-            }
 
             // On-screen test: the bbox must overlap the viewport by at least a
             // sliver. `getBoundingClientRect` is already viewport-relative, so
@@ -269,8 +258,11 @@ pub(crate) async fn check_visible(el: &Element, within: Within) -> Result<bool> 
             // Done last — `getComputedStyle` per ancestor is the priciest step here.
             // Opacity is in [0, 1], so the running product only ever decreases and
             // cannot climb back over the threshold: once it is under, stop walking.
+            // The walk follows the flat tree, as rendering does: a slotted
+            // element's parent is its slot, and a shadow root's is its host.
             let effective = 1;
-            for (let node = el; node; node = node.parentElement) {
+            for (let node = el; node;
+                 node = node.assignedSlot || node.parentElement || node.getRootNode().host) {
                 const own = parseFloat(getComputedStyle(node).opacity);
                 if (Number.isFinite(own)) effective *= own;
                 if (effective < 0.01) return false;
@@ -437,7 +429,7 @@ pub(crate) async fn wait_actionable(
 mod tests {
     use super::*;
     use crate::tab::Tab;
-    use crate::test_support::{js_params, serve_call, serve_call_js};
+    use crate::test_support::{js_params, serve_call};
     use serde_json::Value;
     use zendriver_transport::SessionHandle;
     use zendriver_transport::testing::MockConnection;
@@ -449,9 +441,9 @@ mod tests {
         js.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
-    /// Drive `check_visible` against a mock connection, answer its probe with
-    /// `value`, and hand back the JS source the probe actually sent plus the
-    /// resolved verdict.
+    /// Drive `check_visible` (for the viewport) against a mock connection,
+    /// answer its probe with `value`, and hand back the JS source the probe
+    /// actually sent plus the resolved verdict.
     async fn probe_check_visible(value: bool) -> (String, bool) {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
@@ -460,10 +452,15 @@ mod tests {
 
         let fut = tokio::spawn(async move { check_visible(&el, Within::Viewport).await });
 
-        let js = serve_call_js(&mut mock, json!({ "value": value, "type": "boolean" })).await;
+        let call = serve_call(&mut mock, json!({ "value": value, "type": "boolean" })).await;
+        assert_eq!(
+            call["arguments"][1]["value"], true,
+            "Within::Viewport must ask the probe for the viewport test"
+        );
 
         let verdict = fut.await.unwrap().unwrap();
         conn.shutdown();
+        let js = call["functionDeclaration"].as_str().unwrap().to_string();
         (js, verdict)
     }
 
@@ -472,18 +469,21 @@ mod tests {
         let (js, verdict) = probe_check_visible(true).await;
         assert!(verdict, "a `true` probe result must resolve to visible");
         assert!(js.contains("checkVisibility"), "{js}");
-        // The three flags are what make `checkVisibility` cover ancestors —
-        // without them it only reports `display: none`.
+        // The flags are what make `checkVisibility` cover ancestors —
+        // without them it only reports `display: none`. A skipped
+        // `content-visibility: auto` section counts as hidden only once the
+        // element should be on screen.
         assert!(js.contains("opacityProperty: true"), "{js}");
         assert!(js.contains("visibilityProperty: true"), "{js}");
-        assert!(js.contains("contentVisibilityAuto: true"), "{js}");
+        assert!(js.contains("contentVisibilityAuto: inViewport"), "{js}");
     }
 
     #[tokio::test]
     async fn probe_source_tests_viewport_intersection() {
         let (js, _) = probe_check_visible(true).await;
-        // `visible_only(true)` promises offscreen candidates are filtered
-        // out; that requires comparing the bbox against the viewport box.
+        // An action requires the element on screen after scrolling it
+        // there; that requires comparing the bbox against the viewport box.
+        assert!(js.contains("inViewport"), "{js}");
         assert!(js.contains("rect.right <= 0"), "{js}");
         assert!(js.contains("rect.bottom <= 0"), "{js}");
         assert!(js.contains("rect.left >= vw"), "{js}");
@@ -537,7 +537,10 @@ mod tests {
         // Honeypot guard: walk the ancestor chain and compare the product
         // against a non-zero floor, so `opacity: 0.001` (self OR ancestor)
         // reads as hidden.
-        assert!(js.contains("node.parentElement"), "{js}");
+        assert!(
+            js.contains("node.assignedSlot || node.parentElement || node.getRootNode().host"),
+            "the walk must follow the flat tree: {js}"
+        );
         assert!(js.contains("getComputedStyle(node).opacity"), "{js}");
         assert!(js.contains("effective *= own"), "{js}");
         // The threshold test sits *inside* the walk: the product only ever
@@ -565,26 +568,6 @@ mod tests {
     /// Not a source pin: this one covers the Rust side of `check_visible`,
     /// namely that it reads the probe's verdict out of `result.value` rather
     /// than defaulting to the `unwrap_or(false)` fallback.
-    /// `Within::Viewport` asks the probe for the viewport test, and the
-    /// probe can test the page's scrollable area instead.
-    #[tokio::test]
-    async fn probe_source_tests_the_page_area_unless_asked_for_the_viewport() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let tab = Tab::new_for_test(sess);
-        let el = Element::from_jsret(tab.clone(), 99, "R1".to_string());
-        let fut = tokio::spawn(async move { check_visible(&el, Within::Viewport).await });
-        let call = serve_call(&mut mock, json!({ "value": true, "type": "boolean" })).await;
-        fut.await.unwrap().unwrap();
-        conn.shutdown();
-
-        assert_eq!(call["arguments"][1]["value"], true);
-        let js = one_line(call["functionDeclaration"].as_str().unwrap());
-        assert!(js.contains("if (!inViewport && page)"), "{js}");
-        assert!(js.contains("top >= page.scrollHeight"), "{js}");
-        assert!(js.contains("left >= page.scrollWidth"), "{js}");
-    }
-
     #[tokio::test]
     async fn check_visible_resolves_the_probe_result_it_was_handed() {
         let (_, hidden) = probe_check_visible(false).await;
@@ -664,7 +647,7 @@ mod tests {
             let e = el.clone();
             async move {
                 (
-                    check_visible(&e, Within::Page).await.unwrap(),
+                    check_visible(&e, Within::Anywhere).await.unwrap(),
                     check_enabled(&e).await.unwrap(),
                     check_stable(&e).await.unwrap(),
                     check_receives_pointer(&e, None).await.unwrap(),
@@ -713,7 +696,7 @@ mod tests {
         }
         assert_eq!(
             calls[0]["arguments"][1]["value"], false,
-            "Within::Page must not require the viewport"
+            "Within::Anywhere must not ask for the viewport test"
         );
 
         conn.shutdown();

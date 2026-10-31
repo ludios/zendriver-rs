@@ -33,7 +33,7 @@ same shape).
 | Press key | `await locator.press("Enter")` | `el.press(Key::Special(SpecialKey::Enter)).await?` |
 | Read text | `await locator.innerText()` | `el.inner_text().await?` |
 | Read attribute | `await locator.getAttribute("href")` | `el.attr("href").await?` |
-| Check visibility | `await locator.isVisible()` | `el.is_visible().await?` |
+| Check visibility | `await locator.isVisible()` | `el.is_visible().await?` (also false under 1% effective opacity) |
 | Eval JS (page world) | `await page.evaluate(() => document.title)` | `tab.evaluate_main::<String>("document.title").await?` |
 | Eval JS (isolated) | n/a (always main world) | `tab.evaluate::<String>("...").await?` |
 | Wait for response | `await page.waitForResponse("**/api/*")` | `tab.expect_response("/api/").await?` |

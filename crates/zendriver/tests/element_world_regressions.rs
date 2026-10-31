@@ -136,11 +136,13 @@
 #![cfg(feature = "integration-tests")]
 #![allow(clippy::panic, clippy::unwrap_used)]
 
+use std::time::Duration;
+
 use serial_test::serial;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zendriver::stealth::{InputProfile, StealthProfile};
-use zendriver::{BoundingBox, Browser, Key, SpecialKey};
+use zendriver::{BoundingBox, Browser, Key, SpecialKey, ZendriverError};
 
 /// Mount `html` at `at` on `mock`. These fixtures need several routes each
 /// (a second page to navigate to, an iframe document to embed), so routes are
@@ -362,9 +364,9 @@ async fn hover_and_click_reach_an_element_inside_an_iframe() {
 /// On the stock 1920x1080 persona it claims `innerHeight` 1080 - 86 (browser
 /// chrome) = 994, while the layout viewport stays at Chrome's real 1080.
 /// `scroll_into_view` scrolls with the real number, so anything landing in
-/// that 86px band read as off-screen: `is_visible` answered `false` for a
-/// field plainly on screen, and `focus` — the first step of `type_text`,
-/// `press` and `type_keys` — died with `NotActionable(5s, "not visible")`.
+/// that 86px band read as off-screen: `focus` — the first step of
+/// `type_text`, `press` and `type_keys` — died with
+/// `NotActionable(5s, "not visible")` on a field plainly on screen.
 ///
 /// The fixture puts the field LAST in a document taller than any viewport, so
 /// `scrollIntoView({ block: 'center' })` clamps at the document bottom
@@ -444,13 +446,6 @@ async fn focus_reaches_a_below_the_fold_field_under_a_spoofed_viewport() {
          {real_vh}"
     );
 
-    // A public API returning the wrong answer, ahead of any gate: the field
-    // is on screen and `is_visible` used to say otherwise.
-    assert!(
-        field.is_visible().await.unwrap(),
-        "is_visible must answer for the real viewport, not the spoofed one"
-    );
-
     field
         .focus()
         .await
@@ -478,7 +473,8 @@ async fn focus_reaches_a_below_the_fold_field_under_a_spoofed_viewport() {
     browser.close().await.unwrap();
 }
 
-/// The on-screen clause must still be a test in quirks mode.
+/// The actionability gate's on-screen clause must still be a test in quirks
+/// mode.
 ///
 /// The fixture below carries no doctype, so it renders in `BackCompat`, where
 /// `document.documentElement.clientHeight` reports the DOCUMENT's content
@@ -490,15 +486,16 @@ async fn focus_reaches_a_below_the_fold_field_under_a_spoofed_viewport() {
 /// against the whole document: the viewport test was a no-op on every
 /// doctype-less page.
 ///
-/// Nothing surfaced, because it failed open — `is_visible` simply answered
-/// `true` for a field 6000px below the fold, and the actionability gate's
-/// on-screen check was silently absent on exactly the sloppy legacy pages
-/// most likely to be carrying a honeypot.
+/// Nothing surfaced, because it failed open: the gate's on-screen check was
+/// silently absent on exactly the sloppy legacy pages most likely to be
+/// carrying a honeypot.
 ///
-/// Hence the assertion on the *pre-scroll* `false`. The post-scroll `true`
-/// guards the opposite direction: a clause that rejected everything in quirks
-/// mode would satisfy the first assertion by accident. The geometry between
-/// them is read at runtime so a fixture that stops reproducing the trap fails
+/// The gate scrolls first, so the field it must reject is one scrolling
+/// can't bring on screen: `position: fixed` at 6000px, below the 1080px
+/// viewport but above the 6024px content height. The in-flow field at the
+/// bottom guards the opposite direction: a clause that rejected everything
+/// in quirks mode would reject the fixed one by accident. The geometry is
+/// read at runtime so a fixture that stops reproducing the trap fails
 /// loudly instead of passing vacuously.
 ///
 /// Launched with no explicit profile: this defect is posture-independent
@@ -506,15 +503,17 @@ async fn focus_reaches_a_below_the_fold_field_under_a_spoofed_viewport() {
 /// the configuration a caller gets without asking for anything.
 #[tokio::test]
 #[serial]
-async fn is_visible_rejects_a_below_the_fold_field_on_a_doctype_less_page() {
+async fn the_gate_tests_the_viewport_on_a_doctype_less_page() {
     let mock = MockServer::start().await;
     // No doctype — that is the entire point of the fixture. The spacer is
-    // taller than any viewport so the field starts far below the fold.
+    // taller than any viewport.
     mount(
         &mock,
         "/quirks",
         r#"<html><body style="margin:0">
              <div style="height:6000px">a very long page, and no doctype</div>
+             <input id="pinned" style="position:fixed;top:6000px;left:0;
+                    width:200px;height:24px;box-sizing:border-box">
              <input id="deep" style="display:block;width:200px;height:24px;
                     box-sizing:border-box">
            </body></html>"#,
@@ -525,7 +524,8 @@ async fn is_visible_rejects_a_below_the_fold_field_on_a_doctype_less_page() {
     let tab = browser.main_tab();
     tab.goto(&format!("{}/quirks", mock.uri())).await.unwrap();
 
-    let field = tab.find().css("#deep").one().await.unwrap();
+    let pinned = tab.find().css("#pinned").one().await.unwrap();
+    let deep = tab.find().css("#deep").one().await.unwrap();
 
     // `body.clientHeight` is the layout viewport in `BackCompat`;
     // `documentElement.clientHeight` is the content height that made the old
@@ -533,7 +533,7 @@ async fn is_visible_rejects_a_below_the_fold_field_on_a_doctype_less_page() {
     let (mode, top, content_h, viewport_h): (String, f64, f64, f64) = tab
         .evaluate_main(
             "(() => {
-               const r = document.getElementById('deep').getBoundingClientRect();
+               const r = document.getElementById('pinned').getBoundingClientRect();
                return [document.compatMode, r.top,
                        document.documentElement.clientHeight,
                        document.body.clientHeight];
@@ -548,7 +548,7 @@ async fn is_visible_rejects_a_below_the_fold_field_on_a_doctype_less_page() {
     );
     assert!(
         top >= viewport_h,
-        "the field must start below the fold: rect.top {top} against a \
+        "the fixed field must sit below the fold: rect.top {top} against a \
          {viewport_h}px layout viewport"
     );
     assert!(
@@ -559,19 +559,22 @@ async fn is_visible_rejects_a_below_the_fold_field_on_a_doctype_less_page() {
          reason by accident"
     );
 
-    assert!(
-        !field.is_visible().await.unwrap(),
-        "a field {top}px down a quirks-mode page must not read as visible in \
-         a {viewport_h}px viewport"
-    );
+    let res = tokio::time::timeout(Duration::from_secs(10), pinned.focus()).await;
+    match res {
+        Ok(Err(ZendriverError::NotActionable(_, reason))) => {
+            assert!(reason.contains("visible"), "{reason}");
+        }
+        other => panic!(
+            "a field {top}px down a quirks-mode page must not pass the gate in \
+             a {viewport_h}px viewport; got {other:?}"
+        ),
+    }
 
-    // The other direction: the clause must still pass what is genuinely on
-    // screen, in the same rendering mode.
-    field.scroll_into_view().await.unwrap();
-    assert!(
-        field.is_visible().await.unwrap(),
-        "the same field must read as visible once scrolled into view"
-    );
+    // The other direction: the clause must still pass what scrolling brings
+    // on screen, in the same rendering mode.
+    deep.focus()
+        .await
+        .expect("the in-flow field must pass the gate once scrolled into view");
 
     browser.close().await.unwrap();
 }
@@ -664,7 +667,7 @@ async fn type_text_types_whitespace_instead_of_dropping_it() {
     // rather than merely running slowly. The bound catches the variant that
     // stalls while somehow keeping the text right.
     assert!(
-        elapsed < std::time::Duration::from_secs(10),
+        elapsed < Duration::from_secs(10),
         "typing a 24-character string must not take {elapsed:?}"
     );
 

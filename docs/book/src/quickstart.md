@@ -110,8 +110,9 @@ chain encodes both the selector and any modifiers:
   Predicate methods can't be mixed with the single-selector methods above on
   one query (doing so errors with `ConflictingSelectors`).
 - `.nth(2)` — pick the 2nd match.
-- `.visible_only()` — skip `display:none` / zero-bbox elements, and those
-  placed outside the page (elements below the fold are kept).
+- `.visible_only()` — skip elements that aren't rendered: `display:none`,
+  `visibility:hidden`, an effective opacity under 1%, or an empty box.
+  Where an element sits doesn't matter, so one below the fold is kept.
 - `.timeout(Duration::from_secs(5))` — override the default 30s wait.
 
 A terminal method (`one`, `first`, `many`, `many_or_empty`, `count`,
