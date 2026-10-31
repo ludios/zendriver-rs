@@ -383,7 +383,7 @@ document.getElementById('slot-host').attachShadow({ mode: 'open' }).innerHTML =
 </script>
 <div style="height: 3000px">Spacer</div>
 <button id="below" class="below" onclick="window.belowClicked = true">Below the fold</button>
-<div style="content-visibility: auto"><button id="skipped">Skipped</button></div>"#,
+<div style="content-visibility: auto"><button id="skipped" onclick="window.skippedClicked = true">Skipped</button></div>"#,
     )
 }
 
@@ -538,7 +538,7 @@ fn canned_routes() -> Router {
 /// | `/basic-auth` | `401` with a `Basic` challenge unless given [`BASIC_AUTH_USER`]:[`BASIC_AUTH_PASSWORD`] |
 /// | `/trickle?chunks=N&chunk_bytes=K&interval_ms=M` | [`trickle_body`]`(N, K)`, one chunk every `M` ms (defaults 8, 1024, 100); `interval_ms=0` makes it a plain large body |
 /// | `/svg-sprite` | `<use>` of an inline symbol (`href` and `xlink:href`) and of `/sprite.svg` |
-/// | `/below-fold` | `#below` button 3000 px down; clicking sets `window.belowClicked`. Before it: a `display: none` `#hidden` with the same class `below`; `#off-page` at `left: -9999px`; `#faint`, slotted under a shadow wrapper at opacity 0.1 in a host at 0.05 (0.5% in all); `#faint-slot`, under a slot at opacity 0.005, which a slot's `display: contents` makes moot. After it, `#skipped` inside a `content-visibility: auto` section |
+/// | `/below-fold` | `#below` button 3000 px down; clicking sets `window.belowClicked`. Before it: a `display: none` `#hidden` with the same class `below`; `#off-page` at `left: -9999px`; `#faint`, slotted under a shadow wrapper at opacity 0.1 in a host at 0.05 (0.5% in all); `#faint-slot`, under a slot at opacity 0.005, which a slot's `display: contents` makes moot. After it, `#skipped` inside a `content-visibility: auto` section; clicking it sets `window.skippedClicked` |
 /// | `/padded-button` | `#padded` button with large, asymmetric padding and border; clicks push `[clientX, clientY]` onto `window.clicks` |
 /// | `/controls` | `<select id="fruit">`, `<textarea id="notes">`, contenteditable `#editable` |
 /// | `/quirks` | No doctype, so `document.compatMode` is `BackCompat` |

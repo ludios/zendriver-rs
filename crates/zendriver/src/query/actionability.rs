@@ -197,56 +197,57 @@ pub(crate) async fn check_visible(el: &Element, within: Within) -> Result<bool> 
             const rect = el.getBoundingClientRect();
             if (rect.width <= 0 || rect.height <= 0) return false;
 
-            // On-screen test: the bbox must overlap the viewport by at least a
-            // sliver. `getBoundingClientRect` is already viewport-relative, so
-            // the box it must be compared against is the LAYOUT viewport. Two
-            // things about reading that box are load-bearing:
-            //
-            // 1. It must never come from `window.inner*`. Every profile except
-            //    `StealthProfile::off()` — including `native()`, which
-            //    `Browser::builder()` installs by default — runs
-            //    `zendriver-stealth`'s `patches/screen.js`, which rewrites
-            //    `window.inner*` to the persona's screen size minus a chrome
-            //    inset, while `scroll_into_view` moves the element with
-            //    Chrome's real viewport. The inset is whatever the caller's
-            //    `ScreenSpec` measured, falling back to a derived 86px when no
-            //    capture supplied one, so its size is not knowable from here —
-            //    which is the point: no constant can compensate for it.
-            //    Measured under the default profile (the 86px fallback):
-            //    `innerHeight` 994 against a real 1080. Comparing a
-            //    real-geometry scroll against that fabricated viewport leaves
-            //    every element landing in the inset band permanently "not
-            //    visible", which broke `focus` — and with it `type_text` /
-            //    `press` / `type_keys` — on any below-the-fold field.
-            //
-            // 2. WHICH element reports the layout viewport depends on the
-            //    rendering mode, and reading the wrong one fails silently.
-            //    Standards mode: `documentElement`. Quirks (`BackCompat`):
-            //    `documentElement.client*` reports the document's CONTENT box
-            //    and `body.client*` reports the viewport. Measured on a 6000px
-            //    doctype-less page: `documentElement.clientHeight` 6024,
-            //    `body.clientHeight` 1080. Reading `documentElement`
-            //    unconditionally therefore compares the bbox against the whole
-            //    document on any page without a doctype — a no-op that fails
-            //    open, on exactly the sloppy legacy pages most likely to be
-            //    carrying a honeypot.
-            const box = document.compatMode === 'BackCompat'
-                ? document.body
-                : document.documentElement;
-            // The `BackCompat` arm can be null: a document whose `<body>` was
-            // removed still renders elements appended to `documentElement`, and
-            // still answers `isConnected` for them (reproduced against Chrome).
-            // The fallback is `visualViewport` rather than `window.inner*`
-            // because it is the other unspoofed source, and it reads the real
-            // 1080 in both modes. It is the VISUAL viewport, which diverges
-            // from the layout viewport under pinch-zoom or an on-screen
-            // keyboard — neither reachable through this crate's emulation
-            // surface, and neither triggerable by page script.
-            const vw = box ? box.clientWidth : window.visualViewport.width;
-            const vh = box ? box.clientHeight : window.visualViewport.height;
-            if (inViewport
-                && (rect.right <= 0 || rect.bottom <= 0 || rect.left >= vw || rect.top >= vh)) {
-                return false;
+            if (inViewport) {
+                // On-screen test: the bbox must overlap the viewport by at least a
+                // sliver. `getBoundingClientRect` is already viewport-relative, so
+                // the box it must be compared against is the LAYOUT viewport. Two
+                // things about reading that box are load-bearing:
+                //
+                // 1. It must never come from `window.inner*`. Every profile except
+                //    `StealthProfile::off()` — including `native()`, which
+                //    `Browser::builder()` installs by default — runs
+                //    `zendriver-stealth`'s `patches/screen.js`, which rewrites
+                //    `window.inner*` to the persona's screen size minus a chrome
+                //    inset, while `scroll_into_view` moves the element with
+                //    Chrome's real viewport. The inset is whatever the caller's
+                //    `ScreenSpec` measured, falling back to a derived 86px when no
+                //    capture supplied one, so its size is not knowable from here —
+                //    which is the point: no constant can compensate for it.
+                //    Measured under the default profile (the 86px fallback):
+                //    `innerHeight` 994 against a real 1080. Comparing a
+                //    real-geometry scroll against that fabricated viewport leaves
+                //    every element landing in the inset band permanently "not
+                //    visible", which broke `focus` — and with it `type_text` /
+                //    `press` / `type_keys` — on any below-the-fold field.
+                //
+                // 2. WHICH element reports the layout viewport depends on the
+                //    rendering mode, and reading the wrong one fails silently.
+                //    Standards mode: `documentElement`. Quirks (`BackCompat`):
+                //    `documentElement.client*` reports the document's CONTENT box
+                //    and `body.client*` reports the viewport. Measured on a 6000px
+                //    doctype-less page: `documentElement.clientHeight` 6024,
+                //    `body.clientHeight` 1080. Reading `documentElement`
+                //    unconditionally therefore compares the bbox against the whole
+                //    document on any page without a doctype — a no-op that fails
+                //    open, on exactly the sloppy legacy pages most likely to be
+                //    carrying a honeypot.
+                const box = document.compatMode === 'BackCompat'
+                    ? document.body
+                    : document.documentElement;
+                // The `BackCompat` arm can be null: a document whose `<body>` was
+                // removed still renders elements appended to `documentElement`, and
+                // still answers `isConnected` for them (reproduced against Chrome).
+                // The fallback is `visualViewport` rather than `window.inner*`
+                // because it is the other unspoofed source, and it reads the real
+                // 1080 in both modes. It is the VISUAL viewport, which diverges
+                // from the layout viewport under pinch-zoom or an on-screen
+                // keyboard — neither reachable through this crate's emulation
+                // surface, and neither triggerable by page script.
+                const vw = box ? box.clientWidth : window.visualViewport.width;
+                const vh = box ? box.clientHeight : window.visualViewport.height;
+                if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= vw || rect.top >= vh) {
+                    return false;
+                }
             }
 
             // Effective opacity: `checkVisibility` rejects only an exact `opacity: 0`,
@@ -261,7 +262,9 @@ pub(crate) async fn check_visible(el: &Element, within: Within) -> Result<bool> 
             // The walk follows the flat tree, as rendering does: a slotted
             // element's parent is its slot, and a shadow root's is its host.
             // A `display: contents` node (every slot, by default) has no box,
-            // so its opacity doesn't apply.
+            // so its opacity doesn't apply. Page script can't see a closed
+            // shadow root's slots (`assignedSlot` is null), so the walk skips
+            // that tree's wrappers and goes straight to the host.
             let effective = 1;
             for (let node = el; node;
                  node = node.assignedSlot || node.parentElement || node.getRootNode().host) {

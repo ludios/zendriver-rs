@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use zendriver::{Browser, Element, ZendriverError};
-use zendriver_testkit::{FixtureServer, launch_for_test, load};
+use zendriver_testkit::{FixtureServer, eval, launch_for_test, load};
 
 async fn id(el: &Element) -> String {
     el.attr("id")
@@ -59,11 +59,12 @@ async fn an_action_needs_the_element_in_the_viewport() {
 
     // Scrolling brings both into the viewport; `#skipped`'s section renders
     // once it's there.
-    for id in ["#below", "#skipped"] {
+    for (id, flag) in [("#below", "belowClicked"), ("#skipped", "skippedClicked")] {
         let el = tab.find().css(id).one().await.expect(id);
         el.click()
             .await
             .unwrap_or_else(|e| panic!("click {id}: {e}"));
+        assert_eq!(eval(&tab, &format!("window.{flag}")).await, true, "{id}");
     }
 
     // Scrolling can't reach `left: -9999px`.
