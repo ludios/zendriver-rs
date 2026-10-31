@@ -32,7 +32,7 @@
 //!
 //! [`stop`]: InterceptHandle::stop
 
-use std::collections::HashSet;
+use std::collections::VecDeque;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -225,6 +225,11 @@ pub(crate) struct HeaderPair {
     pub(crate) value: String,
 }
 
+/// How many requests the actor remembers having given the proxy
+/// credentials. Chrome challenges a rejected request again right away, so
+/// only recent ones matter, and a long-lived tab doesn't grow the list.
+const REMEMBERED_AUTH_REQUESTS: usize = 64;
+
 /// The `authChallengeResponse` to send for a `Fetch.authRequired` event.
 ///
 /// - `proxy_auth`: the `(user, password)` to give a proxy, if any.
@@ -288,9 +293,9 @@ pub(crate) async fn run_actor(
     let enable_session = session.clone();
     let enable_patterns: Vec<Value> = patterns.iter().map(serialize_pattern).collect();
     let handle_auth_requests = proxy_auth.is_some();
-    // Requests already given the proxy credentials: a second challenge for
-    // one means the proxy rejected them.
-    let mut answered: HashSet<String> = HashSet::new();
+    // Requests recently given the proxy credentials, oldest first: a second
+    // challenge for one means the proxy rejected them.
+    let mut answered: VecDeque<String> = VecDeque::new();
     tokio::spawn(async move {
         if let Err(e) = enable_session
             .call(
@@ -343,7 +348,13 @@ pub(crate) async fn run_actor(
                     .pointer("/authChallenge/source")
                     .and_then(Value::as_str)
                     == Some("Proxy");
-                let first_try = from_proxy && answered.insert(request_id.clone());
+                let first_try = from_proxy && !answered.contains(&request_id);
+                if first_try {
+                    if answered.len() == REMEMBERED_AUTH_REQUESTS {
+                        answered.pop_front();
+                    }
+                    answered.push_back(request_id.clone());
+                }
                 if from_proxy && !first_try {
                     warn!(%request_id, "interception: the proxy rejected the credentials");
                 }
