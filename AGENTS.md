@@ -3,7 +3,8 @@
 # Don't edit the generated sections here: change the options below or the template, then run `clank-right update .` in this repo.
 # Only the options below and the sections between "Thoughts for when there is programming involved" and "Committing" are this project's own; every other section is overwritten.
 
-languages = ["rust"]
+languages           = ["rust"]
+authorship_comments = false
 -->
 
 # Before starting
@@ -56,10 +57,6 @@ If the user asks for more than one change, try doing and committing them separat
 If more external information is needed, think and keep iterating on web search queries to thoroughly check things. Tips: try site-specific searches e.g. site:github.com, reddit.com, news.ycombinator.com; try combinations of quoted items.
 
 If you can't fetch something, use google-chrome or curl_chrome150 on this machine.
-
-# Tracking AI authorship
-
-Files with any LLM-authored code (not counting mechanistic sed-like changes) begin with a comment like `// Model-output: <model name>`, one per model that contributed (e.g. "Claude Mythos 5.1", "ChatGPT 6 Astra"); keep existing lines.
 
 # Code conventions
 
