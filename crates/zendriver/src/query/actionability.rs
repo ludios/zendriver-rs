@@ -126,8 +126,20 @@ impl ActionabilityCheck {
     }
 }
 
-/// `true` iff the element is rendered **and on-screen**. An element is
-/// visible when all of the following hold:
+/// Where [`check_visible`] requires an element to be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Within {
+    /// Anywhere the page can scroll to: an element below the fold counts,
+    /// one positioned outside the page (e.g. `left: -9999px`) doesn't.
+    /// For finding elements.
+    Page,
+    /// Inside the layout viewport now: for `Element::is_visible`, and for
+    /// an action after it has scrolled the element into view.
+    Viewport,
+}
+
+/// `true` iff the element is rendered, and placed `within` the page or the
+/// viewport. An element is visible when all of the following hold:
 ///
 /// - it is attached to the document (`isConnected`);
 /// - it passes the platform's own `Element.checkVisibility` test with
@@ -136,8 +148,9 @@ impl ActionabilityCheck {
 ///   `content-visibility`, and `opacity: 0` on the element **or any
 ///   ancestor**;
 /// - it has a positive bounding box;
-/// - its bounding box **intersects the viewport** — any overlap counts, so
-///   a partially-scrolled-in element still passes;
+/// - its bounding box **intersects** the viewport (for [`Within::Viewport`])
+///   or the page's scrollable area (for [`Within::Page`]) — any overlap
+///   counts, so a partially-scrolled-in element still passes;
 /// - its *effective* opacity — the product of its own computed opacity and
 ///   every ancestor's — is at least 1%.
 ///
@@ -145,7 +158,7 @@ impl ActionabilityCheck {
 /// `checkVisibility` only rejects an *exact* `opacity: 0`, so the standard
 /// `opacity: 0.001` scraping honeypot passes it while being invisible to a
 /// human; and `checkVisibility` says nothing about where the element sits
-/// relative to the viewport.
+/// relative to the viewport or the page.
 ///
 /// Requires Chrome 121+, not 105+. `Element.checkVisibility` itself shipped
 /// in 105, but the three option names passed below (`opacityProperty`,
@@ -159,11 +172,12 @@ impl ActionabilityCheck {
 /// `visibility: hidden`/`collapse` and `content-visibility: auto`. The
 /// effective-opacity loop below is independent of that and still holds.
 ///
-/// Live callers: `Element::is_visible` and the `visible_only` filter in
-/// `FindBuilder`/`FindAllBuilder` (`query::mod`).
-pub(crate) async fn check_visible(el: &Element) -> Result<bool> {
+/// Live callers: the `visible_only` filter in `FindBuilder`/`FindAllBuilder`
+/// (`query::mod`), with [`Within::Page`]; `Element::is_visible` and the
+/// actionability gate ([`wait_actionable`]), with [`Within::Viewport`].
+pub(crate) async fn check_visible(el: &Element, within: Within) -> Result<bool> {
     let js = r#"
-        function(el) {
+        function(el, inViewport) {
             if (!el || !el.isConnected) return false;
 
             // Platform primitive: handles `display: none`, `content-visibility`,
@@ -179,6 +193,20 @@ pub(crate) async fn check_visible(el: &Element) -> Result<bool> {
 
             const rect = el.getBoundingClientRect();
             if (rect.width <= 0 || rect.height <= 0) return false;
+
+            // Within the page: the bbox, moved from viewport to page
+            // coordinates, must overlap the area the page scrolls over.
+            // `scrollingElement` is `documentElement` in standards mode and
+            // `body` in quirks mode, and none of its fields are spoofed.
+            const page = document.scrollingElement;
+            if (!inViewport && page) {
+                const left = rect.left + page.scrollLeft;
+                const top = rect.top + page.scrollTop;
+                if (left + rect.width <= 0 || top + rect.height <= 0
+                    || left >= page.scrollWidth || top >= page.scrollHeight) {
+                    return false;
+                }
+            }
 
             // On-screen test: the bbox must overlap the viewport by at least a
             // sliver. `getBoundingClientRect` is already viewport-relative, so
@@ -227,7 +255,8 @@ pub(crate) async fn check_visible(el: &Element) -> Result<bool> {
             // surface, and neither triggerable by page script.
             const vw = box ? box.clientWidth : window.visualViewport.width;
             const vh = box ? box.clientHeight : window.visualViewport.height;
-            if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= vw || rect.top >= vh) {
+            if (inViewport
+                && (rect.right <= 0 || rect.bottom <= 0 || rect.left >= vw || rect.top >= vh)) {
                 return false;
             }
 
@@ -250,7 +279,10 @@ pub(crate) async fn check_visible(el: &Element) -> Result<bool> {
             return true;
         }
     "#;
-    let res = el.call_on_main(js, json!([])).await?;
+    let in_viewport = within == Within::Viewport;
+    let res = el
+        .call_on_main(js, json!([{ "value": in_viewport }]))
+        .await?;
     Ok(res.get("value").and_then(|v| v.as_bool()).unwrap_or(false))
 }
 
@@ -378,7 +410,7 @@ pub(crate) async fn wait_actionable(
     let poll_interval = Duration::from_millis(50);
     loop {
         let mut failed_reason: Option<&'static str> = None;
-        if require.visible && !check_visible(el).await? {
+        if require.visible && !check_visible(el, Within::Viewport).await? {
             failed_reason = Some("not visible");
         } else if require.enabled && !check_enabled(el).await? {
             failed_reason = Some("not enabled");
@@ -426,7 +458,7 @@ mod tests {
         let tab = Tab::new_for_test(sess);
         let el = Element::from_jsret(tab.clone(), 99, "R1".to_string());
 
-        let fut = tokio::spawn(async move { check_visible(&el).await });
+        let fut = tokio::spawn(async move { check_visible(&el, Within::Viewport).await });
 
         let js = serve_call_js(&mut mock, json!({ "value": value, "type": "boolean" })).await;
 
@@ -533,6 +565,26 @@ mod tests {
     /// Not a source pin: this one covers the Rust side of `check_visible`,
     /// namely that it reads the probe's verdict out of `result.value` rather
     /// than defaulting to the `unwrap_or(false)` fallback.
+    /// `Within::Viewport` asks the probe for the viewport test, and the
+    /// probe can test the page's scrollable area instead.
+    #[tokio::test]
+    async fn probe_source_tests_the_page_area_unless_asked_for_the_viewport() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let tab = Tab::new_for_test(sess);
+        let el = Element::from_jsret(tab.clone(), 99, "R1".to_string());
+        let fut = tokio::spawn(async move { check_visible(&el, Within::Viewport).await });
+        let call = serve_call(&mut mock, json!({ "value": true, "type": "boolean" })).await;
+        fut.await.unwrap().unwrap();
+        conn.shutdown();
+
+        assert_eq!(call["arguments"][1]["value"], true);
+        let js = one_line(call["functionDeclaration"].as_str().unwrap());
+        assert!(js.contains("if (!inViewport && page)"), "{js}");
+        assert!(js.contains("top >= page.scrollHeight"), "{js}");
+        assert!(js.contains("left >= page.scrollWidth"), "{js}");
+    }
+
     #[tokio::test]
     async fn check_visible_resolves_the_probe_result_it_was_handed() {
         let (_, hidden) = probe_check_visible(false).await;
@@ -612,7 +664,7 @@ mod tests {
             let e = el.clone();
             async move {
                 (
-                    check_visible(&e).await.unwrap(),
+                    check_visible(&e, Within::Page).await.unwrap(),
                     check_enabled(&e).await.unwrap(),
                     check_stable(&e).await.unwrap(),
                     check_receives_pointer(&e, None).await.unwrap(),
@@ -643,9 +695,15 @@ mod tests {
         );
         assert!(sources[3].contains("elementFromPoint"), "{}", sources[3]);
 
-        // The three no-argument predicates bind `el` and nothing else; the
-        // hit-test binds the two offsets after it, dx before dy.
-        let expected = [vec!["el"], vec!["el"], vec!["el"], vec!["el", "dx", "dy"]];
+        // The visibility check binds `inViewport` after `el`; the next two
+        // predicates bind `el` and nothing else; the hit-test binds the two
+        // offsets after it, dx before dy.
+        let expected = [
+            vec!["el", "inViewport"],
+            vec!["el"],
+            vec!["el"],
+            vec!["el", "dx", "dy"],
+        ];
         for ((call, js), want) in calls.iter().zip(&sources).zip(expected) {
             assert_eq!(js_params(js), want, "{js}");
             assert_eq!(
@@ -653,6 +711,10 @@ mod tests {
                 "the element must be the first argument the body reads",
             );
         }
+        assert_eq!(
+            calls[0]["arguments"][1]["value"], false,
+            "Within::Page must not require the viewport"
+        );
 
         conn.shutdown();
     }

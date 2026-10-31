@@ -491,9 +491,9 @@ async fn focus_reaches_a_below_the_fold_field_under_a_spoofed_viewport() {
 /// doctype-less page.
 ///
 /// Nothing surfaced, because it failed open — `is_visible` simply answered
-/// `true` for a field 6000px below the fold, and the off-screen and honeypot
-/// filtering `visible_only(true)` promises was silently absent on exactly the
-/// sloppy legacy pages most likely to be carrying a honeypot.
+/// `true` for a field 6000px below the fold, and the actionability gate's
+/// on-screen check was silently absent on exactly the sloppy legacy pages
+/// most likely to be carrying a honeypot.
 ///
 /// Hence the assertion on the *pre-scroll* `false`. The post-scroll `true`
 /// guards the opposite direction: a clause that rejected everything in quirks

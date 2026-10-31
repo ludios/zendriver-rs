@@ -362,8 +362,10 @@ async fn below_fold() -> Html<String> {
     page(
         "Below the fold",
         "",
-        r#"<div style="height: 3000px">Spacer</div>
-<button id="below" onclick="window.belowClicked = true">Below the fold</button>"#,
+        r#"<button id="hidden" class="below" style="display: none">Hidden</button>
+<button id="off-page" style="position: absolute; left: -9999px">Off the page</button>
+<div style="height: 3000px">Spacer</div>
+<button id="below" class="below" onclick="window.belowClicked = true">Below the fold</button>"#,
     )
 }
 
@@ -490,7 +492,7 @@ fn canned_routes() -> Router {
 /// | `/basic-auth` | `401` with a `Basic` challenge unless given [`BASIC_AUTH_USER`]:[`BASIC_AUTH_PASSWORD`] |
 /// | `/trickle?chunks=N&chunk_bytes=K&interval_ms=M` | [`trickle_body`]`(N, K)`, one chunk every `M` ms (defaults 8, 1024, 100); `interval_ms=0` makes it a plain large body |
 /// | `/svg-sprite` | `<use>` of an inline symbol (`href` and `xlink:href`) and of `/sprite.svg` |
-/// | `/below-fold` | `#below` button 3000 px down; clicking sets `window.belowClicked` |
+/// | `/below-fold` | `#below` button 3000 px down; clicking sets `window.belowClicked`. Before it, a `display: none` `#hidden` with the same class `below`, and `#off-page` at `left: -9999px` |
 /// | `/padded-button` | `#padded` button with large, asymmetric padding and border; clicks push `[clientX, clientY]` onto `window.clicks` |
 /// | `/controls` | `<select id="fruit">`, `<textarea id="notes">`, contenteditable `#editable` |
 /// | `/quirks` | No doctype, so `document.compatMode` is `BackCompat` |

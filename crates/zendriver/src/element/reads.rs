@@ -290,11 +290,15 @@ impl Element {
         .await
     }
 
-    /// Returns `true` iff the element is rendered + visible.
+    /// Returns `true` iff the element is rendered, and on screen now.
     ///
-    /// Attached to the document, has a positive bounding box, and is not
-    /// hidden via `display`, `visibility`, or `opacity: 0`. Uses the same
-    /// internal visibility predicate that powers the actionability gate.
+    /// Attached to the document, has a positive bounding box, is not hidden
+    /// via `display`, `visibility`, or an effective opacity under 1% (on it
+    /// or an ancestor), and is at least partly inside the viewport: an
+    /// element below the fold reads `false` until it is scrolled into view
+    /// ([`Element::scroll_into_view`]). The same check as the actionability
+    /// gate; [`crate::FindBuilder::visible_only`] doesn't require the
+    /// viewport.
     ///
     /// # Examples
     ///
@@ -309,8 +313,10 @@ impl Element {
     /// # Ok(()) }
     /// ```
     pub async fn is_visible(&self) -> Result<bool> {
-        self.with_refresh(|| async move { actionability::check_visible(self).await })
-            .await
+        self.with_refresh(|| async move {
+            actionability::check_visible(self, actionability::Within::Viewport).await
+        })
+        .await
     }
 
     /// Returns `true` iff the element is not disabled.

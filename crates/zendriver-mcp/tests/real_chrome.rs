@@ -228,9 +228,10 @@ async fn history_tools_wait_for_the_page_they_reach() {
 /// How long a selector tool may look for an element before giving up.
 const FIND_WITHIN_MS: u64 = 2000;
 
+/// `.below` also matches a `display: none` button earlier in the page,
+/// which the default `visible_only` skips.
 #[tokio::test]
-#[ignore = "known bug, TODO P0 'MCP selector tools can't see off-screen elements' (MCP #1)"]
-async fn known_bug_click_reaches_a_button_below_the_fold() {
+async fn click_reaches_a_button_below_the_fold() {
     let fixtures = FixtureServer::start().await;
     let mut server = McpServer::start(Transport::Stdio).await;
     open_at(
@@ -242,7 +243,7 @@ async fn known_bug_click_reaches_a_button_below_the_fold() {
     server
         .call(
             "browser_click",
-            json!({ "css": "#below", "timeout_ms": FIND_WITHIN_MS }),
+            json!({ "css": ".below", "timeout_ms": FIND_WITHIN_MS }),
         )
         .await;
     let clicked = server
@@ -255,8 +256,7 @@ async fn known_bug_click_reaches_a_button_below_the_fold() {
 }
 
 #[tokio::test]
-#[ignore = "known bug, TODO P0 'MCP selector tools can't see off-screen elements' (MCP #1)"]
-async fn known_bug_scroll_into_view_finds_an_off_screen_element() {
+async fn scroll_into_view_finds_an_off_screen_element() {
     let fixtures = FixtureServer::start().await;
     let mut server = McpServer::start(Transport::Stdio).await;
     open_at(

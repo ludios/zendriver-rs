@@ -177,7 +177,7 @@ use tokio::time::Instant;
 use crate::element::Element;
 use crate::error::{Result, ZendriverError};
 use crate::frame::Frame;
-use crate::query::actionability::check_visible;
+use crate::query::actionability::{Within, check_visible};
 use crate::query::predicate::{AttrPred, PredicateSet, TextPred};
 use crate::query::selectors::{QueryScope, RemoteRef, SelectorKind, text_len_of};
 use crate::tab::Tab;
@@ -741,8 +741,11 @@ impl<'scope> FindBuilder<'scope> {
 
     /// Filter candidates by visibility before picking `nth`/first.
     ///
-    /// When `true`, candidates that fail the visibility check (offscreen,
-    /// `display: none`, etc.) are filtered out.
+    /// When `true`, candidates that fail the visibility check are filtered
+    /// out: those hidden by CSS (`display: none`, `visibility: hidden`, an
+    /// effective opacity under 1%), those with an empty box, and those
+    /// placed outside the page (e.g. `left: -9999px`). An element below the
+    /// fold, which scrolling would bring into view, is kept.
     ///
     /// # Examples
     ///
@@ -977,7 +980,7 @@ impl<'scope> FindBuilder<'scope> {
             for (i, r) in candidates.into_iter().enumerate() {
                 let el = resolver.synthesize(r, &scope, i);
                 let is_match = if self.visible_only {
-                    check_visible(&el).await?
+                    check_visible(&el, Within::Page).await?
                 } else {
                     true
                 };
@@ -1368,7 +1371,7 @@ impl<'scope> FindAllBuilder<'scope> {
             for (i, r) in candidates.into_iter().enumerate() {
                 let el = resolver.synthesize(r, &scope, i);
                 let keep = if self.visible_only {
-                    check_visible(&el).await?
+                    check_visible(&el, Within::Page).await?
                 } else {
                     true
                 };
@@ -1549,7 +1552,7 @@ async fn one_across_frames(
             for (i, r) in main_hits.into_iter().enumerate() {
                 let el = resolver.synthesize(r, &main_scope, i);
                 let is_match = if visible_only {
-                    check_visible(&el).await?
+                    check_visible(&el, Within::Page).await?
                 } else {
                     true
                 };
@@ -1567,7 +1570,7 @@ async fn one_across_frames(
                 for (i, r) in hits.into_iter().enumerate() {
                     let el = resolver.synthesize(r, &scope, i);
                     let is_match = if visible_only {
-                        check_visible(&el).await?
+                        check_visible(&el, Within::Page).await?
                     } else {
                         true
                     };
@@ -1623,7 +1626,7 @@ async fn many_across_frames(
         for (i, r) in resolver.resolve(&main_scope).await?.into_iter().enumerate() {
             let el = resolver.synthesize(r, &main_scope, i);
             let keep = if visible_only {
-                check_visible(&el).await?
+                check_visible(&el, Within::Page).await?
             } else {
                 true
             };
@@ -1637,7 +1640,7 @@ async fn many_across_frames(
             for (i, r) in resolver.resolve(&scope).await?.into_iter().enumerate() {
                 let el = resolver.synthesize(r, &scope, i);
                 let keep = if visible_only {
-                    check_visible(&el).await?
+                    check_visible(&el, Within::Page).await?
                 } else {
                     true
                 };
@@ -1700,7 +1703,7 @@ async fn consider_scope_best(
             // actually returned to the caller is re-synthesized with
             // `want_nth` at the `one_across_frames` call site.
             let probe = Element::synthesize_query(r.clone(), scope, selector, 0);
-            if check_visible(&probe).await? {
+            if check_visible(&probe, Within::Page).await? {
                 visible.push(r);
             }
         }
