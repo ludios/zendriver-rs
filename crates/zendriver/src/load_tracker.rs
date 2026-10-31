@@ -45,7 +45,9 @@ enum Initial {
 }
 
 /// The changes of frame `frame_id` that `session` receives from now on, in
-/// the order Chrome sent them. Ends when the connection dies.
+/// the order Chrome sent them. Ends when the socket dies, but not on a
+/// clean [`zendriver_transport::Connection::shutdown`], which the event bus
+/// can't tell from a reconnect.
 fn changes(
     session: &SessionHandle,
     frame_id: &str,
@@ -136,11 +138,16 @@ async fn follow(
                     loading.send_replace(false);
                 }
             }
-            Change::Lost => {
-                awaiting_start = false;
-                let complete = probe_complete(&session, "document.readyState").await;
-                loading.send_replace(!complete);
-            }
+            Change::Lost => match initial {
+                // The navigation's start, or even its stop, may be among
+                // the lost events. Asking the page could read the old
+                // document, which stays complete until the new one
+                // commits, so wait for the next stop instead.
+                Initial::Navigating => awaiting_start = false,
+                Initial::Probe(expression) => {
+                    loading.send_replace(!probe_complete(&session, expression).await);
+                }
+            },
         }
     }
 }
@@ -151,7 +158,7 @@ async fn follow(
 /// # Errors
 ///
 /// [`ZendriverError::Timeout`] if none arrives within `within`;
-/// [`ZendriverError::Navigation`] if the connection dies first.
+/// [`ZendriverError::Navigation`] if the socket dies first.
 pub(crate) async fn next_stop(
     session: &SessionHandle,
     frame_id: &str,
@@ -176,7 +183,7 @@ pub(crate) async fn next_stop(
 }
 
 /// Follows whether one frame is loading, in a task that runs until the
-/// tracker is dropped or the connection dies.
+/// tracker is dropped or the socket dies.
 #[derive(Debug)]
 pub(crate) struct LoadTracker {
     loading: watch::Receiver<bool>,
@@ -215,7 +222,7 @@ impl LoadTracker {
     /// # Errors
     ///
     /// [`ZendriverError::Timeout`] if it is still loading after `within`;
-    /// [`ZendriverError::Navigation`] if the connection dies first.
+    /// [`ZendriverError::Navigation`] if the socket dies first.
     pub(crate) async fn wait(mut self, within: Duration) -> Result<()> {
         match tokio::time::timeout(within, self.loading.wait_for(|loading| !loading)).await {
             Err(_) => Err(ZendriverError::Timeout(within)),
@@ -310,8 +317,53 @@ mod tests {
         }
     }
 
-    /// When the connection dies, the wait ends at once with an error rather
-    /// than at its timeout.
+    /// After lost events, a navigation's tracker doesn't ask the page,
+    /// which is the old document until the new one commits, and still
+    /// complete: it waits for the next stop instead.
+    #[tokio::test]
+    async fn lost_events_leave_a_navigation_waiting_for_its_stop() {
+        let (mut mock, conn) = MockConnection::pair();
+        let tracker = LoadTracker::before_navigating(&SessionHandle::new(conn.clone(), "S1"), "F");
+        mock.reconnect(&conn);
+        let waiting = tokio::spawn(tracker.wait(LONG));
+        let probe = tokio::time::timeout(SHORT, mock.expect_cmd("Page.enable")).await;
+        assert!(
+            probe.is_err(),
+            "the tracker probed the page after lost events"
+        );
+        emit(&mock, false, "F", "S1").await;
+        waiting.await.unwrap().expect("loaded once it stopped");
+        conn.shutdown();
+    }
+
+    /// After lost events, a probed tracker probes again with its own
+    /// expression.
+    #[tokio::test]
+    async fn lost_events_make_a_probed_tracker_probe_again() {
+        let (mut mock, conn) = MockConnection::pair();
+        let tracker = LoadTracker::probed(&SessionHandle::new(conn.clone(), "S1"), "F", "x");
+        let id = mock.expect_cmd("Page.enable").await;
+        mock.reply(id, json!({})).await;
+        let id = mock.expect_cmd("Runtime.evaluate").await;
+        mock.reply(id, json!({ "result": { "value": "blank" } }))
+            .await;
+        let waiting = tokio::spawn(tracker.wait(LONG));
+        mock.reconnect(&conn);
+        let id = mock.expect_cmd("Page.enable").await;
+        mock.reply(id, json!({})).await;
+        let id = mock.expect_cmd("Runtime.evaluate").await;
+        assert_eq!(mock.last_sent()["params"]["expression"], "x");
+        mock.reply(id, json!({ "result": { "value": "complete" } }))
+            .await;
+        waiting
+            .await
+            .unwrap()
+            .expect("complete on the second probe");
+        conn.shutdown();
+    }
+
+    /// When the socket dies, the wait ends at once with an error rather than
+    /// at its timeout.
     #[tokio::test]
     async fn wait_ends_when_the_connection_dies() {
         let (mock, conn) = MockConnection::pair();
