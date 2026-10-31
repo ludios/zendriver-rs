@@ -21,7 +21,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use support::{McpServer, Transport};
 use zendriver_testkit::{
-    ChromeTree, FixtureServer, PROBE_JS, PROBE_PATH, assert_eventually, describe_disagreements,
+    ChromeTree, FixtureServer, PROBE_JS, PROBE_PATH, assert_eventually, check_known_disagreements,
     disagreements,
 };
 
@@ -161,36 +161,14 @@ async fn known_bug_chrome_exits_on_sigkill_over_http() {
     chrome_exits_when_server_stops(Transport::Http, Stop::Signal("KILL")).await;
 }
 
-/// `(field, why)`: a field of the stealth probe that disagrees under
-/// `spoof_windows` because of an open bug, named by its TODO item. The same
-/// as `spoofed win32` in `zendriver`'s `stealth_probe.rs`, which is what
-/// `spoof_windows` launches.
-const SPOOF_WINDOWS_KNOWN_BUGS: &[(&str, &str)] = &[
-    (
-        "deviceMemory",
-        "P1 Stealth: worker GPU name and deviceMemory differ from the page under spoofed (R6)",
-    ),
-    (
-        "webgl",
-        "P1 Stealth: worker GPU name and deviceMemory differ from the page under spoofed (R6)",
-    ),
-    (
-        "os",
-        "P1 Stealth: JS-visible and HTTP identity come from different sources (ST #1, R6)",
-    ),
-    (
-        "uaPlatform",
-        "P1 Stealth: JS-visible and HTTP identity come from different sources (ST #1, R6)",
-    ),
-    (
-        "platformVersion",
-        "P1 Stealth: JS-visible and HTTP identity come from different sources (ST #1, R6)",
-    ),
-];
-
 /// The stealth consistency probe (see `zendriver_testkit::disagreements`)
-/// through MCP's `spoof_windows`: the disagreements are exactly the known
-/// ones.
+/// through MCP's `spoof_windows`, which launches what `zendriver`'s
+/// `stealth_probe.rs` calls `spoofed win32`: the disagreements are that
+/// profile's known ones.
+///
+/// Leaves out the hardware fields, which disagree here only on some hosts:
+/// `browser_open` takes a whole persona, not an overlay, so this can't pin
+/// them as `stealth_probe.rs` does.
 #[tokio::test]
 async fn probe_agrees_under_spoof_windows() {
     let fixtures = FixtureServer::start().await;
@@ -206,15 +184,10 @@ async fn probe_agrees_under_spoof_windows() {
     server.call("browser_close", json!({})).await;
     assert_chrome_exits(&chrome, "browser_close").await;
 
-    let found_fields: Vec<&str> = found.keys().copied().collect();
-    let mut known: Vec<&str> = SPOOF_WINDOWS_KNOWN_BUGS.iter().map(|(f, _)| *f).collect();
-    known.sort_unstable();
-    assert_eq!(
-        found_fields,
-        known,
-        "the disagreements aren't the known ones (SPOOF_WINDOWS_KNOWN_BUGS):\n{}",
-        describe_disagreements(&found),
-    );
+    let host_dependent = ["hardwareConcurrency", "deviceMemory"];
+    if let Err(mismatch) = check_known_disagreements("spoofed win32", &found, &host_dependent) {
+        panic!("{mismatch}");
+    }
 }
 
 /// How long a selector tool may look for an element before giving up.

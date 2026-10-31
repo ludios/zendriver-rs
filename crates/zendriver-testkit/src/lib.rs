@@ -40,7 +40,10 @@ pub use axum;
 pub use launch::{TestBrowser, launch_for_test};
 pub use logs::{LogLine, Logs};
 pub use nav::{eval, load, wait_loaded};
-pub use probe::{PROBE_JS, PROBE_PATH, describe_disagreements, disagreements};
+pub use probe::{
+    KNOWN_DISAGREEMENTS, PINNED_HARDWARE, PROBE_JS, PROBE_PATH, check_known_disagreements,
+    describe_disagreements, disagreements,
+};
 pub use procs::ChromeTree;
 pub use server::{
     BASIC_AUTH_PASSWORD, BASIC_AUTH_USER, DOWNLOAD_BODY, FixtureServer, HOST_RESOLVER_RULES,

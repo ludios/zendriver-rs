@@ -13,7 +13,7 @@
 //! `navigator.userAgentData` and the `Sec-CH-UA-*` headers exist only in
 //! secure contexts, and plain HTTP is one only on loopback.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::Router;
 use axum::http::header;
@@ -157,6 +157,9 @@ pub(crate) fn routes() -> Router {
 /// For each field, what each source claimed.
 type Claims = BTreeMap<&'static str, Vec<(String, Value)>>;
 
+/// Record in `claims` that `source` (a realm such as `worker`, or an HTTP
+/// request) claims `value` for `field` (the name the comparison groups by,
+/// such as `platform`).
 fn claim(claims: &mut Claims, field: &'static str, source: impl Into<String>, value: Value) {
     claims
         .entry(field)
@@ -165,7 +168,8 @@ fn claim(claims: &mut Claims, field: &'static str, source: impl Into<String>, va
 }
 
 /// The OS a user agent string names: `Windows`, `macOS`, `Android`,
-/// `Chrome OS`, `Linux`, or what's left over.
+/// `Chrome OS`, `Linux`, or what's left over. Desktop identities only:
+/// [`os_of_platform`] can't tell Android or Chrome OS from Linux.
 fn os_of_user_agent(user_agent: &str) -> String {
     let os = if user_agent.contains("Windows") {
         "Windows"
@@ -203,6 +207,32 @@ fn os_claim(value: &Value, of: fn(&str) -> String) -> Value {
     value.as_str().map_or(Value::Null, |s| Value::String(of(s)))
 }
 
+/// `languages` as Chrome expands them into `Accept-Language`: each run of
+/// tags for one base language is followed by that base language, unless it's
+/// listed already. `["en-US", "fr"]` becomes `["en-US", "en", "fr"]`. `Null`
+/// if `languages` isn't an array of strings.
+fn accept_language_of(languages: &Value) -> Value {
+    let Some(tags) = languages
+        .as_array()
+        .and_then(|a| a.iter().map(Value::as_str).collect::<Option<Vec<&str>>>())
+    else {
+        return Value::Null;
+    };
+    let base = |tag: &str| tag.split('-').next().unwrap_or(tag).to_string();
+    let mut expanded: Vec<String> = Vec::new();
+    for (i, tag) in tags.iter().enumerate() {
+        if !expanded.iter().any(|t| t == tag) {
+            expanded.push((*tag).to_string());
+        }
+        let family = base(tag);
+        let run_ends = tags.get(i + 1).is_none_or(|next| base(next) != family);
+        if run_ends && !expanded.contains(&family) {
+            expanded.push(family);
+        }
+    }
+    expanded.into_iter().map(Value::String).collect()
+}
+
 /// What `realm`'s reading (one entry of [`PROBE_JS`]'s result) claims.
 fn js_claims(claims: &mut Claims, realm: &str, id: &Value) {
     for field in [
@@ -216,6 +246,12 @@ fn js_claims(claims: &mut Claims, realm: &str, id: &Value) {
     ] {
         claim(claims, field, realm, id[field].clone());
     }
+    claim(
+        claims,
+        "acceptLanguage",
+        realm,
+        accept_language_of(&id["languages"]),
+    );
     // A realm without `userAgentData` claims null for all of these.
     let data = &id["uaData"];
     claim(claims, "brands", realm, data["brands"].clone());
@@ -333,7 +369,12 @@ fn http_claims(claims: &mut Claims, source: &str, request: &RecordedRequest) {
         }
     }
     if let Some(languages) = request.header("accept-language") {
-        claim(claims, "languages", source, accept_language_tags(languages));
+        claim(
+            claims,
+            "acceptLanguage",
+            source,
+            accept_language_tags(languages),
+        );
     }
 }
 
@@ -344,9 +385,14 @@ const REQUIRED_HEADERS: &[&str] = &[
     "user-agent",
     "accept-language",
     "sec-ch-ua",
+    "sec-ch-ua-mobile",
     "sec-ch-ua-platform",
-    "sec-ch-ua-platform-version",
+    "sec-ch-ua-arch",
+    "sec-ch-ua-bitness",
     "sec-ch-ua-full-version-list",
+    "sec-ch-ua-model",
+    "sec-ch-ua-platform-version",
+    "sec-ch-ua-wow64",
 ];
 
 /// Every field on which the probe's sources disagree, each with what every
@@ -359,8 +405,9 @@ const REQUIRED_HEADERS: &[&str] = &[
 ///
 /// The fields: `userAgent`, `os` (from the UA string, `navigator.platform`,
 /// `userAgentData.platform` and `Sec-CH-UA-Platform`), `platform`,
-/// `hardwareConcurrency`, `deviceMemory`, `languages` (with
-/// `Accept-Language`), `timeZone`, `webgl` (unmasked vendor and renderer),
+/// `hardwareConcurrency`, `deviceMemory`, `languages`, `acceptLanguage`
+/// (`languages` expanded as Chrome does for the header, and the header
+/// itself), `timeZone`, `webgl` (unmasked vendor and renderer),
 /// and `userAgentData`'s `brands`, `mobile`, `uaPlatform`, `architecture`,
 /// `bitness`, `fullVersionList`, `model`, `platformVersion` and `wow64`
 /// (each with its `Sec-CH-UA-*` header).
@@ -399,6 +446,77 @@ pub fn disagreements(probe: &Value, requests: &[RecordedRequest]) -> Claims {
     claims
 }
 
+/// The TODO item for workers, which no stealth patch reaches: they report
+/// the host's hardware and the real GPU (SwiftShader, since workers get no
+/// GPU).
+const WORKER_UNPATCHED: &str =
+    "P1 Stealth: worker GPU name and deviceMemory differ from the page under spoofed (R6)";
+
+/// The TODO item for the JS patches and the CDP overrides taking the
+/// identity from different sources: the UA, the headers and the (unpatched)
+/// worker say Windows, the page's `navigator` says Linux.
+const TWO_IDENTITIES: &str =
+    "P1 Stealth: JS-visible and HTTP identity come from different sources (ST #1, R6)";
+
+/// A persona overlay for the spoofed profiles, pinning the hardware the page
+/// claims to values no test host has. The unpatched worker reports the
+/// host's, so it disagrees on every host, not only on hosts unlike the one
+/// that recorded [`KNOWN_DISAGREEMENTS`].
+pub const PINNED_HARDWARE: &str = r#"{"hardware_concurrency": 1, "device_memory_gb": 1}"#;
+
+/// `(field, profiles, why)`: a field that disagrees under each of
+/// `profiles` because of an open bug, named by its TODO item. The profiles
+/// are `zendriver`'s `stealth_probe.rs` tests; `spoofed` and `spoofed win32`
+/// launch with [`PINNED_HARDWARE`]. Recorded on Linux with Chrome 156.
+pub const KNOWN_DISAGREEMENTS: &[(&str, &[&str], &str)] = &[
+    (
+        "hardwareConcurrency",
+        &["spoofed", "spoofed win32"],
+        WORKER_UNPATCHED,
+    ),
+    (
+        "deviceMemory",
+        &["spoofed", "spoofed win32"],
+        WORKER_UNPATCHED,
+    ),
+    ("webgl", &["spoofed", "spoofed win32"], WORKER_UNPATCHED),
+    ("os", &["spoofed win32"], TWO_IDENTITIES),
+    ("uaPlatform", &["spoofed win32"], TWO_IDENTITIES),
+    ("platformVersion", &["spoofed win32"], TWO_IDENTITIES),
+];
+
+/// Check that the fields in `found` (from [`disagreements`]) are exactly
+/// `profile`'s rows in [`KNOWN_DISAGREEMENTS`], leaving out the fields in
+/// `skip` on both sides. On a mismatch, returns what's unexpected, what's
+/// fixed, and every disagreement.
+pub fn check_known_disagreements(
+    profile: &str,
+    found: &Claims,
+    skip: &[&str],
+) -> Result<(), String> {
+    let known: BTreeSet<&str> = KNOWN_DISAGREEMENTS
+        .iter()
+        .filter(|(field, profiles, _)| profiles.contains(&profile) && !skip.contains(field))
+        .map(|(field, ..)| *field)
+        .collect();
+    let found_fields: BTreeSet<&str> = found
+        .keys()
+        .copied()
+        .filter(|field| !skip.contains(field))
+        .collect();
+    if found_fields == known {
+        return Ok(());
+    }
+    let unexpected: Vec<&&str> = found_fields.difference(&known).collect();
+    let fixed: Vec<&&str> = known.difference(&found_fields).collect();
+    Err(format!(
+        "under {profile}: disagreeing fields not in KNOWN_DISAGREEMENTS: {unexpected:?}; fields \
+         in KNOWN_DISAGREEMENTS that now agree (delete their rows): {fixed:?}\n\n\
+         All disagreements:\n{}",
+        describe_disagreements(found),
+    ))
+}
+
 /// `disagreements` as readable text, one field per paragraph.
 pub fn describe_disagreements(disagreements: &Claims) -> String {
     let mut text = String::new();
@@ -428,6 +546,23 @@ mod tests {
         );
         assert_eq!(parse_brand_list(""), Some(json!([])));
         assert_eq!(parse_brand_list(r#""Chromium";v=156"#), None);
+    }
+
+    #[test]
+    fn languages_expand_like_chromes_accept_language() {
+        assert_eq!(
+            accept_language_of(&json!(["en-US"])),
+            json!(["en-US", "en"])
+        );
+        assert_eq!(
+            accept_language_of(&json!(["en-US", "en-GB", "fr", "en"])),
+            json!(["en-US", "en-GB", "en", "fr"])
+        );
+        assert_eq!(
+            accept_language_of(&json!(["en-US", "en"])),
+            json!(["en-US", "en"])
+        );
+        assert_eq!(accept_language_of(&Value::Null), Value::Null);
     }
 
     #[test]

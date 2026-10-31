@@ -135,5 +135,6 @@ drive the built server through `tests/support/`.
 
 A real-Chrome test that reproduces an open bug is named `known_bug_*` and
 `#[ignore]`d, with the bug in the reason; the fix deletes both. The stealth
-tests (`stealth_probe.rs`, `stealth_conformance.rs`) list known-broken cases
-in a `KNOWN_BUGS` table instead, and fail when a listed case starts passing.
+tests list known-broken cases in a table instead (`KNOWN_DISAGREEMENTS` in
+`zendriver-testkit`'s `probe.rs`, `KNOWN_BUGS` in `stealth_conformance.rs`),
+and fail when a listed case starts passing.
