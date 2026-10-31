@@ -21,7 +21,8 @@ use std::time::{Duration, Instant};
 
 use zendriver::{Browser, Tab};
 use zendriver_testkit::{
-    FixtureServer, SITE_A, TestBrowser, assert_not_before, eval, launch_for_test, load, wait_loaded,
+    FixtureServer, SITE_A, TestBrowser, assert_eventually, assert_not_before, eval,
+    launch_for_test, load, wait_loaded,
 };
 
 /// The path whose answer sets when `/slow-load`'s `load` event can fire.
@@ -127,15 +128,21 @@ async fn new_tab_at_then_wait_for_load_waits_for_the_page() {
     browser.close().await;
 }
 
-/// `new_tab` arms nothing: `about:blank` has loaded by the time it returns.
+/// Opening a tab at `about:blank`, however spelled, arms nothing: it has
+/// loaded by the time the call returns.
 #[tokio::test]
-async fn new_tab_then_wait_for_load_returns_at_once() {
+async fn new_blank_tab_then_wait_for_load_returns_at_once() {
     let browser = launch().await;
-    let tab = browser.new_tab().await.expect("new_tab");
-    let started = Instant::now();
-    tab.wait_for_load().await.expect("wait_for_load");
-    let took = started.elapsed();
-    assert!(took < Duration::from_secs(5), "wait_for_load took {took:?}");
+    for url in ["about:blank", "", "ABOUT:BLANK"] {
+        let tab = browser.new_tab_at(url).await.expect("new_tab_at");
+        let started = Instant::now();
+        tab.wait_for_load().await.expect("wait_for_load");
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_secs(5),
+            "{url:?}: wait_for_load took {took:?}"
+        );
+    }
     browser.close().await;
 }
 
@@ -176,20 +183,28 @@ async fn main_frame_goto_then_wait_for_load_waits_for_the_page() {
     browser.close().await;
 }
 
-/// A `goto` nobody waited for, then a navigation that a fresh wait would
-/// handle: the document arrives at once, so only the stale signal is wrong.
+/// A `goto` nobody waited for, then a link click: the wait is for the
+/// clicked page, not the first one. Waits until the server has the clicked
+/// page's request before calling `wait_for_load`, so its navigation has
+/// surely started (a race that the planned `expect_navigation` handles).
 #[tokio::test]
 async fn wait_for_load_ignores_an_earlier_gotos_signal() {
     let server = FixtureServer::start().await;
     let browser = launch().await;
     let tab = browser.main_tab();
-    let first = server.url(SITE_A, "/plain?link=/slow-load");
+    let first = server.url(SITE_A, "/plain?link=/slow-load%3Ffirst_byte_ms%3D500");
     tab.goto(&first).await.expect("goto");
     wait_loaded(&tab, &first).await;
     let link = tab.find().css("#link").one().await.expect("find #link");
     link.click().await.expect("click");
+    assert_eventually(
+        Duration::from_secs(5),
+        "the clicked page is requested",
+        || async { !server.requests_to("/slow-load").is_empty() },
+    )
+    .await;
     tab.wait_for_load().await.expect("wait_for_load");
-    let url = server.url(SITE_A, "/slow-load");
+    let url = server.url(SITE_A, "/slow-load?first_byte_ms=500");
     assert_waited_for(
         &server,
         &tab,

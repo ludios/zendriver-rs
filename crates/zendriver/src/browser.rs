@@ -1896,10 +1896,11 @@ pub(crate) struct BrowserInner {
 }
 
 impl BrowserInner {
-    /// Send `Target.createTarget` with `params` (which must hold the `url`)
-    /// at browser scope and return the [`Tab`] that the tab registrar
-    /// registers for the new target, with its next [`Tab::wait_for_load`]
-    /// armed for the navigation to `url` (unless `url` is `about:blank`).
+    /// Send `Target.createTarget` for `url`, plus the other parameters in
+    /// `params` (an object), at browser scope and return the [`Tab`] that the
+    /// tab registrar registers for the new target, with its next
+    /// [`Tab::wait_for_load`] armed for the navigation to `url` (unless `url`
+    /// is `about:blank`).
     ///
     /// # Errors
     ///
@@ -1909,11 +1910,12 @@ impl BrowserInner {
     /// is misconfigured or the registrar observer crashed.
     pub(crate) async fn create_tab(
         &self,
-        params: serde_json::Value,
+        url: String,
+        mut params: serde_json::Value,
     ) -> Result<Tab, ZendriverError> {
-        let url = params["url"].as_str();
-        assert!(url.is_some(), "create_tab: params without a url: {params}");
-        let navigates = url != Some("about:blank");
+        // Chrome opens an empty URL as about:blank, and ignores its case.
+        let navigates = !url.is_empty() && !url.eq_ignore_ascii_case("about:blank");
+        params["url"] = serde_json::Value::String(url);
         let res = self
             .conn
             .call_raw("Target.createTarget", params, None)
@@ -4318,11 +4320,11 @@ impl Browser {
     /// Shared path behind [`Browser::new_tab_at`] (`new_window = false`) and
     /// [`Browser::new_window_at`] (`new_window = true`).
     async fn create_target(&self, url: String, new_window: bool) -> Result<Tab, ZendriverError> {
-        let mut params = json!({ "url": url });
+        let mut params = json!({});
         if new_window {
             params["newWindow"] = serde_json::Value::Bool(true);
         }
-        self.inner.create_tab(params).await
+        self.inner.create_tab(url, params).await
     }
 
     /// Snapshot of all currently-registered tabs.
@@ -6683,31 +6685,13 @@ mod tests {
         )
         .await;
 
-        // The debugger release and the new window's load-state probe (it
-        // was created at a real URL, so `wait_for_load` gets armed) race:
-        // answer both, in whichever order they come.
-        let mut released = false;
-        let mut probed = false;
-        while !(released && probed) {
-            let (method, id) = mock
-                .recv_cmd_timeout(std::time::Duration::from_secs(2))
-                .await
-                .unwrap_or_else(|| {
-                    panic!("within 2s: released={released}, probed={probed}, want both")
-                });
-            match method.as_str() {
-                "Runtime.runIfWaitingForDebugger" => {
-                    mock.reply(id, json!({})).await;
-                    released = true;
-                }
-                "Runtime.evaluate" => {
-                    mock.reply(id, json!({ "result": { "value": "complete" } }))
-                        .await;
-                    probed = true;
-                }
-                _ => {}
-            }
-        }
+        let release_id = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            mock.expect_cmd("Runtime.runIfWaitingForDebugger"),
+        )
+        .await
+        .expect("debugger-release did not fire within 2s");
+        mock.reply(release_id, json!({})).await;
 
         let win = tokio::time::timeout(std::time::Duration::from_secs(2), fut)
             .await

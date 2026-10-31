@@ -45,7 +45,7 @@ impl BrowserContext {
     /// internal tab registrar fails to register the new tab within 5s.
     pub async fn new_tab_at(&self, url: impl Into<String>) -> Result<Tab, ZendriverError> {
         self.browser
-            .create_tab(json!({ "url": url.into(), "browserContextId": self.id }))
+            .create_tab(url.into(), json!({ "browserContextId": self.id }))
             .await
     }
 }

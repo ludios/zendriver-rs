@@ -33,7 +33,7 @@ use crate::error::{Result, ZendriverError};
 use crate::frame::Frame;
 use crate::input::InputController;
 use crate::isolated_world::IsolatedWorldCache;
-use crate::load_tracker::{LoadTracker, loading_changes};
+use crate::load_tracker::LoadTracker;
 use crate::network_idle::IdleLossPolicy;
 use crate::screenshot::ScreenshotBuilder;
 
@@ -925,6 +925,30 @@ impl Tab {
         Ok(res)
     }
 
+    /// Send `method`, which starts a navigation of the main frame, and arm
+    /// the next [`Tab::wait_for_load`] to wait for that navigation. Returns
+    /// Chrome's reply.
+    ///
+    /// # Errors
+    ///
+    /// The call's own error, or [`ZendriverError::Navigation`] when the
+    /// reply carries an `errorText` (only `Page.navigate` replies have one).
+    /// The wait stays armed then: Chrome loads its error page, or stops
+    /// loading at once for a download.
+    async fn navigate_main_frame(&self, method: &str, params: Value) -> Result<Value> {
+        // The main frame's id is the target id. Created before the call, so
+        // this navigation's events can't be missed.
+        let tracker = LoadTracker::before_navigating(&self.inner.session, self.target_id());
+        let res = self.call(method, params).await?;
+        *self.inner.pending_load.lock().await = Some(tracker);
+        if let Some(err) = res.get("errorText").and_then(|v| v.as_str()) {
+            if !err.is_empty() {
+                return Err(ZendriverError::Navigation(err.to_string()));
+            }
+        }
+        Ok(res)
+    }
+
     /// Navigate the tab to `url`.
     ///
     /// Does NOT wait for the load to complete — call [`Tab::wait_for_load`]
@@ -967,55 +991,40 @@ impl Tab {
         Ok(())
     }
 
-    /// Send `method`, which starts a navigation of the main frame, and arm
-    /// the next [`Tab::wait_for_load`] to wait for that navigation. Returns
-    /// Chrome's reply.
-    ///
-    /// # Errors
-    ///
-    /// The call's own error, or [`ZendriverError::Navigation`] when the
-    /// reply carries an `errorText` (only `Page.navigate` replies have one).
-    async fn navigate_main_frame(&self, method: &str, params: Value) -> Result<Value> {
-        // The main frame's id is the target id. Subscribed before the call,
-        // so this navigation's events can't be missed.
-        let tracker = LoadTracker::before_navigating(&self.inner.session, self.target_id());
-        let res = self.call(method, params).await?;
-        if let Some(err) = res.get("errorText").and_then(|v| v.as_str()) {
-            if !err.is_empty() {
-                return Err(ZendriverError::Navigation(err.to_string()));
-            }
-        }
-        *self.inner.pending_load.lock().await = Some(tracker);
-        Ok(res)
-    }
-
     /// Arm the next [`Tab::wait_for_load`] to wait for the navigation that a
     /// new tab was created with, which may not have started yet: until the
     /// tab has left `about:blank` and finished loading.
     pub(crate) async fn arm_initial_navigation(&self) {
-        let changes = loading_changes(&self.inner.session, self.target_id());
-        let state = self
-            .ready_state("location.href === 'about:blank' ? 'blank' : document.readyState")
-            .await;
-        let loading = state.as_deref() != Some("complete");
-        *self.inner.pending_load.lock().await = Some(LoadTracker::new(changes, loading));
+        let tracker = LoadTracker::probed(
+            &self.inner.session,
+            self.target_id(),
+            "location.href === 'about:blank' ? 'blank' : document.readyState",
+        );
+        *self.inner.pending_load.lock().await = Some(tracker);
     }
 
     /// Wait until the main frame has finished loading.
     ///
-    /// After [`Tab::goto`], [`Tab::back`], [`Tab::forward`], [`Tab::reload`],
-    /// or [`crate::Browser::new_tab_at`], that is the navigation they started,
-    /// or one that began after it. Otherwise it is whatever navigation is in
-    /// progress, if any: a navigation that a click or a key press is about to
-    /// start may not have begun yet, in which case this returns at once.
+    /// After a navigation that zendriver starts — [`Tab::goto`],
+    /// [`Tab::back`], [`Tab::forward`], [`Tab::reload`],
+    /// [`Tab::reload_with`], [`crate::Frame::goto`] on the main frame, or
+    /// opening the tab with [`crate::Browser::new_tab_at`],
+    /// [`crate::Browser::new_window_at`] or
+    /// [`crate::BrowserContext::new_tab_at`] — that is the navigation it
+    /// started, or one that began after it.
+    ///
+    /// Otherwise it waits only if the current document hasn't finished
+    /// loading. A navigation that a click or a key press starts leaves the
+    /// old document in place until the new one arrives, so this may return
+    /// at once, on the old page.
     ///
     /// Bounded by a 30s timeout.
     ///
     /// # Errors
     ///
     /// Returns [`ZendriverError::Timeout`] when the main frame is still
-    /// loading after 30s; [`ZendriverError::Navigation`] if the event stream
-    /// closes (transport teardown).
+    /// loading after 30s; [`ZendriverError::Navigation`] if the connection
+    /// to the page closes first.
     ///
     /// # Examples
     ///
@@ -1032,41 +1041,10 @@ impl Tab {
         let tracker = match pending {
             Some(tracker) => tracker,
             None => {
-                // Subscribed before reading the state, so a start or stop
-                // that lands in between is applied after it.
-                let changes = loading_changes(&self.inner.session, self.target_id());
-                let complete =
-                    self.ready_state("document.readyState").await.as_deref() == Some("complete");
-                LoadTracker::new(changes, !complete)
+                LoadTracker::probed(&self.inner.session, self.target_id(), "document.readyState")
             }
         };
         tracker.wait(DEFAULT_LOAD_TIMEOUT).await
-    }
-
-    /// The string that `expression` (about `document.readyState`) evaluates
-    /// to in the main world, or `None` (logged) if the evaluation fails.
-    async fn ready_state(&self, expression: &str) -> Option<String> {
-        self.call(
-            "Runtime.evaluate",
-            json!({
-                "expression": expression,
-                "returnByValue": true,
-            }),
-        )
-        .await
-        .inspect_err(|e| {
-            // Swallowing this made a failed evaluate indistinguishable from
-            // a not-yet-complete page: both wait for the main frame to stop
-            // loading, with nothing anywhere saying the probe never ran.
-            warn!(
-                error = %e,
-                %expression,
-                "document.readyState probe failed; counting the main frame as \
-                 loading until Chrome says it stopped"
-            );
-        })
-        .ok()
-        .and_then(|v| v.get("result")?.get("value")?.as_str().map(str::to_owned))
     }
 
     /// Block until the document reaches at least the `until` load milestone.

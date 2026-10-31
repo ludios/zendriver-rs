@@ -27,7 +27,7 @@ use zendriver_transport::SessionHandle;
 
 use crate::error::{Result, ZendriverError};
 use crate::isolated_world::IsolatedWorldCache;
-use crate::load_tracker::LoadTracker;
+use crate::load_tracker::next_stop;
 use crate::tab::{Tab, TabInner};
 
 pub mod lifecycle;
@@ -386,6 +386,16 @@ impl Frame {
             .await
     }
 
+    /// The tab this frame belongs to.
+    ///
+    /// # Errors
+    ///
+    /// [`ZendriverError::Navigation`] if every handle to the tab was dropped.
+    fn owning_tab(&self) -> Result<Tab> {
+        self.tab_for_synthesize()
+            .ok_or_else(|| ZendriverError::Navigation("the frame's tab is gone".into()))
+    }
+
     /// Navigate **this frame** to `url`.
     ///
     /// Only supported for the main frame, where it is [`crate::Tab::goto`]
@@ -419,16 +429,6 @@ impl Frame {
         self.owning_tab()?.goto(url).await
     }
 
-    /// The tab this frame belongs to.
-    ///
-    /// # Errors
-    ///
-    /// [`ZendriverError::Navigation`] if every handle to the tab was dropped.
-    fn owning_tab(&self) -> Result<Tab> {
-        self.tab_for_synthesize()
-            .ok_or_else(|| ZendriverError::Navigation("the frame's tab is gone".into()))
-    }
-
     /// Wait until **this frame** has finished loading.
     ///
     /// For the main frame this is [`crate::Tab::wait_for_load`]. For a
@@ -457,9 +457,12 @@ impl Frame {
         if self.is_main() {
             return self.owning_tab()?.wait_for_load().await;
         }
-        LoadTracker::before_navigating(&self.inner.session, &self.inner.frame_id)
-            .wait(DEFAULT_LOAD_TIMEOUT)
-            .await
+        next_stop(
+            &self.inner.session,
+            &self.inner.frame_id,
+            DEFAULT_LOAD_TIMEOUT,
+        )
+        .await
     }
 
     /// Begin a chainable element query against this frame's document.
