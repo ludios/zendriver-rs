@@ -192,17 +192,14 @@ async fn slow_resource(params: Params) -> impl IntoResponse {
     )
 }
 
-async fn form(params: Params) -> Html<String> {
-    let action = escape_html(params.get("action").map_or("/form-result", String::as_str));
+async fn form() -> Html<String> {
     page(
         "Form",
         "",
-        &format!(
-            r#"<form id="form" action="{action}" method="get">
+        r#"<form id="form" action="/form-result" method="get">
 <input id="q" name="q" autofocus>
 <button id="submit" type="submit">Search</button>
-</form>"#
-        ),
+</form>"#,
     )
 }
 
@@ -481,7 +478,7 @@ fn canned_routes() -> Router {
 /// | `/plain?title=T&link=L` | A page titled `T` (default `Plain`) with `#heading`, `#host`, and a `#link` to `L` (default `/plain?title=Linked`) |
 /// | `/slow-load?delay_ms=N&iframe=1&first_byte_ms=F&fresh=1` | Its `#slow` image takes `N` ms (default 1000), so `load` fires late; `iframe=1` adds a fast `#child` iframe that finishes first; the document itself is sent after `F` ms (default 0); `fresh=1` gives the image a new URL on every load, so no cache can answer it, not even on back/forward or reload |
 /// | `/slow-resource?delay_ms=N` | The image behind `/slow-load`: a GIF sent after `N` ms, `no-store` |
-/// | `/form?action=A` | `#form` with input `#q` that GETs `A` (default `/form-result`) on submit (Enter or `#submit`); a GET form replaces `A`'s query with `q=...` |
+/// | `/form` | `#form` with input `#q` that GETs `/form-result` on submit (Enter or `#submit`) |
 /// | `/form-result?q=V` | Titled `Form result`; shows `V` in `#q` |
 /// | `/redirect/N` | `N` (at least 1) 302s, then `/plain?title=Redirected` |
 /// | `/iframe-same-origin` | `#child` iframe of `/frame-child` on the same origin |
@@ -567,8 +564,16 @@ impl FixtureServer {
     /// When the latest response to `path` was produced, or `None` if no
     /// request to it has been answered yet.
     pub fn last_responded_at(&self, path: &str) -> Option<Instant> {
+        self.last_responded_at_after(path, 0)
+    }
+
+    /// [`FixtureServer::last_responded_at`], counting only requests after
+    /// the first `skip` to `path`: pass `requests_to(path).len()` from
+    /// before an action to see only the requests it caused.
+    pub fn last_responded_at_after(&self, path: &str, skip: usize) -> Option<Instant> {
         self.requests_to(path)
             .iter()
+            .skip(skip)
             .rev()
             .find_map(|r| r.responded_at)
     }

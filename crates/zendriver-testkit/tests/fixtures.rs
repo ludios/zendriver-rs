@@ -90,6 +90,67 @@ async fn slow_load_fires_load_after_the_slow_resource() {
     browser.close().await;
 }
 
+/// `first_byte_ms` holds back `/slow-load`'s document, and `fresh=1` gives
+/// its image a new URL on every load while still holding up `load`.
+#[tokio::test]
+async fn slow_load_holds_back_the_document_and_refreshes_the_image() {
+    const DELAY_MS: u64 = 300;
+    let server = FixtureServer::start().await;
+    let browser = launch().await;
+    let tab = browser.main_tab();
+
+    let held = format!("/slow-load?first_byte_ms={DELAY_MS}&delay_ms=0");
+    load(&tab, &server.url(SITE_A, &held)).await;
+    let document = &server.requests_to("/slow-load")[0];
+    let waited = document.responded_at.expect("document served") - document.received_at;
+    assert!(
+        waited >= Duration::from_millis(DELAY_MS),
+        "the document was held back only {waited:?}"
+    );
+
+    let fresh = server.url(SITE_A, &format!("/slow-load?fresh=1&delay_ms={DELAY_MS}"));
+    for _ in 0..2 {
+        load(&tab, &fresh).await;
+        let load_start = eval(
+            &tab,
+            "performance.getEntriesByType('navigation')[0].loadEventStart",
+        )
+        .await;
+        assert!(
+            load_start.as_f64().expect("a number") >= DELAY_MS as f64,
+            "load fired {load_start} ms in, before the {DELAY_MS} ms fresh image",
+        );
+    }
+    let images: Vec<String> = server.requests_to("/slow-resource")[1..]
+        .iter()
+        .map(|r| r.uri.to_string())
+        .collect();
+    assert!(
+        images.len() == 2 && images[0] != images[1],
+        "each load should ask for its own image URL: {images:?}"
+    );
+
+    browser.close().await;
+}
+
+/// `/plain?link=L` points `#link` at `L`, escaped.
+#[tokio::test]
+async fn plain_link_goes_where_asked() {
+    let server = FixtureServer::start().await;
+    let browser = launch().await;
+    let tab = browser.main_tab();
+    load(
+        &tab,
+        &server.url(SITE_A, "/plain?link=%2Fform%3Fa%3D1%26b%3D%22"),
+    )
+    .await;
+    assert_eq!(
+        eval(&tab, "document.getElementById('link').getAttribute('href')").await,
+        json!("/form?a=1&b=\"")
+    );
+    browser.close().await;
+}
+
 #[tokio::test]
 async fn form_submit_navigates_to_the_result() {
     let server = FixtureServer::start().await;
