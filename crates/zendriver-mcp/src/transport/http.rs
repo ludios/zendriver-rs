@@ -44,6 +44,8 @@ pub async fn serve(
 
     let router = axum::Router::new().nest_service("/mcp", service);
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    // The bound address, not `addr`: with port 0 only this says which port.
+    let addr = listener.local_addr()?;
     tracing::info!(%addr, "zendriver-mcp HTTP listening on /mcp");
     axum::serve(listener, router).await?;
     Ok(())
