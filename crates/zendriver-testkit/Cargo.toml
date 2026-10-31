@@ -1,0 +1,28 @@
+[package]
+name = "zendriver-testkit"
+description = "Shared real-Chrome test fixtures for the zendriver-rs workspace (not published)"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# Runs this crate's own real-Chrome tests (the fixtures checked against a
+# real browser). Same name as in `zendriver` / `zendriver-mcp`, so CI's
+# `--workspace --features integration-tests` picks them up.
+integration-tests = []
+
+[dependencies]
+zendriver.workspace          = true
+axum.workspace               = true
+base64.workspace             = true
+futures.workspace            = true
+serde_json.workspace         = true
+sysinfo.workspace            = true
+tokio.workspace              = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true

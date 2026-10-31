@@ -3624,6 +3624,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zendriver-testkit"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "base64",
+ "futures",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zendriver",
+]
+
+[[package]]
 name = "zendriver-transport"
 version = "0.3.1"
 dependencies = [

@@ -124,3 +124,9 @@ Capability crates are wired into `zendriver` behind features (`interception` /
 `cloudflare` / `imperva` / `datadome` / `fetcher` / `expect` / `monitor` /
 `geo` / `tracker-blocking`), which `zendriver-mcp` re-exposes behind matching
 MCP features (plus `fingerprints`).
+
+Real-Chrome tests share their fixtures through `zendriver-testkit`
+(unpublished, dev-only): `FixtureServer` (canned local pages, with `a.test` /
+`b.test` as two sites), `launch_for_test` (headless, captured logs, and a
+check on close that Chrome's whole process tree exited), and timing helpers.
+Prefer it to a hand-rolled `Browser::builder()` + `MockServer`.

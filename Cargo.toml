@@ -11,6 +11,7 @@ members = [
     "crates/zendriver-imperva",
     "crates/zendriver-datadome",
     "crates/zendriver-fingerprints",
+    "crates/zendriver-testkit",
     "crates/locale-gen",
     "crates/gpu-tier-gen",
     "crates/gpu-catalogue-gen",
