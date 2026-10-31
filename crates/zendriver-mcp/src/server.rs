@@ -555,7 +555,7 @@ impl ZendriverServer {
     /// Fetch the browser's cookies.
     #[tool(
         name = "browser_cookies_get",
-        description = "Fetch the browser's cookies. With `url` set, returns only cookies that would be sent for that URL (CDP `Network.getCookies`); otherwise returns every cookie in the store (`Storage.getCookies`). `name` (optional) post-filters by exact-match cookie name. Returns `{ cookies: [...] }`."
+        description = "Fetch the browser's cookies. With `url` set, returns only cookies that a request to that URL would carry (matching domain, path and `Secure`); otherwise returns every cookie in the store (`Storage.getCookies`). `name` (optional) post-filters by exact-match cookie name. Returns `{ cookies: [...] }`."
     )]
     pub async fn browser_cookies_get(
         &self,
@@ -583,7 +583,7 @@ impl ZendriverServer {
     /// Delete cookies by name (optionally narrowed by domain / path).
     #[tool(
         name = "browser_cookies_delete",
-        description = "Delete cookies matching `name` plus optional `domain` / `path` narrowers (`Network.deleteCookies`). When `domain` and `path` are omitted, every cookie with the given name is removed across all domains and paths. Missing cookies are silently ignored (CDP returns no match count)."
+        description = "Delete cookies matching `name` plus optional `domain` / `path` narrowers. `domain` ignores a leading dot, so `example.com` also matches `.example.com`. When `domain` and `path` are omitted, every cookie with the given name is removed across all domains and paths. Missing cookies are silently ignored."
     )]
     pub async fn browser_cookies_delete(
         &self,

@@ -292,9 +292,7 @@ fn cookie_names(result: &Value) -> Vec<String> {
 }
 
 #[tokio::test]
-#[ignore = "known bug, TODO P0 'Browser-level cookies().for_url() / .delete() fail with \
-            \"method not found\"' (R5, MEC #3)"]
-async fn known_bug_cookies_get_by_url_and_delete() {
+async fn cookies_get_by_url_and_delete() {
     let fixtures = FixtureServer::start().await;
     let mut server = McpServer::start(Transport::Stdio).await;
     let url = fixtures.url("127.0.0.1", "/plain");

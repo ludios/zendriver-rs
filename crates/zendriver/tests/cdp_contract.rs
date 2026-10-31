@@ -86,9 +86,7 @@ const COMMANDS: &[(&str, Scope)] = &[
     ("Input.dispatchMouseEvent", P),
     ("Input.dispatchTouchEvent", P),
     ("Input.synthesizeScrollGesture", P),
-    ("Network.deleteCookies", P),
     ("Network.enable", P),
-    ("Network.getCookies", P),
     ("Network.getResponseBody", P),
     ("Network.loadNetworkResource", P),
     ("Network.setCookie", P),
@@ -141,18 +139,7 @@ const COMMANDS: &[(&str, Scope)] = &[
 /// each naming its TODO item. Chrome keeps rejecting them, so nothing here
 /// notices when the library stops sending one: whoever fixes it deletes the
 /// row. The scope is hand-kept, like everywhere in these tables.
-const KNOWN_MISSING: &[(&str, Scope, &str)] = &[
-    (
-        "Network.deleteCookies",
-        B,
-        "MEC #3: Browser::cookies().delete()",
-    ),
-    (
-        "Network.getCookies",
-        B,
-        "MEC #3: Browser::cookies().for_url()",
-    ),
-];
+const KNOWN_MISSING: &[(&str, Scope, &str)] = &[];
 
 /// Commands in [`COMMANDS`] that aren't sent: they take no parameters to
 /// mistype, so they would run, and running them would end the test.

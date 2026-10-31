@@ -8,7 +8,7 @@ description: "Output of `browser_cookies_delete`."
 type: object
 properties:
   deleted:
-    description: "`true` if CDP accepted the delete (it doesn't report match count;\nmissing cookies are silently ignored)."
+    description: "`true` if the delete succeeded (missing cookies are silently\nignored, and not counted)."
     type: boolean
 required:
   - deleted

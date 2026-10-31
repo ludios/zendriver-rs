@@ -8,13 +8,13 @@ description: "Input for `browser_cookies_delete`."
 type: object
 properties:
   domain:
-    description: "Optional domain narrower. When omitted, cookies with the given name\nacross all domains are deleted."
+    description: "Optional domain narrower, ignoring a leading dot (`example.com`\nalso matches `.example.com`). When omitted, cookies with the given\nname across all domains are deleted."
     type:
       - string
       - "null"
     default: ~
   name:
-    description: "Cookie name to delete. Always required (CDP `Network.deleteCookies`\nrequires it)."
+    description: Cookie name to delete.
     type: string
   path:
     description: "Optional path narrower. When omitted, cookies with the given name\nacross all paths are deleted."

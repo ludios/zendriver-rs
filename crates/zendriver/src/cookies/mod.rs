@@ -1,4 +1,4 @@
-//! Browser-wide cookie store backed by CDP `Network.*Cookies*` methods.
+//! Browser-wide cookie store backed by CDP `Storage.*Cookies` methods.
 //!
 //! [`CookieJar`] wraps a [`Connection`] and exposes ergonomic CRUD over
 //! Chrome's cookie store. The jar is cheap to clone — internally an `Arc`
@@ -196,6 +196,50 @@ pub struct Cookie {
     pub partition_key: Option<CookiePartitionKey>,
 }
 
+impl Cookie {
+    /// Whether a request to `url` would carry this cookie, by the rules
+    /// that [`CookieJar::for_url`] lists.
+    fn matches_url(&self, url: &url::Url) -> bool {
+        let Some(host) = url.host_str() else {
+            return false;
+        };
+        let domain = self.domain.to_ascii_lowercase();
+        let domain_matches = match domain.strip_prefix('.') {
+            Some(parent) => {
+                host == parent
+                    || host
+                        .strip_suffix(parent)
+                        .is_some_and(|sub| sub.ends_with('.'))
+            }
+            None => host == domain,
+        };
+        let request_path = url.path();
+        let path_matches = request_path == self.path
+            || request_path
+                .strip_prefix(self.path.as_str())
+                .is_some_and(|rest| self.path.ends_with('/') || rest.starts_with('/'));
+        domain_matches && path_matches && (!self.secure || is_secure(url))
+    }
+}
+
+/// Whether Chrome sends `Secure` cookies to `url`: a secure scheme, or a
+/// loopback host.
+fn is_secure(url: &url::Url) -> bool {
+    if matches!(url.scheme(), "https" | "wss") {
+        return true;
+    }
+    match url.host() {
+        Some(url::Host::Domain(d)) => d == "localhost" || d.ends_with(".localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// The `expires` that [`CookieJar::delete`] gives a cookie: one second
+/// into the Unix epoch, long past.
+const EXPIRED: f64 = 1.0;
+
 /// Internal mirror of [`Cookie`] with CDP's camelCase rename. Used only at
 /// the transport boundary — never escapes this module. Round-trips losslessly
 /// through `From<Cookie>` / `From<CdpCookie>`.
@@ -370,11 +414,24 @@ impl CookieJar {
         parse_cookies(&resp)
     }
 
-    /// Return cookies that would be sent for `url`.
+    /// Return the cookies that a request to `url` would carry.
     ///
-    /// Maps to `Network.getCookies` with `urls: [url]`. Accepting a parsed
-    /// [`url::Url`] surfaces malformed-URL errors at construction time
-    /// instead of as a confusing empty result.
+    /// Reads every cookie with `Storage.getCookies` and keeps those whose
+    /// domain, path and `Secure` flag match `url` by RFC 6265's rules
+    /// (section 5.4):
+    ///
+    /// - Domain: a cookie whose domain starts with a dot matches that
+    ///   domain and its subdomains; any other matches exactly that host.
+    /// - Path: the URL's path is the cookie's path, or below it.
+    /// - `Secure`: only for a secure URL: `https`, `wss`, or a loopback
+    ///   host (`localhost`, `*.localhost`, `127.0.0.0/8`, `[::1]`), which
+    ///   Chrome treats as secure.
+    ///
+    /// `SameSite` and the partition key are ignored: they depend on the
+    /// page making the request. Chrome's own `Network.getCookies` isn't
+    /// used because the browser target has no `Network` domain. Accepting
+    /// a parsed [`url::Url`] surfaces malformed-URL errors at construction
+    /// time instead of as a confusing empty result.
     ///
     /// # Examples
     ///
@@ -388,16 +445,9 @@ impl CookieJar {
     /// # Ok(()) }
     /// ```
     pub async fn for_url(&self, url: &url::Url) -> Result<Vec<Cookie>> {
-        let resp = self
-            .inner
-            .conn
-            .call_raw(
-                "Network.getCookies",
-                json!({ "urls": [url.as_str()] }),
-                self.session(),
-            )
-            .await?;
-        parse_cookies(&resp)
+        let mut cookies = self.all().await?;
+        cookies.retain(|c| c.matches_url(url));
+        Ok(cookies)
     }
 
     /// Set a single cookie.
@@ -475,11 +525,19 @@ impl CookieJar {
         Ok(())
     }
 
-    /// Delete cookies matching `name` and optional `domain` / `path`.
+    /// Delete the cookies named `name`, narrowed to those whose domain is
+    /// `domain` and whose path is `path` when given. Without `domain` and
+    /// `path`, deletes every cookie named `name`, on every domain and path.
     ///
-    /// Maps to `Network.deleteCookies`. CDP requires `name`; `domain` and
-    /// `path` are optional narrowers (when omitted, all cookies with the
-    /// given name across all domains/paths are deleted).
+    /// `domain` is compared ignoring a leading dot on either side, so
+    /// `"example.com"` matches both a cookie that only `example.com`
+    /// receives and a `.example.com` cookie that its subdomains receive.
+    ///
+    /// Reads every cookie with `Storage.getCookies`, then overwrites each
+    /// match with an expired copy through `Storage.setCookies`, which makes
+    /// Chrome drop it. Chrome's `Network.deleteCookies` isn't used because
+    /// the browser target has no `Network` domain, and it can't delete by
+    /// name alone. Deleting a cookie that doesn't exist is not an error.
     ///
     /// # Examples
     ///
@@ -490,16 +548,31 @@ impl CookieJar {
     /// # Ok(()) }
     /// ```
     pub async fn delete(&self, name: &str, domain: Option<&str>, path: Option<&str>) -> Result<()> {
-        let mut params = json!({ "name": name });
-        if let Some(d) = domain {
-            params["domain"] = json!(d);
-        }
-        if let Some(p) = path {
-            params["path"] = json!(p);
+        let domain = domain.map(|d| d.trim_start_matches('.'));
+        let expired: Vec<CdpCookie> = self
+            .all()
+            .await?
+            .into_iter()
+            .filter(|c| {
+                c.name == name
+                    && domain.is_none_or(|d| c.domain.trim_start_matches('.') == d)
+                    && path.is_none_or(|p| c.path == p)
+            })
+            .map(|c| CdpCookie {
+                expires: Some(EXPIRED),
+                ..c.into()
+            })
+            .collect();
+        if expired.is_empty() {
+            return Ok(());
         }
         self.inner
             .conn
-            .call_raw("Network.deleteCookies", params, self.session())
+            .call_raw(
+                "Storage.setCookies",
+                json!({ "cookies": expired }),
+                self.session(),
+            )
             .await?;
         Ok(())
     }
@@ -527,8 +600,8 @@ impl CookieJar {
     }
 }
 
-/// Shared parser for `Storage.getCookies` and `Network.getCookies` —
-/// both responses use `{ cookies: CdpCookie[] }`.
+/// Parser for the `{ cookies: CdpCookie[] }` that `Storage.getCookies`
+/// returns.
 #[allow(clippy::result_large_err)] // ZendriverError variance is the project-wide return type
 fn parse_cookies(resp: &serde_json::Value) -> Result<Vec<Cookie>> {
     let arr = resp
@@ -547,7 +620,7 @@ fn parse_cookies(resp: &serde_json::Value) -> Result<Vec<Cookie>> {
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use zendriver_transport::testing::MockConnection;
 
     /// [`CookieJar::all`] dispatches `Storage.getCookies` and parses the
@@ -691,12 +764,19 @@ mod tests {
         mock.reply(id, json!({})).await;
         set.await.unwrap().unwrap();
 
-        // delete -> Network.deleteCookies
+        // delete -> Storage.getCookies, then Storage.setCookies
         let del = tokio::spawn({
             let j = jar.clone();
             async move { j.delete("a", None, None).await }
         });
-        let id = mock.expect_cmd("Network.deleteCookies").await;
+        let id = mock.expect_cmd("Storage.getCookies").await;
+        assert_eq!(mock.last_sent()["sessionId"], "S9");
+        mock.reply(
+            id,
+            json!({ "cookies": [{ "name": "a", "value": "1", "domain": ".x.com", "path": "/" }] }),
+        )
+        .await;
+        let id = mock.expect_cmd("Storage.setCookies").await;
         assert_eq!(mock.last_sent()["sessionId"], "S9");
         mock.reply(id, json!({})).await;
         del.await.unwrap().unwrap();
@@ -766,40 +846,134 @@ mod tests {
         conn.shutdown();
     }
 
-    /// [`CookieJar::delete`] dispatches `Network.deleteCookies` with `name`
-    /// always present and `domain` / `path` included only when supplied.
-    #[tokio::test]
-    async fn delete_dispatches_network_delete_cookies_with_filters() {
+    /// The `(name, domain, path)` of the cookies that `jar.delete(name,
+    /// domain, path)` overwrites, given the cookies `stored`. Panics unless
+    /// each overwrite has an `expires` in the past.
+    async fn deleted_by(
+        stored: &Value,
+        name: &'static str,
+        domain: Option<&'static str>,
+        path: Option<&'static str>,
+    ) -> Vec<(String, String, String)> {
         let (mut mock, conn) = MockConnection::pair();
         let jar = CookieJar::new(conn.clone());
-
-        // Variant A: name only.
-        let call_a = tokio::spawn({
-            let j = jar.clone();
-            async move { j.delete("sid", None, None).await }
-        });
-        let id_a = mock.expect_cmd("Network.deleteCookies").await;
-        let params_a = &mock.last_sent()["params"];
-        assert_eq!(params_a["name"], "sid");
-        assert!(params_a.get("domain").is_none());
-        assert!(params_a.get("path").is_none());
-        mock.reply(id_a, json!({})).await;
-        call_a.await.unwrap().unwrap();
-
-        // Variant B: name + domain + path.
-        let call_b = tokio::spawn({
-            let j = jar.clone();
-            async move { j.delete("sid", Some(".example.com"), Some("/api")).await }
-        });
-        let id_b = mock.expect_cmd("Network.deleteCookies").await;
-        let params_b = &mock.last_sent()["params"];
-        assert_eq!(params_b["name"], "sid");
-        assert_eq!(params_b["domain"], ".example.com");
-        assert_eq!(params_b["path"], "/api");
-        mock.reply(id_b, json!({})).await;
-        call_b.await.unwrap().unwrap();
-
+        let call = tokio::spawn(async move { jar.delete(name, domain, path).await });
+        let id = mock.expect_cmd("Storage.getCookies").await;
+        mock.reply(id, json!({ "cookies": stored })).await;
+        let mut deleted = Vec::new();
+        if let Some((method, id)) = mock
+            .recv_cmd_timeout(std::time::Duration::from_millis(200))
+            .await
+        {
+            assert_eq!(method, "Storage.setCookies");
+            for c in mock.last_sent()["params"]["cookies"].as_array().unwrap() {
+                assert_eq!(c["expires"], EXPIRED, "not expired: {c}");
+                deleted.push((
+                    c["name"].as_str().unwrap().to_string(),
+                    c["domain"].as_str().unwrap().to_string(),
+                    c["path"].as_str().unwrap().to_string(),
+                ));
+            }
+            mock.reply(id, json!({})).await;
+        }
+        call.await.unwrap().unwrap();
         conn.shutdown();
+        deleted
+    }
+
+    /// [`CookieJar::delete`] expires exactly the stored cookies with that
+    /// name, narrowed by domain (ignoring a leading dot) and path, and sends
+    /// nothing when none match.
+    #[tokio::test]
+    async fn delete_expires_only_the_matching_cookies() {
+        let stored = json!([
+            { "name": "sid", "value": "1", "domain": ".example.com", "path": "/" },
+            { "name": "sid", "value": "2", "domain": "example.com", "path": "/api" },
+            { "name": "sid", "value": "3", "domain": "other.com", "path": "/api" },
+            { "name": "lang", "value": "4", "domain": ".example.com", "path": "/api" },
+        ]);
+        let triple = |n: &str, d: &str, p: &str| (n.to_string(), d.to_string(), p.to_string());
+        assert_eq!(
+            deleted_by(&stored, "sid", None, None).await,
+            [
+                triple("sid", ".example.com", "/"),
+                triple("sid", "example.com", "/api"),
+                triple("sid", "other.com", "/api"),
+            ]
+        );
+        assert_eq!(
+            deleted_by(&stored, "sid", Some("example.com"), None).await,
+            [
+                triple("sid", ".example.com", "/"),
+                triple("sid", "example.com", "/api"),
+            ]
+        );
+        assert_eq!(
+            deleted_by(&stored, "sid", Some(".example.com"), Some("/api")).await,
+            [triple("sid", "example.com", "/api")]
+        );
+        assert_eq!(deleted_by(&stored, "nope", None, None).await, []);
+    }
+
+    /// A cookie on `domain` with `path`, `Secure` when `secure`.
+    fn cookie(domain: &str, path: &str, secure: bool) -> Cookie {
+        Cookie {
+            name: "c".into(),
+            domain: domain.into(),
+            path: path.into(),
+            secure,
+            ..Default::default()
+        }
+    }
+
+    fn matches(c: &Cookie, url: &str) -> bool {
+        c.matches_url(&url::Url::parse(url).unwrap())
+    }
+
+    /// RFC 6265's domain rules: a dotted domain covers its subdomains, a
+    /// host-only one just that host, and a suffix isn't a subdomain.
+    #[test]
+    fn matches_url_by_domain() {
+        let dotted = cookie(".example.com", "/", false);
+        assert!(matches(&dotted, "http://example.com/"));
+        assert!(matches(&dotted, "http://a.b.example.com/"));
+        assert!(!matches(&dotted, "http://badexample.com/"));
+        assert!(!matches(&dotted, "http://example.org/"));
+        let host_only = cookie("example.com", "/", false);
+        assert!(matches(&host_only, "http://example.com/"));
+        assert!(!matches(&host_only, "http://www.example.com/"));
+        assert!(matches(
+            &cookie("127.0.0.1", "/", false),
+            "http://127.0.0.1:8080/"
+        ));
+    }
+
+    /// RFC 6265's path-match: the path itself or a path below it, where
+    /// "below" starts at a `/`.
+    #[test]
+    fn matches_url_by_path() {
+        let docs = cookie("example.com", "/docs", false);
+        assert!(matches(&docs, "http://example.com/docs"));
+        assert!(matches(&docs, "http://example.com/docs/a"));
+        assert!(!matches(&docs, "http://example.com/docsearch"));
+        assert!(!matches(&docs, "http://example.com/"));
+        let slash = cookie("example.com", "/docs/", false);
+        assert!(matches(&slash, "http://example.com/docs/a"));
+        assert!(!matches(&slash, "http://example.com/docs"));
+    }
+
+    /// A `Secure` cookie goes to secure schemes and loopback hosts only.
+    #[test]
+    fn matches_url_by_secure() {
+        let secure = cookie("example.com", "/", true);
+        assert!(matches(&secure, "https://example.com/"));
+        assert!(matches(&secure, "wss://example.com/"));
+        assert!(!matches(&secure, "http://example.com/"));
+        for loopback in ["http://localhost/", "http://127.0.0.2/", "http://[::1]/"] {
+            let host = url::Url::parse(loopback).unwrap();
+            let c = cookie(host.host_str().unwrap(), "/", true);
+            assert!(c.matches_url(&host), "{loopback}");
+        }
     }
 
     /// A [`Cookie`] carrying the CHIPS / priority extension fields must

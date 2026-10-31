@@ -14,7 +14,7 @@ properties:
       - "null"
     default: ~
   url:
-    description: "When set, returns only cookies that would be sent for this URL\n(CDP `Network.getCookies`). When unset, returns every cookie in\nthe browser's store (`Storage.getCookies`)."
+    description: "When set, returns only cookies that a request to this URL would\ncarry (matching domain, path and `Secure`). When unset, returns\nevery cookie in the browser's store."
     type:
       - string
       - "null"

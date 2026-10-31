@@ -268,9 +268,9 @@ impl From<CookieDto> for zendriver::Cookie {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CookiesGetInput {
-    /// When set, returns only cookies that would be sent for this URL
-    /// (CDP `Network.getCookies`). When unset, returns every cookie in
-    /// the browser's store (`Storage.getCookies`).
+    /// When set, returns only cookies that a request to this URL would
+    /// carry (matching domain, path and `Secure`). When unset, returns
+    /// every cookie in the browser's store.
     #[serde(default)]
     pub url: Option<String>,
     /// When set, post-filters the result to cookies whose `name` matches
@@ -369,11 +369,11 @@ pub async fn cookies_set(
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CookiesDeleteInput {
-    /// Cookie name to delete. Always required (CDP `Network.deleteCookies`
-    /// requires it).
+    /// Cookie name to delete.
     pub name: String,
-    /// Optional domain narrower. When omitted, cookies with the given name
-    /// across all domains are deleted.
+    /// Optional domain narrower, ignoring a leading dot (`example.com`
+    /// also matches `.example.com`). When omitted, cookies with the given
+    /// name across all domains are deleted.
     #[serde(default)]
     pub domain: Option<String>,
     /// Optional path narrower. When omitted, cookies with the given name
@@ -385,8 +385,8 @@ pub struct CookiesDeleteInput {
 /// Output of `browser_cookies_delete`.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CookiesDeleteOutput {
-    /// `true` if CDP accepted the delete (it doesn't report match count;
-    /// missing cookies are silently ignored).
+    /// `true` if the delete succeeded (missing cookies are silently
+    /// ignored, and not counted).
     pub deleted: bool,
 }
 
