@@ -121,9 +121,14 @@ async fn follow(
     loading: watch::Sender<bool>,
 ) {
     let mut awaiting_start = false;
+    // What to ask the page after lost events. `None` while a navigation
+    // hasn't stopped: until its document commits, the page is the old
+    // document, which reads as complete.
+    let mut reprobe = None;
     match initial {
         Initial::Navigating => awaiting_start = true,
         Initial::Probe(expression) => {
+            reprobe = Some(expression);
             loading.send_replace(!probe_complete(&session, expression).await);
         }
     }
@@ -136,18 +141,21 @@ async fn follow(
             Change::Stopped => {
                 if !awaiting_start {
                     loading.send_replace(false);
+                    reprobe.get_or_insert("document.readyState");
                 }
             }
-            Change::Lost => match initial {
-                // The navigation's start, or even its stop, may be among
-                // the lost events. Asking the page could read the old
-                // document, which stays complete until the new one
-                // commits, so wait for the next stop instead.
-                Initial::Navigating => awaiting_start = false,
-                Initial::Probe(expression) => {
-                    loading.send_replace(!probe_complete(&session, expression).await);
+            Change::Lost => {
+                // Unknown until the page answers, or the next stop arrives.
+                loading.send_replace(true);
+                match reprobe {
+                    Some(expression) => {
+                        loading.send_replace(!probe_complete(&session, expression).await);
+                    }
+                    // The navigation's start, or even its stop, may be
+                    // among the lost events: wait for the next stop.
+                    None => awaiting_start = false,
                 }
-            },
+            }
         }
     }
 }
@@ -333,6 +341,35 @@ mod tests {
         );
         emit(&mock, false, "F", "S1").await;
         waiting.await.unwrap().expect("loaded once it stopped");
+        conn.shutdown();
+    }
+
+    /// After lost events, a navigation's tracker that has seen its stop
+    /// asks the page again: a later navigation's start may have been lost.
+    #[tokio::test]
+    async fn lost_events_after_the_stop_make_a_navigation_probe() {
+        let (mut mock, conn) = MockConnection::pair();
+        let tracker = LoadTracker::before_navigating(&SessionHandle::new(conn.clone(), "S1"), "F");
+        let mut seen = changes(&SessionHandle::new(conn.clone(), "S1"), "F");
+        emit(&mock, true, "F", "S1").await;
+        emit(&mock, false, "F", "S1").await;
+        // A reconnect drops frames the old socket hasn't delivered yet.
+        assert_eq!(seen.next().await, Some(Change::Started));
+        assert_eq!(seen.next().await, Some(Change::Stopped));
+        mock.reconnect(&conn);
+        let id = tokio::time::timeout(LONG, mock.expect_cmd("Page.enable"))
+            .await
+            .expect("no probe after lost events");
+        mock.reply(id, json!({})).await;
+        let id = mock.expect_cmd("Runtime.evaluate").await;
+        assert_eq!(
+            mock.last_sent()["params"]["expression"],
+            "document.readyState"
+        );
+        mock.reply(id, json!({ "result": { "value": "loading" } }))
+            .await;
+        let res = tracker.wait(SHORT).await;
+        assert!(matches!(res, Err(ZendriverError::Timeout(_))), "{res:?}");
         conn.shutdown();
     }
 
