@@ -3456,6 +3456,7 @@ dependencies = [
  "zendriver-imperva",
  "zendriver-interception",
  "zendriver-stealth",
+ "zendriver-testkit",
  "zendriver-transport",
  "zip",
 ]

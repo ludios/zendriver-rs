@@ -149,7 +149,8 @@ jobs:
           # chrome.exe at all) and the orphan/zombie process class from upstream
           # cdpdriver/zendriver#33 + #198, via
           # `repeated_launch_close_leaves_no_orphan_chrome_processes`, which
-          # launches real Chrome 25x and diffs the system PID set.
+          # launches real Chrome 25x and checks each launch's own process
+          # tree exits.
           - os: windows-latest
             filter: 'binary_id(zendriver::prerelease_verification)'
     runs-on: ${{ matrix.os }}
