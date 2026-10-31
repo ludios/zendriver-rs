@@ -260,11 +260,14 @@ pub(crate) async fn check_visible(el: &Element, within: Within) -> Result<bool> 
             // cannot climb back over the threshold: once it is under, stop walking.
             // The walk follows the flat tree, as rendering does: a slotted
             // element's parent is its slot, and a shadow root's is its host.
+            // A `display: contents` node (every slot, by default) has no box,
+            // so its opacity doesn't apply.
             let effective = 1;
             for (let node = el; node;
                  node = node.assignedSlot || node.parentElement || node.getRootNode().host) {
-                const own = parseFloat(getComputedStyle(node).opacity);
-                if (Number.isFinite(own)) effective *= own;
+                const computed = getComputedStyle(node);
+                const own = parseFloat(computed.opacity);
+                if (computed.display !== 'contents' && Number.isFinite(own)) effective *= own;
                 if (effective < 0.01) return false;
             }
 
@@ -541,13 +544,13 @@ mod tests {
             js.contains("node.assignedSlot || node.parentElement || node.getRootNode().host"),
             "the walk must follow the flat tree: {js}"
         );
-        assert!(js.contains("getComputedStyle(node).opacity"), "{js}");
+        assert!(js.contains("parseFloat(computed.opacity)"), "{js}");
         assert!(js.contains("effective *= own"), "{js}");
         // The threshold test sits *inside* the walk: the product only ever
         // decreases, so a chain that has already gone under can stop early.
         assert!(
             one_line(&js).contains(
-                "if (Number.isFinite(own)) effective *= own; if (effective < 0.01) return false; }"
+                "&& Number.isFinite(own)) effective *= own; if (effective < 0.01) return false; }"
             ),
             "the opacity floor must be checked inside the ancestor walk: {js}"
         );

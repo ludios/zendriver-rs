@@ -35,7 +35,11 @@ async fn visible_only_and_is_visible_ignore_where_the_element_is() {
     for el in &visible {
         ids.push(id(el).await);
     }
-    assert_eq!(ids, ["off-page", "below", "skipped"], "visible_only(true)");
+    assert_eq!(
+        ids,
+        ["off-page", "faint-slot", "below", "skipped"],
+        "visible_only(true)"
+    );
 
     let all = tab.find_all().css("button").many().await.expect("buttons");
     for el in &all {
