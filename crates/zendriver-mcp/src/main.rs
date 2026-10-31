@@ -51,19 +51,6 @@ impl From<StealthProfileArg> for StealthProfileChoice {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let result = runtime.block_on(serve());
-    // In stdio mode, a read of stdin sits on a blocking thread until the
-    // client closes stdin, and dropping the runtime would wait for it: after
-    // a shutdown signal, the server would close its browser and then hang.
-    // Everything that needs to finish has finished, so don't wait.
-    runtime.shutdown_background();
-    result
-}
-
 /// Serve MCP over the transport the command line asks for, until the client
 /// goes away or a shutdown signal arrives.
 async fn serve() -> Result<(), Box<dyn std::error::Error>> {
@@ -97,4 +84,17 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         None => server::run_stdio(state).await?,
     }
     Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(serve());
+    // In stdio mode, a read of stdin sits on a blocking thread until the
+    // client closes stdin, and dropping the runtime would wait for it: after
+    // a shutdown signal, the server would close its browser and then hang.
+    // Everything that needs to finish has finished, so don't wait.
+    runtime.shutdown_background();
+    result
 }
