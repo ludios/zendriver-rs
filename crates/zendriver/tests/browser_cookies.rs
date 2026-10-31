@@ -169,3 +169,41 @@ async fn delete_by_name_alone_deletes_it_on_every_domain() {
     assert_eq!(names(left.into_iter().map(|c| c.name)), ["kept"]);
     browser.close().await;
 }
+
+/// A tab in an isolated browser context: its jar reads, finds and deletes
+/// that context's cookies, and the browser's jar doesn't see them.
+#[tokio::test]
+#[ignore = "known bug, TODO P0 'Tab cookie jars use the default context': Storage.*Cookies on \
+            the tab's session reads the default context, so all() (and, since 0b3e9bee5, \
+            for_url() and delete()) miss an isolated context's cookies"]
+async fn known_bug_tab_cookies_stay_in_an_isolated_context() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let context = browser
+        .browser_context()
+        .build()
+        .await
+        .expect("browser context");
+    let tab = context.new_tab().await.expect("new_tab");
+    let url = server.url("127.0.0.1", "/plain");
+    load(&tab, &url).await;
+    eval(&tab, &format!("document.cookie = '{NAME}=oat'")).await;
+    let url = Url::parse(&url).expect("fixture URL");
+
+    let all = tab.cookies().all().await.expect("tab all");
+    assert!(has_cookie(&all), "tab.cookies().all(): {all:?}");
+    let found = tab.cookies().for_url(&url).await.expect("tab for_url");
+    assert!(has_cookie(&found), "tab.cookies().for_url(): {found:?}");
+    let default = browser.cookies().all().await.expect("browser all");
+    assert!(
+        !has_cookie(&default),
+        "browser.cookies().all(): {default:?}"
+    );
+    tab.cookies()
+        .delete(NAME, None, None)
+        .await
+        .expect("tab delete");
+    let left = tab.cookies().all().await.expect("tab all");
+    assert!(!has_cookie(&left), "tab.cookies().delete left: {left:?}");
+    browser.close().await;
+}
