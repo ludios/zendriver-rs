@@ -51,8 +51,22 @@ impl From<StealthProfileArg> for StealthProfileChoice {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(serve());
+    // In stdio mode, a read of stdin sits on a blocking thread until the
+    // client closes stdin, and dropping the runtime would wait for it: after
+    // a shutdown signal, the server would close its browser and then hang.
+    // Everything that needs to finish has finished, so don't wait.
+    runtime.shutdown_background();
+    result
+}
+
+/// Serve MCP over the transport the command line asks for, until the client
+/// goes away or a shutdown signal arrives.
+async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     // reqwest 0.13 uses `rustls-no-provider`, so a provider must be installed before ANY reqwest
     // Client is built — including one built inside a dependency, and including for plain-HTTP
     // requests, since the TLS config is constructed with the client rather than per request.

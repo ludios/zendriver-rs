@@ -1210,7 +1210,7 @@ pub async fn run_stdio(state: Arc<Mutex<SessionState>>) -> Result<(), Box<dyn st
 
 /// Resolve when the process receives a termination signal: SIGTERM or SIGINT
 /// on Unix, Ctrl-C elsewhere.
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -1231,7 +1231,7 @@ async fn shutdown_signal() {
 /// Idempotent and panic-free when no browser was ever opened — it runs on
 /// every shutdown path. [`Browser::close`] leaves an attached/`connect`ed
 /// Chrome running (the `owns_process` guard), only the transport is torn down.
-async fn close_owned_browser(state: &Arc<Mutex<SessionState>>) {
+pub(crate) async fn close_owned_browser(state: &Arc<Mutex<SessionState>>) {
     let browser = { state.lock().await.browser.take() };
     if let Some(browser) = browser {
         if let Err(e) = browser.close().await {

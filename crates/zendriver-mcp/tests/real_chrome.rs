@@ -133,11 +133,9 @@ async fn chrome_exits_when_stdin_closes() {
     chrome_exits_when_server_stops(Transport::Stdio, Stop::Disconnect).await;
 }
 
-/// The server closes the browser, then hangs until its stdin closes.
+/// The server closes the browser and exits, though its stdin stays open.
 #[tokio::test]
-#[ignore = "known bug, TODO P0 'MCP shutdown leaves Chrome running': on SIGTERM the stdio \
-            server closes Chrome but doesn't exit"]
-async fn known_bug_chrome_exits_on_sigterm_over_stdio() {
+async fn chrome_exits_on_sigterm_over_stdio() {
     chrome_exits_when_server_stops(Transport::Stdio, Stop::Signal("TERM")).await;
 }
 
@@ -149,9 +147,7 @@ async fn known_bug_chrome_exits_on_sigkill_over_stdio() {
 }
 
 #[tokio::test]
-#[ignore = "known bug, TODO P0 'MCP shutdown leaves Chrome running': the HTTP server \
-            handles no signals, so Chrome outlives it"]
-async fn known_bug_chrome_exits_on_sigterm_over_http() {
+async fn chrome_exits_on_sigterm_over_http() {
     chrome_exits_when_server_stops(Transport::Http, Stop::Signal("TERM")).await;
 }
 
