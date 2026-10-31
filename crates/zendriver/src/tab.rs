@@ -933,19 +933,21 @@ impl Tab {
     ///
     /// The call's own error, or [`ZendriverError::Navigation`] when the
     /// reply carries an `errorText` (only `Page.navigate` replies have one).
-    /// The wait stays armed then: Chrome loads its error page, or stops
-    /// loading at once for a download.
+    /// Nothing is armed then: an invalid URL starts no navigation at all, so
+    /// a wait for one would time out.
     async fn navigate_main_frame(&self, method: &str, params: Value) -> Result<Value> {
         // The main frame's id is the target id. Created before the call, so
         // this navigation's events can't be missed.
         let tracker = LoadTracker::before_navigating(&self.inner.session, self.target_id());
         let res = self.call(method, params).await?;
-        *self.inner.pending_load.lock().await = Some(tracker);
+        let mut pending = self.inner.pending_load.lock().await;
         if let Some(err) = res.get("errorText").and_then(|v| v.as_str()) {
             if !err.is_empty() {
+                *pending = None;
                 return Err(ZendriverError::Navigation(err.to_string()));
             }
         }
+        *pending = Some(tracker);
         Ok(res)
     }
 

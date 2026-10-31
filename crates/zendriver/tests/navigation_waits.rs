@@ -276,3 +276,19 @@ async fn back_within_a_document_or_from_the_bfcache_then_wait_for_load() {
     assert_loaded_now(&tab, &first, "back from the bfcache").await;
     browser.close().await;
 }
+
+/// A `goto` that Chrome refuses outright starts no navigation, so the next
+/// `wait_for_load` has nothing to wait for.
+#[tokio::test]
+async fn wait_for_load_after_a_refused_goto_returns_at_once() {
+    let browser = launch().await;
+    let tab = browser.main_tab();
+    tab.goto("not a url")
+        .await
+        .expect_err("goto an invalid URL");
+    let started = Instant::now();
+    tab.wait_for_load().await.expect("wait_for_load");
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(5), "wait_for_load took {took:?}");
+    browser.close().await;
+}
