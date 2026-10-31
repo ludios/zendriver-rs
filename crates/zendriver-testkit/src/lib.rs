@@ -9,6 +9,9 @@
 //!   that its whole process tree exited.
 //! - [`assert_eventually`] and [`assert_not_before`] for timing, and
 //!   [`load`] / [`wait_loaded`] to wait for a page without zendriver's waits.
+//! - [`PROBE_PATH`]: the stealth consistency probe, a page that reads the
+//!   browser's identity in several realms, and [`disagreements`] to compare
+//!   those readings with each other and with the HTTP headers.
 //!
 //! ```no_run
 //! use zendriver::Browser;
@@ -28,6 +31,7 @@
 mod launch;
 mod logs;
 mod nav;
+mod probe;
 mod procs;
 mod server;
 mod timing;
@@ -36,6 +40,7 @@ pub use axum;
 pub use launch::{TestBrowser, launch_for_test};
 pub use logs::{LogLine, Logs};
 pub use nav::{eval, load, wait_loaded};
+pub use probe::{PROBE_JS, PROBE_PATH, describe_disagreements, disagreements};
 pub use procs::ChromeTree;
 pub use server::{
     BASIC_AUTH_PASSWORD, BASIC_AUTH_USER, DOWNLOAD_BODY, FixtureServer, HOST_RESOLVER_RULES,

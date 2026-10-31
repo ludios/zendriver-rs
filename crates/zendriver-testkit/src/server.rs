@@ -449,6 +449,7 @@ fn canned_routes() -> Router {
         .route("/controls", get(controls))
         .route("/quirks", get(quirks))
         .route("/table-link", get(table_link))
+        .merge(crate::probe::routes())
 }
 
 /// The fixture server. Dropping it stops it, closing idle keep-alive
@@ -478,6 +479,7 @@ fn canned_routes() -> Router {
 /// | `/controls` | `<select id="fruit">`, `<textarea id="notes">`, contenteditable `#editable` |
 /// | `/quirks` | No doctype, so `document.compatMode` is `BackCompat` |
 /// | `/table-link` | GitHub-style file table; the wide `td.name` cell's text is exactly its link's (`#readme-link`, `README.md`) |
+/// | `/probe` and `/probe/*` | The stealth consistency probe; see [`PROBE_PATH`](crate::PROBE_PATH) |
 pub struct FixtureServer {
     port: u16,
     log: RequestLog,
