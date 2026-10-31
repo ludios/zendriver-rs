@@ -1896,6 +1896,74 @@ pub(crate) struct BrowserInner {
 }
 
 impl BrowserInner {
+    /// Send `Target.createTarget` with `params` (which must hold the `url`)
+    /// at browser scope and return the [`Tab`] that the tab registrar
+    /// registers for the new target, with its next [`Tab::wait_for_load`]
+    /// armed for the navigation to `url` (unless `url` is `about:blank`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZendriverError::Navigation`] if the response lacks
+    /// `targetId`, and [`ZendriverError::TabNotFound`] if the registrar
+    /// doesn't register the tab within 5s — usually a sign that auto-attach
+    /// is misconfigured or the registrar observer crashed.
+    pub(crate) async fn create_tab(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<Tab, ZendriverError> {
+        let url = params["url"].as_str();
+        assert!(url.is_some(), "create_tab: params without a url: {params}");
+        let navigates = url != Some("about:blank");
+        let res = self
+            .conn
+            .call_raw("Target.createTarget", params, None)
+            .await?;
+        let target_id = res
+            .get("targetId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ZendriverError::Navigation("Target.createTarget returned no targetId".into())
+            })?
+            .to_string();
+
+        // Wait for the TabRegistrar observer to insert the new Tab.
+        // The 5s outer bound covers the typical CDP roundtrip + observer
+        // chain latency (stealth → tab-registrar) with comfortable
+        // headroom; instead of polling, we wait on `tabs_changed`, which
+        // the registrar fires on every tabs-map mutation. The notification
+        // is `enable()`d before each read so a notify that lands between
+        // the read and the wait is still delivered.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let notif = self.tabs_changed.notified();
+            tokio::pin!(notif);
+            notif.as_mut().enable();
+
+            let tab = self
+                .tabs
+                .read()
+                .await
+                .values()
+                .find(|t| t.target_id() == target_id)
+                .cloned();
+            if let Some(tab) = tab {
+                if navigates {
+                    tab.arm_initial_navigation().await;
+                }
+                return Ok(tab);
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ZendriverError::TabNotFound(target_id));
+            }
+
+            tokio::select! {
+                () = notif => {}
+                () = tokio::time::sleep_until(deadline) => {}
+            }
+        }
+    }
+
     /// Wraps `Target.disposeBrowserContext`, the CDP command that destroys
     /// an incognito-style [browser context][1] previously created via
     /// `Target.createBrowserContext`. Sent at browser scope (no
@@ -4185,9 +4253,9 @@ impl Browser {
     ///
     /// Behaves identically to [`Browser::new_tab`] but with a custom initial
     /// URL passed to `Target.createTarget`. The returned [`Tab`] handle is
-    /// ready as soon as the internal tab registrar observer registers it;
-    /// callers can issue `.wait_for_load()` if they need to block on the
-    /// navigation.
+    /// ready as soon as the internal tab registrar observer registers it,
+    /// usually before the page has arrived; callers can issue
+    /// `.wait_for_load()` if they need to block on the navigation.
     ///
     /// # Examples
     ///
@@ -4247,57 +4315,14 @@ impl Browser {
         self.create_target(url.into(), true).await
     }
 
-    /// Shared `Target.createTarget` → registrar-wait path behind
-    /// [`Browser::new_tab_at`] (`new_window = false`) and
+    /// Shared path behind [`Browser::new_tab_at`] (`new_window = false`) and
     /// [`Browser::new_window_at`] (`new_window = true`).
     async fn create_target(&self, url: String, new_window: bool) -> Result<Tab, ZendriverError> {
         let mut params = json!({ "url": url });
         if new_window {
             params["newWindow"] = serde_json::Value::Bool(true);
         }
-        let res = self
-            .inner
-            .conn
-            .call_raw("Target.createTarget", params, None)
-            .await?;
-        let target_id = res
-            .get("targetId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ZendriverError::Navigation("Target.createTarget returned no targetId".into())
-            })?
-            .to_string();
-
-        // Wait for the TabRegistrar observer to insert the new Tab.
-        // The 5s outer bound covers the typical CDP roundtrip + observer
-        // chain latency (stealth → tab-registrar) with comfortable
-        // headroom; instead of polling, we wait on
-        // `BrowserInner::tabs_changed`, which the registrar fires on every
-        // tabs-map mutation. The notification is `enable()`d before each
-        // read so a notify that lands between the read and the wait is
-        // still delivered.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let notif = self.inner.tabs_changed.notified();
-            tokio::pin!(notif);
-            notif.as_mut().enable();
-
-            {
-                let tabs = self.inner.tabs.read().await;
-                if let Some(tab) = tabs.values().find(|t| t.target_id() == target_id) {
-                    return Ok(tab.clone());
-                }
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                return Err(ZendriverError::TabNotFound(target_id));
-            }
-
-            tokio::select! {
-                () = notif => {}
-                () = tokio::time::sleep_until(deadline) => {}
-            }
-        }
+        self.inner.create_tab(params).await
     }
 
     /// Snapshot of all currently-registered tabs.
@@ -6658,13 +6683,31 @@ mod tests {
         )
         .await;
 
-        let release_id = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            mock.expect_cmd("Runtime.runIfWaitingForDebugger"),
-        )
-        .await
-        .expect("debugger-release did not fire within 2s");
-        mock.reply(release_id, json!({})).await;
+        // The debugger release and the new window's load-state probe (it
+        // was created at a real URL, so `wait_for_load` gets armed) race:
+        // answer both, in whichever order they come.
+        let mut released = false;
+        let mut probed = false;
+        while !(released && probed) {
+            let (method, id) = mock
+                .recv_cmd_timeout(std::time::Duration::from_secs(2))
+                .await
+                .unwrap_or_else(|| {
+                    panic!("within 2s: released={released}, probed={probed}, want both")
+                });
+            match method.as_str() {
+                "Runtime.runIfWaitingForDebugger" => {
+                    mock.reply(id, json!({})).await;
+                    released = true;
+                }
+                "Runtime.evaluate" => {
+                    mock.reply(id, json!({ "result": { "value": "complete" } }))
+                        .await;
+                    probed = true;
+                }
+                _ => {}
+            }
+        }
 
         let win = tokio::time::timeout(std::time::Duration::from_secs(2), fut)
             .await

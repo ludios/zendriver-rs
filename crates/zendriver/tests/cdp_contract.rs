@@ -178,6 +178,7 @@ const EVENTS: &[&str] = &[
     "Page.frameAttached",
     "Page.frameDetached",
     "Page.frameNavigated",
+    "Page.frameStartedLoading",
     "Page.frameStoppedLoading",
     "Page.javascriptDialogOpening",
     "Page.loadEventFired",

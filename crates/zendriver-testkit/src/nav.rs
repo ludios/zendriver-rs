@@ -26,18 +26,11 @@ pub async fn wait_loaded(tab: &Tab, url: &str) {
 
 /// Navigate `tab` to `url` and wait for its `load` event, as [`wait_loaded`]
 /// does.
-///
-/// `goto` leaves a load signal armed that the next `wait_for_load()` would
-/// take, even after a later navigation (TAB #2). This takes it, already
-/// fired by then, so the test's own waits start clean.
 pub async fn load(tab: &Tab, url: &str) {
     tab.goto(url)
         .await
         .unwrap_or_else(|e| panic!("goto {url}: {e}"));
     wait_loaded(tab, url).await;
-    tab.wait_for_load()
-        .await
-        .unwrap_or_else(|e| panic!("taking goto's load signal for {url}: {e}"));
 }
 
 /// The value of `js` in `tab`'s main world, awaited if it's a promise.

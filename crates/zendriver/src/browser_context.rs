@@ -1,7 +1,6 @@
 //! Per-`BrowserContext` lifecycle on top of CDP `Target.createBrowserContext`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde_json::json;
 
@@ -45,49 +44,9 @@ impl BrowserContext {
     /// missing `targetId`, and [`ZendriverError::TabNotFound`] if the
     /// internal tab registrar fails to register the new tab within 5s.
     pub async fn new_tab_at(&self, url: impl Into<String>) -> Result<Tab, ZendriverError> {
-        let url = url.into();
-        let res = self
-            .browser
-            .conn
-            .call_raw(
-                "Target.createTarget",
-                json!({ "url": url, "browserContextId": self.id }),
-                None,
-            )
-            .await?;
-        let target_id = res
-            .get("targetId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ZendriverError::Navigation("Target.createTarget returned no targetId".into())
-            })?
-            .to_string();
-
-        // Mirror the wait pattern used by `Browser::new_tab_at`: enable a
-        // `Notify` subscription before reading the tabs map so a notify
-        // that lands between the read and the wait is still delivered.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let notif = self.browser.tabs_changed.notified();
-            tokio::pin!(notif);
-            notif.as_mut().enable();
-
-            {
-                let tabs = self.browser.tabs.read().await;
-                if let Some(tab) = tabs.values().find(|t| t.target_id() == target_id) {
-                    return Ok(tab.clone());
-                }
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                return Err(ZendriverError::TabNotFound(target_id));
-            }
-
-            tokio::select! {
-                () = notif => {}
-                () = tokio::time::sleep_until(deadline) => {}
-            }
-        }
+        self.browser
+            .create_tab(json!({ "url": url.into(), "browserContextId": self.id }))
+            .await
     }
 }
 

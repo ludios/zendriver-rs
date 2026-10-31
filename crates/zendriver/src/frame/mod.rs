@@ -20,15 +20,14 @@
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use futures::StreamExt;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock};
-use tokio::time::timeout;
 use zendriver_transport::SessionHandle;
 
 use crate::error::{Result, ZendriverError};
 use crate::isolated_world::IsolatedWorldCache;
+use crate::load_tracker::LoadTracker;
 use crate::tab::{Tab, TabInner};
 
 pub mod lifecycle;
@@ -389,14 +388,16 @@ impl Frame {
 
     /// Navigate **this frame** to `url`.
     ///
-    /// Only supported for the main frame — sub-frame navigation must be
-    /// driven by mutating the parent document's `<iframe src>`. Does NOT
-    /// wait for the load to complete; pair with [`Frame::wait_for_load`].
+    /// Only supported for the main frame, where it is [`crate::Tab::goto`]
+    /// — sub-frame navigation must be driven by mutating the parent
+    /// document's `<iframe src>`. Does NOT wait for the load to complete;
+    /// pair with [`Frame::wait_for_load`].
     ///
     /// # Errors
     ///
-    /// Returns [`ZendriverError::Navigation`] when called on a sub-frame
-    /// or when Chrome reports `errorText` on the response.
+    /// Returns [`ZendriverError::Navigation`] when called on a sub-frame,
+    /// when the owning tab is gone, or when Chrome reports `errorText` on
+    /// the response.
     ///
     /// # Examples
     ///
@@ -415,31 +416,31 @@ impl Frame {
                 "sub-frame goto not supported; set iframe.src via parent evaluate_main".into(),
             ));
         }
-        // Enable Page domain so we get FrameStoppedLoading events.
-        self.inner.session.call("Page.enable", json!({})).await?;
-        let url_s = url.as_ref().to_string();
-        let res = self
-            .inner
-            .session
-            .call("Page.navigate", json!({ "url": url_s }))
-            .await?;
-        if let Some(err) = res.get("errorText").and_then(|v| v.as_str()) {
-            if !err.is_empty() {
-                return Err(ZendriverError::Navigation(err.to_string()));
-            }
-        }
-        Ok(())
+        self.owning_tab()?.goto(url).await
     }
 
-    /// Wait until **this frame's** `Page.frameStoppedLoading` fires.
-    ///
-    /// Subscribes on the frame's session and filters events by `frameId` so
-    /// load notifications for sibling frames in the same tab don't satisfy
-    /// the wait. Default timeout matches [`crate::Tab::wait_for_load`] (30s).
+    /// The tab this frame belongs to.
     ///
     /// # Errors
     ///
-    /// Returns [`ZendriverError::Timeout`] on expiry.
+    /// [`ZendriverError::Navigation`] if every handle to the tab was dropped.
+    fn owning_tab(&self) -> Result<Tab> {
+        self.tab_for_synthesize()
+            .ok_or_else(|| ZendriverError::Navigation("the frame's tab is gone".into()))
+    }
+
+    /// Wait until **this frame** has finished loading.
+    ///
+    /// For the main frame this is [`crate::Tab::wait_for_load`]. For a
+    /// sub-frame it waits for the frame's next `Page.frameStoppedLoading`,
+    /// so call it before that frame finishes loading. Default timeout
+    /// matches [`crate::Tab::wait_for_load`] (30s).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZendriverError::Timeout`] on expiry, and
+    /// [`ZendriverError::Navigation`] for the main frame of a tab that is
+    /// gone.
     ///
     /// # Examples
     ///
@@ -453,28 +454,12 @@ impl Frame {
     /// # Ok(()) }
     /// ```
     pub async fn wait_for_load(&self) -> Result<()> {
-        let mut stream = self
-            .inner
-            .session
-            .subscribe::<Value>("Page.frameStoppedLoading");
-        let deadline = tokio::time::Instant::now() + DEFAULT_LOAD_TIMEOUT;
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(ZendriverError::Timeout(DEFAULT_LOAD_TIMEOUT));
-            }
-            let evt = timeout(remaining, stream.next())
-                .await
-                .map_err(|_| ZendriverError::Timeout(DEFAULT_LOAD_TIMEOUT))?
-                .ok_or_else(|| ZendriverError::Navigation("page event stream closed".into()))?;
-            if evt
-                .get("frameId")
-                .and_then(|v| v.as_str())
-                .is_some_and(|fid| fid == self.inner.frame_id)
-            {
-                return Ok(());
-            }
+        if self.is_main() {
+            return self.owning_tab()?.wait_for_load().await;
         }
+        LoadTracker::before_navigating(&self.inner.session, &self.inner.frame_id)
+            .wait(DEFAULT_LOAD_TIMEOUT)
+            .await
     }
 
     /// Begin a chainable element query against this frame's document.
@@ -1073,14 +1058,21 @@ mod tests {
         conn.shutdown();
     }
 
-    /// Main-frame `goto` mirrors `Tab::goto`: `Page.enable` first (so a
-    /// subsequent `wait_for_load` sees `Page.frameStoppedLoading`), then
-    /// `Page.navigate { url }` on the frame's session.
+    /// Main-frame `goto` is `Tab::goto` on the owning tab: `Page.enable`
+    /// first, then `Page.navigate { url }` on the tab's session.
     #[tokio::test]
     async fn main_frame_goto_dispatches_page_navigate() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let frame = frame_on(sess, "FRAME_MAIN");
+        let tab = Tab::new_for_test(sess.clone());
+        let frame = Frame::new(
+            tab.target_id().to_string(),
+            None,
+            String::new(),
+            None,
+            sess,
+            Arc::downgrade(&tab.inner),
+        );
 
         let fut = tokio::spawn({
             let f = frame.clone();
@@ -1092,9 +1084,24 @@ mod tests {
 
         let id_nav = next_cmd(&mut mock, "Page.navigate").await;
         assert_eq!(mock.last_sent()["params"]["url"], "https://example.com");
-        mock.reply(id_nav, json!({ "frameId": "FRAME_MAIN" })).await;
+        mock.reply(id_nav, json!({ "frameId": tab.target_id() }))
+            .await;
 
         fut.await.unwrap().unwrap();
+        conn.shutdown();
+    }
+
+    /// A main frame whose tab is gone can't navigate: there is no tab to
+    /// arm `wait_for_load` on.
+    #[tokio::test]
+    async fn main_frame_goto_errors_once_its_tab_is_gone() {
+        let (_mock, conn) = MockConnection::pair();
+        let frame = frame_on(SessionHandle::new(conn.clone(), "S1"), "FRAME_MAIN");
+        let res = frame.goto("https://example.com").await;
+        assert!(
+            matches!(&res, Err(ZendriverError::Navigation(m)) if m.contains("tab is gone")),
+            "unexpected result: {res:?}"
+        );
         conn.shutdown();
     }
 

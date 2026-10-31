@@ -75,12 +75,14 @@ tab.goto("https://example.com").await?;
 tab.wait_for_load().await?;
 ```
 
-`goto` dispatches `Page.navigate` and returns as soon as Chrome
-acknowledges the request — not when the page is done loading. Call
-`wait_for_load` afterwards if you want to block until the `load` event
-fires. (You can also use `wait_for_idle` for "no network requests
-in-flight", or set up `expect_response` ahead of the navigation for a
-targeted wait — covered in [Expect()](./expect.md).)
+`goto` dispatches `Page.navigate` and returns once Chrome has the
+response's headers (or an error) — not when the page is done loading.
+Call `wait_for_load` afterwards if you want to block until the `load`
+event fires. `back`, `forward` and `reload` work the same way: each
+starts a navigation that the next `wait_for_load` waits for. (You can
+also use `wait_for_idle` for "no network requests in-flight", or set up
+`expect_response` ahead of the navigation for a targeted wait — covered
+in [Expect()](./expect.md).)
 
 ### 4. Query an element
 

@@ -3,28 +3,25 @@
 //! page it waited for has loaded. Ported from the `races.rs` repro, with
 //! local fixtures instead of live sites.
 //!
-//! Not here: `wait_for_load` after Enter or a link click, with no stale
-//! signal from an earlier `goto`. On live sites it returned on the old page,
-//! but locally the navigation starts before `wait_for_load` looks, so it
-//! passes except on a loaded machine. That race needs the planned
-//! `expect_navigation`, which subscribes before the action.
+//! Not here: `wait_for_load` after Enter or a link click, with no earlier
+//! `goto`. On live sites it returned on the old page, but locally the
+//! navigation starts before `wait_for_load` looks, so it passes except on a
+//! loaded machine. That race needs the planned `expect_navigation`, which
+//! subscribes before the action.
 //!
 //! The page waited for is usually a `/slow-load`, whose `load` event comes a
 //! second late, after the server answers its image. A wait that returns
 //! early is caught by comparing when it returned with when the image was
 //! answered, not by racing the navigation.
-//!
-//! Tests named `known_bug_*` reproduce an open bug, named in their
-//! `#[ignore]` reason; the fix deletes the `#[ignore]` and the prefix.
 
 #![cfg(feature = "integration-tests")]
 #![allow(clippy::panic)]
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use zendriver::{Browser, Tab};
 use zendriver_testkit::{
-    FixtureServer, SITE_A, TestBrowser, assert_not_before, launch_for_test, load, wait_loaded,
+    FixtureServer, SITE_A, TestBrowser, assert_not_before, eval, launch_for_test, load, wait_loaded,
 };
 
 /// The path whose answer sets when `/slow-load`'s `load` event can fire.
@@ -90,9 +87,7 @@ async fn goto_then_wait_for_load_waits_for_the_page() {
 }
 
 #[tokio::test]
-#[ignore = "known bug, TODO P0 'wait_for_load() listens to the wrong events' (TAB #1): it \
-            returns when the iframe finishes loading"]
-async fn known_bug_wait_for_load_waits_for_the_main_frame_not_an_iframe() {
+async fn wait_for_load_waits_for_the_main_frame_not_an_iframe() {
     let server = FixtureServer::start().await;
     let browser = launch().await;
     let tab = browser.main_tab();
@@ -112,9 +107,7 @@ async fn known_bug_wait_for_load_waits_for_the_main_frame_not_an_iframe() {
 }
 
 #[tokio::test]
-#[ignore = "known bug, TODO P0 'new_tab_at(url) + wait_for_load() returns while the tab is \
-            still blank' (R1)"]
-async fn known_bug_new_tab_at_then_wait_for_load_waits_for_the_page() {
+async fn new_tab_at_then_wait_for_load_waits_for_the_page() {
     let server = FixtureServer::start().await;
     let browser = launch().await;
     // Live sites take a while to send the document; until it arrives, the
@@ -134,12 +127,59 @@ async fn known_bug_new_tab_at_then_wait_for_load_waits_for_the_page() {
     browser.close().await;
 }
 
+/// `new_tab` arms nothing: `about:blank` has loaded by the time it returns.
+#[tokio::test]
+async fn new_tab_then_wait_for_load_returns_at_once() {
+    let browser = launch().await;
+    let tab = browser.new_tab().await.expect("new_tab");
+    let started = Instant::now();
+    tab.wait_for_load().await.expect("wait_for_load");
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(5), "wait_for_load took {took:?}");
+    browser.close().await;
+}
+
+/// `Frame::goto` arms the main frame's wait as `Tab::goto` does, before
+/// navigating, so the wait neither returns early nor waits for a load that
+/// already happened (FI #2).
+#[tokio::test]
+async fn main_frame_goto_then_wait_for_load_waits_for_the_page() {
+    let server = FixtureServer::start().await;
+    let browser = launch().await;
+    let tab = browser.main_tab();
+    let main = tab.main_frame().await.expect("main_frame");
+    let url = server.url(SITE_A, "/slow-load");
+    main.goto(&url).await.expect("Frame::goto");
+    main.wait_for_load().await.expect("Frame::wait_for_load");
+    assert_waited_for(
+        &server,
+        &tab,
+        &url,
+        0,
+        Instant::now(),
+        "Frame::goto + Frame::wait_for_load",
+    )
+    .await;
+
+    let url = server.url(SITE_A, "/plain");
+    main.goto(&url).await.expect("Frame::goto");
+    wait_loaded(&tab, &url).await;
+    let started = Instant::now();
+    main.wait_for_load()
+        .await
+        .expect("Frame::wait_for_load after the load");
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_secs(5),
+        "Frame::wait_for_load took {took:?}"
+    );
+    browser.close().await;
+}
+
 /// A `goto` nobody waited for, then a navigation that a fresh wait would
 /// handle: the document arrives at once, so only the stale signal is wrong.
 #[tokio::test]
-#[ignore = "known bug, TODO P0 'wait_for_load() listens to the wrong events' (TAB #2): it \
-            takes the signal of an earlier goto that nobody waited for"]
-async fn known_bug_wait_for_load_ignores_an_earlier_gotos_signal() {
+async fn wait_for_load_ignores_an_earlier_gotos_signal() {
     let server = FixtureServer::start().await;
     let browser = launch().await;
     let tab = browser.main_tab();
@@ -163,11 +203,10 @@ async fn known_bug_wait_for_load_ignores_an_earlier_gotos_signal() {
 }
 
 /// Without the back-forward cache, as for the many pages it won't keep:
-/// with it, Chrome restores the page so fast that the bug doesn't show.
-/// `fresh=1`, or the slow image would come from the cache.
+/// with it, Chrome restores the page so fast that an early return wouldn't
+/// show. `fresh=1`, or the slow image would come from the cache.
 #[tokio::test]
-#[ignore = "known bug, TODO P0 'back() / forward() / reload() don't wait' (R1)"]
-async fn known_bug_back_and_forward_wait_for_the_page() {
+async fn back_and_forward_then_wait_for_load_wait_for_the_page() {
     let server = FixtureServer::start().await;
     let browser = launch_for_test(Browser::builder().arg("--disable-back-forward-cache")).await;
     let tab = browser.main_tab();
@@ -178,16 +217,17 @@ async fn known_bug_back_and_forward_wait_for_the_page() {
 
     let since = slow_requests(&server);
     tab.back().await.expect("back");
+    tab.wait_for_load().await.expect("wait_for_load");
     assert_waited_for(&server, &tab, &first, since, Instant::now(), "back").await;
     let since = slow_requests(&server);
     tab.forward().await.expect("forward");
+    tab.wait_for_load().await.expect("wait_for_load");
     assert_waited_for(&server, &tab, &second, since, Instant::now(), "forward").await;
     browser.close().await;
 }
 
 #[tokio::test]
-#[ignore = "known bug, TODO P0 'back() / forward() / reload() don't wait' (R1)"]
-async fn known_bug_reload_waits_for_the_page() {
+async fn reload_then_wait_for_load_waits_for_the_page() {
     let server = FixtureServer::start().await;
     let browser = launch().await;
     let tab = browser.main_tab();
@@ -195,6 +235,29 @@ async fn known_bug_reload_waits_for_the_page() {
     load(&tab, &url).await;
     let since = slow_requests(&server);
     tab.reload().await.expect("reload");
+    tab.wait_for_load().await.expect("wait_for_load");
     assert_waited_for(&server, &tab, &url, since, Instant::now(), "reload").await;
+    browser.close().await;
+}
+
+/// History navigations that load nothing over the network still end the
+/// wait: back within one document (after `pushState`), and back to a page
+/// that the back-forward cache kept (on by default).
+#[tokio::test]
+async fn back_within_a_document_or_from_the_bfcache_then_wait_for_load() {
+    let server = FixtureServer::start().await;
+    let browser = launch().await;
+    let tab = browser.main_tab();
+    let first = server.url(SITE_A, "/plain?title=First");
+    load(&tab, &first).await;
+    eval(&tab, "history.pushState({}, '', '/pushed'); 1").await;
+    tab.back().await.expect("back");
+    tab.wait_for_load().await.expect("wait_for_load");
+    assert_loaded_now(&tab, &first, "back within the document").await;
+
+    load(&tab, &server.url(SITE_A, "/plain?title=Second")).await;
+    tab.back().await.expect("back");
+    tab.wait_for_load().await.expect("wait_for_load");
+    assert_loaded_now(&tab, &first, "back from the bfcache").await;
     browser.close().await;
 }

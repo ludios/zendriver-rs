@@ -26,14 +26,14 @@ use std::time::Duration;
 use futures::StreamExt;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::time::timeout;
-use tracing::trace;
+use tracing::{trace, warn};
 use zendriver_transport::{AccountedRawEvent, Connection, SessionHandle};
 
 use crate::error::{Result, ZendriverError};
 use crate::frame::Frame;
 use crate::input::InputController;
 use crate::isolated_world::IsolatedWorldCache;
+use crate::load_tracker::{LoadTracker, loading_changes};
 use crate::network_idle::IdleLossPolicy;
 use crate::screenshot::ScreenshotBuilder;
 
@@ -353,12 +353,12 @@ pub(crate) struct TabInner {
     /// subscriber streams so cancellation unblocks the select even if no
     /// events are arriving.
     pub(crate) frame_lifecycle_cancel: tokio_util::sync::CancellationToken,
-    /// Oneshot receiver published by [`Tab::goto`] (subscribes to
-    /// `Page.frameStoppedLoading` BEFORE issuing `Page.navigate` so the
-    /// event can't race past) and consumed by [`Tab::wait_for_load`].
-    /// `None` when there is no pending navigation — `wait_for_load` falls
-    /// back to a fresh subscribe + `document.readyState` short-circuit.
-    pub(crate) pending_load: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// The main frame's loading state, followed since just before the last
+    /// navigation that zendriver started ([`Tab::goto`], [`Tab::back`],
+    /// [`Tab::forward`], [`Tab::reload`], or `new_tab_at`), for the next
+    /// [`Tab::wait_for_load`] to take. `None` when that call already took
+    /// it, or no such navigation happened.
+    pub(crate) pending_load: tokio::sync::Mutex<Option<LoadTracker>>,
     /// Whether a download path / behavior has been established for this Tab
     /// (via [`Tab::set_download_path`] or a prior [`Tab::download_file`]).
     /// Mirrors nodriver's `_download_behavior` guard: [`Tab::download_file`]
@@ -947,46 +947,74 @@ impl Tab {
     /// # Ok(()) }
     /// ```
     pub async fn goto(&self, url: impl AsRef<str>) -> Result<()> {
-        // Enable Page domain so we get FrameStoppedLoading events.
+        // Enable Page domain so we get the main frame's loading events.
         self.call("Page.enable", json!({})).await?;
-        // Subscribe to Page.frameStoppedLoading BEFORE issuing Page.navigate.
-        // The transport's event bus is a tokio broadcast channel, so a
-        // subscriber created after the event has already been published can
-        // never observe it. By subscribing first, then handing a oneshot to
-        // `wait_for_load`, we guarantee the next load event lands in our
-        // receiver regardless of how fast the page loads (e.g. localhost
-        // wiremock fixtures in CI).
-        let mut stream = self
-            .inner
-            .session
-            .subscribe::<Value>("Page.frameStoppedLoading");
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            if stream.next().await.is_some() {
-                let _ = tx.send(());
-            }
-        });
-        *self.inner.pending_load.lock().await = Some(rx);
+        let res = self
+            .navigate_main_frame("Page.navigate", json!({ "url": url.as_ref() }))
+            .await?;
+        let frame_id = res.get("frameId").and_then(|v| v.as_str());
+        if frame_id.is_some_and(|id| id != self.target_id()) {
+            // The wait follows the frame whose id is the target id, which is
+            // always the main frame in Chrome; if that ever changes, say so
+            // instead of leaving `wait_for_load` to time out unexplained.
+            warn!(
+                ?frame_id,
+                target_id = %self.target_id(),
+                "goto: Page.navigate navigated a frame whose id isn't the target id; \
+                 wait_for_load will wait for the wrong frame"
+            );
+        }
+        Ok(())
+    }
 
-        let url_s = url.as_ref().to_string();
-        let res = self.call("Page.navigate", json!({ "url": url_s })).await?;
+    /// Send `method`, which starts a navigation of the main frame, and arm
+    /// the next [`Tab::wait_for_load`] to wait for that navigation. Returns
+    /// Chrome's reply.
+    ///
+    /// # Errors
+    ///
+    /// The call's own error, or [`ZendriverError::Navigation`] when the
+    /// reply carries an `errorText` (only `Page.navigate` replies have one).
+    async fn navigate_main_frame(&self, method: &str, params: Value) -> Result<Value> {
+        // The main frame's id is the target id. Subscribed before the call,
+        // so this navigation's events can't be missed.
+        let tracker = LoadTracker::before_navigating(&self.inner.session, self.target_id());
+        let res = self.call(method, params).await?;
         if let Some(err) = res.get("errorText").and_then(|v| v.as_str()) {
             if !err.is_empty() {
                 return Err(ZendriverError::Navigation(err.to_string()));
             }
         }
-        Ok(())
+        *self.inner.pending_load.lock().await = Some(tracker);
+        Ok(res)
     }
 
-    /// Wait until the main frame's load event fires.
+    /// Arm the next [`Tab::wait_for_load`] to wait for the navigation that a
+    /// new tab was created with, which may not have started yet: until the
+    /// tab has left `about:blank` and finished loading.
+    pub(crate) async fn arm_initial_navigation(&self) {
+        let changes = loading_changes(&self.inner.session, self.target_id());
+        let state = self
+            .ready_state("location.href === 'about:blank' ? 'blank' : document.readyState")
+            .await;
+        let loading = state.as_deref() != Some("complete");
+        *self.inner.pending_load.lock().await = Some(LoadTracker::new(changes, loading));
+    }
+
+    /// Wait until the main frame has finished loading.
     ///
-    /// Subscribes to `Page.frameStoppedLoading` and waits for the first
-    /// event. Bounded by a 30s timeout.
+    /// After [`Tab::goto`], [`Tab::back`], [`Tab::forward`], [`Tab::reload`],
+    /// or [`crate::Browser::new_tab_at`], that is the navigation they started,
+    /// or one that began after it. Otherwise it is whatever navigation is in
+    /// progress, if any: a navigation that a click or a key press is about to
+    /// start may not have begun yet, in which case this returns at once.
+    ///
+    /// Bounded by a 30s timeout.
     ///
     /// # Errors
     ///
-    /// Returns [`ZendriverError::Timeout`] when no load event arrives
-    /// within 30s; [`ZendriverError::Navigation`] if the event stream
+    /// Returns [`ZendriverError::Timeout`] when the main frame is still
+    /// loading after 30s; [`ZendriverError::Navigation`] if the event stream
     /// closes (transport teardown).
     ///
     /// # Examples
@@ -1000,55 +1028,45 @@ impl Tab {
     /// # Ok(()) }
     /// ```
     pub async fn wait_for_load(&self) -> Result<()> {
-        // Preferred path: consume the oneshot stashed by `goto`, which
-        // subscribed to `Page.frameStoppedLoading` BEFORE the navigation
-        // request — guaranteed delivery.
-        if let Some(rx) = self.inner.pending_load.lock().await.take() {
-            timeout(DEFAULT_LOAD_TIMEOUT, rx)
-                .await
-                .map_err(|_| ZendriverError::Timeout(DEFAULT_LOAD_TIMEOUT))?
-                .map_err(|_| ZendriverError::Navigation("page event stream closed".into()))?;
-            return Ok(());
-        }
-        // Fallback: no pending navigation (e.g. caller invoked
-        // `wait_for_load` without a preceding `goto`, or after the page
-        // navigated itself). Subscribe + short-circuit on the current
-        // `document.readyState` so an already-loaded page returns
-        // immediately rather than blocking on a missed event.
-        let mut stream = self
-            .inner
-            .session
-            .subscribe::<Value>("Page.frameStoppedLoading");
-        let ready: Option<String> = self
-            .call(
-                "Runtime.evaluate",
-                json!({
-                    "expression": "document.readyState",
-                    "returnByValue": true,
-                }),
-            )
-            .await
-            .inspect_err(|e| {
-                // Swallowing this made a failed evaluate indistinguishable from
-                // a not-yet-complete page: both fall through to a full
-                // `DEFAULT_LOAD_TIMEOUT` block on the event stream, with
-                // nothing anywhere saying the probe never ran.
-                tracing::warn!(
-                    error = %e,
-                    "wait_for_load: document.readyState probe failed; \
-                     falling back to waiting for Page.frameStoppedLoading"
-                );
-            })
-            .ok()
-            .and_then(|v| v.get("result")?.get("value")?.as_str().map(str::to_owned));
-        if ready.as_deref() == Some("complete") {
-            return Ok(());
-        }
-        timeout(DEFAULT_LOAD_TIMEOUT, stream.next())
-            .await
-            .map_err(|_| ZendriverError::Timeout(DEFAULT_LOAD_TIMEOUT))?
-            .ok_or_else(|| ZendriverError::Navigation("page event stream closed".into()))?;
-        Ok(())
+        let pending = self.inner.pending_load.lock().await.take();
+        let tracker = match pending {
+            Some(tracker) => tracker,
+            None => {
+                // Subscribed before reading the state, so a start or stop
+                // that lands in between is applied after it.
+                let changes = loading_changes(&self.inner.session, self.target_id());
+                let complete =
+                    self.ready_state("document.readyState").await.as_deref() == Some("complete");
+                LoadTracker::new(changes, !complete)
+            }
+        };
+        tracker.wait(DEFAULT_LOAD_TIMEOUT).await
+    }
+
+    /// The string that `expression` (about `document.readyState`) evaluates
+    /// to in the main world, or `None` (logged) if the evaluation fails.
+    async fn ready_state(&self, expression: &str) -> Option<String> {
+        self.call(
+            "Runtime.evaluate",
+            json!({
+                "expression": expression,
+                "returnByValue": true,
+            }),
+        )
+        .await
+        .inspect_err(|e| {
+            // Swallowing this made a failed evaluate indistinguishable from
+            // a not-yet-complete page: both wait for the main frame to stop
+            // loading, with nothing anywhere saying the probe never ran.
+            warn!(
+                error = %e,
+                %expression,
+                "document.readyState probe failed; counting the main frame as \
+                 loading until Chrome says it stopped"
+            );
+        })
+        .ok()
+        .and_then(|v| v.get("result")?.get("value")?.as_str().map(str::to_owned))
     }
 
     /// Block until the document reaches at least the `until` load milestone.
@@ -1487,6 +1505,9 @@ impl Tab {
     /// dispatches `Page.navigateToHistoryEntry { entryId }` for the entry at
     /// `currentIndex - 1`.
     ///
+    /// Like [`Tab::goto`], does NOT wait for the page: call
+    /// [`Tab::wait_for_load`] afterward to block on the navigation.
+    ///
     /// # Errors
     ///
     /// Returns [`ZendriverError::HistoryNavigation`] with `"no back history"`
@@ -1501,6 +1522,7 @@ impl Tab {
     /// tab.goto("https://example.com").await?;
     /// tab.goto("https://example.org").await?;
     /// tab.back().await?;
+    /// tab.wait_for_load().await?;
     /// # Ok(()) }
     /// ```
     pub async fn back(&self) -> Result<()> {
@@ -1514,7 +1536,7 @@ impl Tab {
             return Err(ZendriverError::HistoryNavigation("no back history".into()));
         }
         let entry_id = history["entries"][(current_idx - 1) as usize]["id"].clone();
-        self.call(
+        self.navigate_main_frame(
             "Page.navigateToHistoryEntry",
             json!({ "entryId": entry_id }),
         )
@@ -1527,6 +1549,9 @@ impl Tab {
     /// Fetches the history list via `Page.getNavigationHistory`, then
     /// dispatches `Page.navigateToHistoryEntry { entryId }` for the entry at
     /// `currentIndex + 1`.
+    ///
+    /// Like [`Tab::goto`], does NOT wait for the page: call
+    /// [`Tab::wait_for_load`] afterward to block on the navigation.
     ///
     /// # Errors
     ///
@@ -1543,6 +1568,7 @@ impl Tab {
     /// tab.goto("https://example.org").await?;
     /// tab.back().await?;
     /// tab.forward().await?;
+    /// tab.wait_for_load().await?;
     /// # Ok(()) }
     /// ```
     pub async fn forward(&self) -> Result<()> {
@@ -1561,7 +1587,7 @@ impl Tab {
             ));
         }
         let entry_id = entries[(current_idx + 1) as usize]["id"].clone();
-        self.call(
+        self.navigate_main_frame(
             "Page.navigateToHistoryEntry",
             json!({ "entryId": entry_id }),
         )
@@ -1572,7 +1598,8 @@ impl Tab {
     /// Reload the tab's current page.
     ///
     /// Dispatches `Page.reload` with `ignoreCache: false` — equivalent to a
-    /// soft refresh.
+    /// soft refresh. Like [`Tab::goto`], does NOT wait for the page: call
+    /// [`Tab::wait_for_load`] afterward to block on the navigation.
     ///
     /// # Examples
     ///
@@ -1581,10 +1608,11 @@ impl Tab {
     /// # let browser = zendriver::Browser::builder().launch().await?;
     /// # let tab = browser.main_tab();
     /// tab.reload().await?;
+    /// tab.wait_for_load().await?;
     /// # Ok(()) }
     /// ```
     pub async fn reload(&self) -> Result<()> {
-        self.call("Page.reload", json!({ "ignoreCache": false }))
+        self.navigate_main_frame("Page.reload", json!({ "ignoreCache": false }))
             .await?;
         Ok(())
     }
@@ -1596,7 +1624,8 @@ impl Tab {
     /// `scriptToEvaluateOnLoad` that runs before any other script on each
     /// frame the reload loads. The script field is omitted from the dispatch
     /// when `None`. For a plain soft refresh, use the [`Tab::reload`]
-    /// shortcut.
+    /// shortcut. Like [`Tab::goto`], does NOT wait for the page: call
+    /// [`Tab::wait_for_load`] afterward to block on the navigation.
     ///
     /// # Examples
     ///
@@ -1616,7 +1645,7 @@ impl Tab {
         if let Some(script) = opts.script_to_evaluate_on_load {
             params["scriptToEvaluateOnLoad"] = Value::String(script);
         }
-        self.call("Page.reload", params).await?;
+        self.navigate_main_frame("Page.reload", params).await?;
         Ok(())
     }
 

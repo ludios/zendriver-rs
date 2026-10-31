@@ -19,6 +19,7 @@ same shape).
 | Reuse first tab | `(await context.pages())[0]` | `browser.main_tab()` |
 | Navigate | `await page.goto(url)` | `tab.goto(url).await?` |
 | Wait for load | implicit on `goto` | `tab.wait_for_load().await?` |
+| Go back / forward / reload | `await page.goBack()` (waits for load) | `tab.back().await?; tab.wait_for_load().await?` |
 | Wait for network idle | `await page.waitForLoadState("networkidle")` | `tab.wait_for_idle().await?` |
 | Find one element (CSS) | `page.locator("button").click()` | `tab.find().css("button").one().await?.click().await?` |
 | Find by text | `page.getByText("Submit")` | `tab.find().text("Submit").one().await?` |
