@@ -216,3 +216,111 @@ async fn probe_agrees_under_spoof_windows() {
         describe_disagreements(&found),
     );
 }
+
+/// How long a selector tool may look for an element before giving up.
+const FIND_WITHIN_MS: u64 = 2000;
+
+#[tokio::test]
+#[ignore = "known bug, TODO P0 'MCP selector tools can't see off-screen elements' (MCP #1)"]
+async fn known_bug_click_reaches_a_button_below_the_fold() {
+    let fixtures = FixtureServer::start().await;
+    let server = McpServer::start(Transport::Stdio).await;
+    open_at(
+        &server,
+        json!({}),
+        &fixtures.url("127.0.0.1", "/below-fold"),
+    )
+    .await;
+    server
+        .call(
+            "browser_click",
+            json!({ "css": "#below", "timeout_ms": FIND_WITHIN_MS }),
+        )
+        .await;
+    let clicked = server
+        .call(
+            "browser_evaluate_main",
+            json!({ "expression": "window.belowClicked === true" }),
+        )
+        .await;
+    assert_eq!(clicked["value"], true, "the click didn't reach #below");
+}
+
+#[tokio::test]
+#[ignore = "known bug, TODO P0 'MCP selector tools can't see off-screen elements' (MCP #1)"]
+async fn known_bug_scroll_into_view_finds_an_off_screen_element() {
+    let fixtures = FixtureServer::start().await;
+    let server = McpServer::start(Transport::Stdio).await;
+    open_at(
+        &server,
+        json!({}),
+        &fixtures.url("127.0.0.1", "/below-fold"),
+    )
+    .await;
+    server
+        .call(
+            "browser_scroll_into_view",
+            json!({ "css": "#below", "timeout_ms": FIND_WITHIN_MS }),
+        )
+        .await;
+    let visible = server
+        .call(
+            "browser_evaluate",
+            json!({ "expression":
+                "document.getElementById('below').getBoundingClientRect().top < innerHeight" }),
+        )
+        .await;
+    assert_eq!(visible["value"], true, "#below is still off screen");
+}
+
+/// The names of the cookies in a `browser_cookies_get` result.
+fn cookie_names(result: &Value) -> Vec<String> {
+    result["cookies"]
+        .as_array()
+        .expect("a cookies array")
+        .iter()
+        .map(|c| c["name"].as_str().expect("a cookie name").to_string())
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "known bug, TODO P0 'Browser-level cookies().for_url() / .delete() fail with \
+            \"method not found\"' (R5, MEC #3)"]
+async fn known_bug_cookies_get_by_url_and_delete() {
+    let fixtures = FixtureServer::start().await;
+    let server = McpServer::start(Transport::Stdio).await;
+    let url = fixtures.url("127.0.0.1", "/plain");
+    open_at(&server, json!({}), &url).await;
+    server
+        .call(
+            "browser_evaluate_main",
+            json!({ "expression": "document.cookie = 'flavour=oat'" }),
+        )
+        .await;
+    let all = server.call("browser_cookies_get", json!({})).await;
+    assert_eq!(
+        cookie_names(&all),
+        ["flavour"],
+        "browser_cookies_get without a url"
+    );
+
+    let by_url = server
+        .call("browser_cookies_get", json!({ "url": url }))
+        .await;
+    assert_eq!(
+        cookie_names(&by_url),
+        ["flavour"],
+        "browser_cookies_get by url"
+    );
+    server
+        .call(
+            "browser_cookies_delete",
+            json!({ "name": "flavour", "domain": "127.0.0.1" }),
+        )
+        .await;
+    let left = server.call("browser_cookies_get", json!({})).await;
+    assert!(
+        cookie_names(&left).is_empty(),
+        "browser_cookies_delete left {left}"
+    );
+}
