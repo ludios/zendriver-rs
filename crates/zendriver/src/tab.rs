@@ -843,16 +843,16 @@ impl Tab {
     #[must_use]
     pub fn cookies(&self) -> crate::CookieJar {
         // Chrome takes a context id only on the browser target. If the
-        // Browser is gone, fall back to the tab's own connection: it still
-        // reads the default context right, and Chrome rejects a context id
-        // sent to a page rather than answer from the default context.
-        let conn = match self.inner.browser.upgrade() {
-            Some(browser) => browser.conn.clone(),
-            None => self.inner.session.connection().clone(),
+        // Browser is gone, so is every isolated context (a BrowserContext
+        // keeps the Browser alive, and disposes its context when dropped),
+        // so a live tab is in the default context, which its own connection
+        // reads.
+        let Some(browser) = self.inner.browser.upgrade() else {
+            return crate::CookieJar::new(self.inner.session.connection().clone());
         };
         match &self.inner.browser_context_id {
-            Some(id) => crate::CookieJar::for_context(conn, id),
-            None => crate::CookieJar::new(conn),
+            Some(id) => crate::CookieJar::for_context(browser.conn.clone(), id),
+            None => crate::CookieJar::new(browser.conn.clone()),
         }
     }
 
@@ -3906,45 +3906,55 @@ mod tests {
 
     /// [`Tab::cookies`] writes into the tab's own `BrowserContext`: the
     /// command goes to the browser target (no `sessionId`, which would make
-    /// Chrome use the default context) and names the tab's context.
+    /// Chrome use the default context) and names the tab's context. Once
+    /// the Browser is gone, the tab can only be in the default context, so
+    /// the jar names none.
     #[tokio::test]
     async fn tab_cookies_write_into_the_tabs_context() {
         use crate::cookies::Cookie;
 
         let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let input = crate::input::InputController::new_with_seed(
-            zendriver_stealth::InputProfile::native(),
-            42,
-        );
-        let tab = Tab::new(
-            sess,
-            std::sync::Weak::new(),
-            input,
-            "T1".to_string(),
-            Some("CTX1".to_string()),
-        );
-        let jar = tab.cookies();
+        let inner = crate::browser::test_only_inner_from_conn(conn.clone());
+        for (browser, want) in [
+            (Arc::downgrade(&inner), json!("CTX1")),
+            (std::sync::Weak::new(), Value::Null),
+        ] {
+            let input = crate::input::InputController::new_with_seed(
+                zendriver_stealth::InputProfile::native(),
+                42,
+            );
+            let tab = Tab::new(
+                SessionHandle::new(conn.clone(), "S2"),
+                browser,
+                input,
+                "T2".to_string(),
+                Some("CTX1".to_string()),
+            );
+            let jar = tab.cookies();
+            let fut = tokio::spawn(async move {
+                jar.set(Cookie {
+                    name: "sid".into(),
+                    value: "abc".into(),
+                    domain: ".example.com".into(),
+                    path: "/".into(),
+                    ..Default::default()
+                })
+                .await
+            });
 
-        let fut = tokio::spawn(async move {
-            jar.set(Cookie {
-                name: "sid".into(),
-                value: "abc".into(),
-                domain: ".example.com".into(),
-                path: "/".into(),
-                ..Default::default()
-            })
-            .await
-        });
-
-        let id = mock.expect_cmd("Storage.setCookies").await;
-        let sent = mock.last_sent();
-        assert_eq!(sent["params"]["cookies"][0]["name"], "sid");
-        assert_eq!(sent["params"]["browserContextId"], "CTX1");
-        assert!(sent.get("sessionId").is_none(), "{sent}");
-        mock.reply(id, json!({})).await;
-
-        fut.await.unwrap().unwrap();
+            let id = mock.expect_cmd("Storage.setCookies").await;
+            let sent = mock.last_sent();
+            assert_eq!(sent["params"]["cookies"][0]["name"], "sid");
+            assert_eq!(
+                sent["params"]
+                    .get("browserContextId")
+                    .unwrap_or(&Value::Null),
+                &want
+            );
+            assert!(sent.get("sessionId").is_none(), "{sent}");
+            mock.reply(id, json!({})).await;
+            fut.await.unwrap().unwrap();
+        }
         conn.shutdown();
     }
 
