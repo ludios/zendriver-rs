@@ -508,6 +508,10 @@ jobs:
   #    expectation always timed out on real Chrome while the mock unit test —
   #    firing the same wrong name — stayed green and hid it. Both pass now and
   #    are no longer excluded.
+  #  - Tests named `known_bug_*`: each reproduces an open bug, so it fails
+  #    until that bug is fixed, and the fix deletes its `#[ignore]` (and the
+  #    prefix), which moves it to `test-integration`. Running them here
+  #    would only report the same known failures every night.
   #  - `random_canvas_differs_across_reads` was investigated 2026-07-19 and
   #    excluded pending that investigation (see backlog §3 at the time). Fixed
   #    2026-07-19 (four stacked defects: missing `.stealth(StealthProfile::
@@ -543,5 +547,5 @@ jobs:
             sudo apt-get install -y chromium-browser
             chromium-browser --version
           fi
-      - run: cargo nextest run --workspace --features integration-tests --run-ignored ignored-only --locked --profile ci-integration -E 'not (binary(stealth_phase2) or binary(cloudflare_phase5) or binary(imperva_v0) or binary(integration_cloudflare) or binary(integration_imperva) or test(end_to_end_install_chrome_to_tempdir) or test(end_to_end_cookies_storage_lifecycle))'
+      - run: cargo nextest run --workspace --features integration-tests --run-ignored ignored-only --locked --profile ci-integration -E 'not (binary(stealth_phase2) or binary(cloudflare_phase5) or binary(imperva_v0) or binary(integration_cloudflare) or binary(integration_imperva) or test(end_to_end_install_chrome_to_tempdir) or test(end_to_end_cookies_storage_lifecycle) or test(/^known_bug_/))'
 
