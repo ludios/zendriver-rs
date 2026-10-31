@@ -16,12 +16,12 @@ use axum::body::Body;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::sync::oneshot;
 
 /// A test site. Cross-site from [`SITE_B`].
 pub const SITE_A: &str = "a.test";
@@ -74,102 +74,6 @@ impl RecordedRequest {
 
 type RequestLog = Arc<Mutex<Vec<RecordedRequest>>>;
 
-/// The fixture server. Stops when dropped.
-///
-/// Canned routes (`delay_ms` and the other numbers are query parameters):
-///
-/// | Route | What it is |
-/// |-------|------------|
-/// | `/plain?title=T` | A page titled `T` (default `Plain`) with `#heading`, `#host`, and a `#link` to `/plain?title=Linked` |
-/// | `/slow-load?delay_ms=N&iframe=1` | Its `#slow` image takes `N` ms (default 1000), so `load` fires late; `iframe=1` adds a fast `#child` iframe that finishes first |
-/// | `/slow-resource?delay_ms=N` | The image behind `/slow-load`: a GIF sent after `N` ms, `no-store` |
-/// | `/form` | `#form` with input `#q` that GETs `/form-result` on submit (Enter or `#submit`) |
-/// | `/form-result?q=V` | Titled `Form result`; shows `V` in `#q` |
-/// | `/redirect/N` | `N` 302s, then `/plain?title=Redirected` |
-/// | `/iframe-same-origin` | `#child` iframe of `/frame-child` on the same origin |
-/// | `/iframe-cross-site` | `#child` iframe of `/frame-child` on the other test site |
-/// | `/frame-child` | `#child-host` showing its host, and `#child-button` |
-/// | `/downloads` | Links `#download` and `#download-tiny` to the next two |
-/// | `/download` | `report.csv` attachment, body [`DOWNLOAD_BODY`] |
-/// | `/download-tiny` | `tiny.txt` attachment of one byte |
-/// | `/basic-auth` | `401` with a `Basic` challenge unless given [`BASIC_AUTH_USER`]:[`BASIC_AUTH_PASSWORD`] |
-/// | `/trickle?chunks=N&chunk_bytes=K&interval_ms=M` | [`trickle_body`]`(N, K)`, one chunk every `M` ms (defaults 8, 1024, 100); `interval_ms=0` makes it a plain large body |
-/// | `/svg-sprite` | `<use>` of an inline symbol (`href` and `xlink:href`) and of `/sprite.svg` |
-/// | `/below-fold` | `#below` button 3000 px down; clicking sets `window.belowClicked` |
-/// | `/padded-button` | `#padded` button with large, asymmetric padding and border; clicks push `[clientX, clientY]` onto `window.clicks` |
-/// | `/controls` | `<select id="fruit">`, `<textarea id="notes">`, contenteditable `#editable` |
-/// | `/quirks` | No doctype, so `document.compatMode` is `BackCompat` |
-/// | `/table-link` | GitHub-style file table; the wide `td.name` cell's text is exactly its link's (`#readme-link`, `README.md`) |
-pub struct FixtureServer {
-    port: u16,
-    log: RequestLog,
-    task: JoinHandle<()>,
-}
-
-impl FixtureServer {
-    /// Start a server with only the canned routes.
-    pub async fn start() -> Self {
-        Self::start_with(Router::new()).await
-    }
-
-    /// Start a server with the canned routes plus `extra`. Requests to
-    /// `extra` are logged like any other.
-    ///
-    /// Panics if `extra` has a route that's also canned.
-    pub async fn start_with(extra: Router) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind fixture server");
-        let port = listener.local_addr().expect("local addr").port();
-        let log = RequestLog::default();
-        let app = canned_routes()
-            .merge(extra)
-            .layer(middleware::from_fn_with_state(log.clone(), record));
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("fixture server");
-        });
-        Self { port, log, task }
-    }
-
-    pub fn port(&self) -> u16 {
-        self.port
-    }
-
-    /// `http://{host}:{port}{path}`. `host` should be [`SITE_A`], [`SITE_B`],
-    /// another `*.test` name, or `127.0.0.1`; `path` starts with `/`.
-    pub fn url(&self, host: &str, path: &str) -> String {
-        assert!(path.starts_with('/'), "path must start with '/': {path:?}");
-        format!("http://{host}:{}{path}", self.port)
-    }
-
-    /// Every request so far, oldest first.
-    pub fn requests(&self) -> Vec<RecordedRequest> {
-        self.log.lock().expect("request log").clone()
-    }
-
-    /// Requests whose path (ignoring the query) is `path`, oldest first.
-    pub fn requests_to(&self, path: &str) -> Vec<RecordedRequest> {
-        let mut requests = self.requests();
-        requests.retain(|r| r.uri.path() == path);
-        requests
-    }
-
-    /// When the latest response to `path` was produced, or `None` if no
-    /// request to it has been answered yet.
-    pub fn last_responded_at(&self, path: &str) -> Option<Instant> {
-        self.requests_to(path)
-            .iter()
-            .rev()
-            .find_map(|r| r.responded_at)
-    }
-}
-
-impl Drop for FixtureServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
 /// The body `/trickle?chunks={chunks}&chunk_bytes={chunk_bytes}` sends:
 /// chunk `i` is `chunk_bytes` copies of the letter `a + i % 26`, so a
 /// truncated or reordered body doesn't compare equal.
@@ -182,50 +86,6 @@ pub fn trickle_body(chunks: usize, chunk_bytes: usize) -> Vec<u8> {
 fn trickle_chunk(index: usize, chunk_bytes: usize) -> Vec<u8> {
     let letter = b'a' + u8::try_from(index % 26).expect("index % 26 fits in u8");
     vec![letter; chunk_bytes]
-}
-
-/// Middleware: log the request on arrival, then note when it was answered.
-async fn record(State(log): State<RequestLog>, request: Request, next: Next) -> Response {
-    let index = {
-        let mut log = log.lock().expect("request log");
-        log.push(RecordedRequest {
-            host: host_and_port(request.headers()).0,
-            method: request.method().clone(),
-            uri: request.uri().clone(),
-            headers: request.headers().clone(),
-            received_at: Instant::now(),
-            responded_at: None,
-        });
-        log.len() - 1
-    };
-    let response = next.run(request).await;
-    log.lock().expect("request log")[index].responded_at = Some(Instant::now());
-    response
-}
-
-fn canned_routes() -> Router {
-    Router::new()
-        .route("/plain", get(plain))
-        .route("/slow-load", get(slow_load))
-        .route("/slow-resource", get(slow_resource))
-        .route("/form", get(form))
-        .route("/form-result", get(form_result))
-        .route("/redirect/:remaining", get(redirect))
-        .route("/iframe-same-origin", get(iframe_same_origin))
-        .route("/iframe-cross-site", get(iframe_cross_site))
-        .route("/frame-child", get(frame_child))
-        .route("/downloads", get(downloads))
-        .route("/download", get(download))
-        .route("/download-tiny", get(download_tiny))
-        .route("/basic-auth", get(basic_auth))
-        .route("/trickle", get(trickle))
-        .route("/svg-sprite", get(svg_sprite))
-        .route("/sprite.svg", get(sprite_svg))
-        .route("/below-fold", get(below_fold))
-        .route("/padded-button", get(padded_button))
-        .route("/controls", get(controls))
-        .route("/quirks", get(quirks))
-        .route("/table-link", get(table_link))
 }
 
 type Params = Query<HashMap<String, String>>;
@@ -289,7 +149,7 @@ async fn plain(headers: HeaderMap, params: Params) -> Html<String> {
 
 async fn slow_load(params: Params) -> Html<String> {
     let delay_ms = number(&params, "delay_ms", 1000);
-    let iframe = if params.contains_key("iframe") {
+    let iframe = if number(&params, "iframe", 0) != 0 {
         r#"<iframe id="child" name="child" src="/frame-child"></iframe>"#
     } else {
         ""
@@ -339,11 +199,14 @@ async fn form_result(params: Params) -> Html<String> {
     )
 }
 
-async fn redirect(Path(remaining): Path<u32>) -> Redirect {
-    match remaining.checked_sub(1) {
-        Some(next) => Redirect::to(&format!("/redirect/{next}")),
-        None => Redirect::to("/plain?title=Redirected"),
-    }
+/// One of `/redirect/N`'s 302s. `N` must be at least 1.
+async fn redirect(Path(remaining): Path<u32>) -> Response {
+    let next = match remaining {
+        0 => return (StatusCode::BAD_REQUEST, "/redirect/N needs N >= 1").into_response(),
+        1 => "/plain?title=Redirected".to_string(),
+        n => format!("/redirect/{}", n - 1),
+    };
+    (StatusCode::FOUND, [(header::LOCATION, next)]).into_response()
 }
 
 async fn iframe_same_origin() -> Html<String> {
@@ -542,4 +405,226 @@ async fn table_link() -> Html<String> {
   </tr>
 </table>"#,
     )
+}
+
+/// Middleware: log the request on arrival, then note when it was answered.
+async fn record(State(log): State<RequestLog>, request: Request, next: Next) -> Response {
+    let index = {
+        let mut log = log.lock().expect("request log");
+        log.push(RecordedRequest {
+            host: host_and_port(request.headers()).0,
+            method: request.method().clone(),
+            uri: request.uri().clone(),
+            headers: request.headers().clone(),
+            received_at: Instant::now(),
+            responded_at: None,
+        });
+        log.len() - 1
+    };
+    let response = next.run(request).await;
+    log.lock().expect("request log")[index].responded_at = Some(Instant::now());
+    response
+}
+
+fn canned_routes() -> Router {
+    Router::new()
+        .route("/plain", get(plain))
+        .route("/slow-load", get(slow_load))
+        .route("/slow-resource", get(slow_resource))
+        .route("/form", get(form))
+        .route("/form-result", get(form_result))
+        .route("/redirect/:remaining", get(redirect))
+        .route("/iframe-same-origin", get(iframe_same_origin))
+        .route("/iframe-cross-site", get(iframe_cross_site))
+        .route("/frame-child", get(frame_child))
+        .route("/downloads", get(downloads))
+        .route("/download", get(download))
+        .route("/download-tiny", get(download_tiny))
+        .route("/basic-auth", get(basic_auth))
+        .route("/trickle", get(trickle))
+        .route("/svg-sprite", get(svg_sprite))
+        .route("/sprite.svg", get(sprite_svg))
+        .route("/below-fold", get(below_fold))
+        .route("/padded-button", get(padded_button))
+        .route("/controls", get(controls))
+        .route("/quirks", get(quirks))
+        .route("/table-link", get(table_link))
+}
+
+/// The fixture server. Dropping it stops it, closing idle keep-alive
+/// connections too; requests in flight are answered first.
+///
+/// Canned routes (`delay_ms` and the other numbers are query parameters):
+///
+/// | Route | What it is |
+/// |-------|------------|
+/// | `/plain?title=T` | A page titled `T` (default `Plain`) with `#heading`, `#host`, and a `#link` to `/plain?title=Linked` |
+/// | `/slow-load?delay_ms=N&iframe=1` | Its `#slow` image takes `N` ms (default 1000), so `load` fires late; `iframe=1` adds a fast `#child` iframe that finishes first |
+/// | `/slow-resource?delay_ms=N` | The image behind `/slow-load`: a GIF sent after `N` ms, `no-store` |
+/// | `/form` | `#form` with input `#q` that GETs `/form-result` on submit (Enter or `#submit`) |
+/// | `/form-result?q=V` | Titled `Form result`; shows `V` in `#q` |
+/// | `/redirect/N` | `N` (at least 1) 302s, then `/plain?title=Redirected` |
+/// | `/iframe-same-origin` | `#child` iframe of `/frame-child` on the same origin |
+/// | `/iframe-cross-site` | `#child` iframe of `/frame-child` on the other test site |
+/// | `/frame-child` | `#child-host` showing its host, and `#child-button` |
+/// | `/downloads` | Links `#download` and `#download-tiny` to the next two |
+/// | `/download` | `report.csv` attachment, body [`DOWNLOAD_BODY`] |
+/// | `/download-tiny` | `tiny.txt` attachment of one byte |
+/// | `/basic-auth` | `401` with a `Basic` challenge unless given [`BASIC_AUTH_USER`]:[`BASIC_AUTH_PASSWORD`] |
+/// | `/trickle?chunks=N&chunk_bytes=K&interval_ms=M` | [`trickle_body`]`(N, K)`, one chunk every `M` ms (defaults 8, 1024, 100); `interval_ms=0` makes it a plain large body |
+/// | `/svg-sprite` | `<use>` of an inline symbol (`href` and `xlink:href`) and of `/sprite.svg` |
+/// | `/below-fold` | `#below` button 3000 px down; clicking sets `window.belowClicked` |
+/// | `/padded-button` | `#padded` button with large, asymmetric padding and border; clicks push `[clientX, clientY]` onto `window.clicks` |
+/// | `/controls` | `<select id="fruit">`, `<textarea id="notes">`, contenteditable `#editable` |
+/// | `/quirks` | No doctype, so `document.compatMode` is `BackCompat` |
+/// | `/table-link` | GitHub-style file table; the wide `td.name` cell's text is exactly its link's (`#readme-link`, `README.md`) |
+pub struct FixtureServer {
+    port: u16,
+    log: RequestLog,
+    /// Dropped (sending nothing) to shut the server down.
+    _stop: oneshot::Sender<()>,
+}
+
+impl FixtureServer {
+    /// Start a server with only the canned routes.
+    pub async fn start() -> Self {
+        Self::start_with(Router::new()).await
+    }
+
+    /// Start a server with the canned routes plus `extra`. Requests to
+    /// `extra` are logged like any other.
+    ///
+    /// Panics if `extra` has a route that's also canned.
+    pub async fn start_with(extra: Router) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fixture server");
+        let port = listener.local_addr().expect("local addr").port();
+        let log = RequestLog::default();
+        let app = canned_routes()
+            .merge(extra)
+            .layer(middleware::from_fn_with_state(log.clone(), record));
+        let (stop, stopped) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .expect("fixture server");
+        });
+        Self {
+            port,
+            log,
+            _stop: stop,
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// `http://{host}:{port}{path}`. `host` should be [`SITE_A`], [`SITE_B`],
+    /// another `*.test` name, or `127.0.0.1`; `path` starts with `/`.
+    pub fn url(&self, host: &str, path: &str) -> String {
+        assert!(path.starts_with('/'), "path must start with '/': {path:?}");
+        format!("http://{host}:{}{path}", self.port)
+    }
+
+    /// Every request so far, oldest first.
+    pub fn requests(&self) -> Vec<RecordedRequest> {
+        self.log.lock().expect("request log").clone()
+    }
+
+    /// Requests whose path (ignoring the query) is `path`, oldest first.
+    pub fn requests_to(&self, path: &str) -> Vec<RecordedRequest> {
+        let mut requests = self.requests();
+        requests.retain(|r| r.uri.path() == path);
+        requests
+    }
+
+    /// When the latest response to `path` was produced, or `None` if no
+    /// request to it has been answered yet.
+    pub fn last_responded_at(&self, path: &str) -> Option<Instant> {
+        self.requests_to(path)
+            .iter()
+            .rev()
+            .find_map(|r| r.responded_at)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    use super::*;
+
+    async fn connect(server: &FixtureServer) -> TcpStream {
+        TcpStream::connect(("127.0.0.1", server.port()))
+            .await
+            .expect("connect")
+    }
+
+    /// `GET path` on a keep-alive `stream`; returns the lowercased response
+    /// head and the body.
+    async fn get(stream: &mut TcpStream, path: &str) -> (String, String) {
+        let request = format!("GET {path} HTTP/1.1\r\nHost: {SITE_A}\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.expect("send");
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).await.expect("read");
+            assert!(n > 0, "connection closed mid-response");
+            buf.extend_from_slice(&chunk[..n]);
+            let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .map_or(0, |v| v.trim().parse().expect("Content-Length"));
+            if buf.len() >= end + 4 + length {
+                let body = String::from_utf8_lossy(&buf[end + 4..end + 4 + length]);
+                return (head, body.into_owned());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn redirect_n_is_n_302s() {
+        let server = FixtureServer::start().await;
+        let mut stream = connect(&server).await;
+        let (head, _) = get(&mut stream, "/redirect/2").await;
+        assert!(head.starts_with("http/1.1 302"), "{head}");
+        assert!(head.contains("location: /redirect/1"), "{head}");
+        let (head, _) = get(&mut stream, "/redirect/1").await;
+        assert!(head.contains("location: /plain?title=redirected"), "{head}");
+    }
+
+    #[tokio::test]
+    async fn slow_load_has_an_iframe_only_when_asked() {
+        let server = FixtureServer::start().await;
+        let mut stream = connect(&server).await;
+        let (_, body) = get(&mut stream, "/slow-load?delay_ms=0&iframe=0").await;
+        assert!(!body.contains("<iframe"), "{body}");
+        let (_, body) = get(&mut stream, "/slow-load?delay_ms=0&iframe=1").await;
+        assert!(body.contains("<iframe"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn dropping_the_server_closes_keep_alive_connections() {
+        let server = FixtureServer::start().await;
+        let mut stream = connect(&server).await;
+        get(&mut stream, "/plain").await;
+        drop(server);
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut byte))
+            .await
+            .expect("the idle connection should be closed, not left serving");
+        assert_eq!(read.unwrap_or(0), 0, "expected EOF");
+    }
 }

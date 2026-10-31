@@ -23,7 +23,8 @@ where
             Ok(false) => {}
             Err(_) => panic!("still checking after {within:?}: {what}"),
         }
-        if tokio::time::Instant::now() >= deadline {
+        // Stop rather than start a check the deadline would cut short.
+        if tokio::time::Instant::now() + POLL_INTERVAL >= deadline {
             panic!("not true within {within:?}: {what}");
         }
         tokio::time::sleep(POLL_INTERVAL).await;

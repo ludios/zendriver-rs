@@ -23,12 +23,9 @@ use zendriver_testkit::{
 /// under a second.
 const WAIT: Duration = Duration::from_secs(10);
 
-/// Navigate `tab` to `url` and wait for its `load` event, by polling the
-/// page itself.
-async fn load(tab: &Tab, url: &str) {
-    tab.goto(url)
-        .await
-        .unwrap_or_else(|e| panic!("goto {url}: {e}"));
+/// Wait until `tab` is at `url` and its `load` event has fired, by polling
+/// the page itself.
+async fn wait_loaded(tab: &Tab, url: &str) {
     assert_eventually(WAIT, &format!("{url} finishes loading"), || async {
         let state: Result<String, _> = tab
             .evaluate_main("location.href + ' ' + document.readyState")
@@ -36,6 +33,14 @@ async fn load(tab: &Tab, url: &str) {
         state.is_ok_and(|s| s == format!("{url} complete"))
     })
     .await;
+}
+
+/// Navigate `tab` to `url` and wait for its `load` event.
+async fn load(tab: &Tab, url: &str) {
+    tab.goto(url)
+        .await
+        .unwrap_or_else(|e| panic!("goto {url}: {e}"));
+    wait_loaded(tab, url).await;
 }
 
 async fn eval(tab: &Tab, js: &str) -> Value {
@@ -123,7 +128,7 @@ async fn form_submit_navigates_to_the_result() {
          document.getElementById('form').requestSubmit(); 0",
     )
     .await;
-    load(&tab, &server.url(SITE_A, "/form-result?q=a+b")).await;
+    wait_loaded(&tab, &server.url(SITE_A, "/form-result?q=a+b")).await;
     assert_eq!(
         eval(&tab, "document.getElementById('q').textContent").await,
         json!("a b")
@@ -159,7 +164,6 @@ async fn redirect_chain_ends_at_plain() {
             "/redirect/3",
             "/redirect/2",
             "/redirect/1",
-            "/redirect/0",
             "/plain?title=Redirected"
         ],
     );
