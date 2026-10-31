@@ -137,6 +137,79 @@ pub struct ChromeTree {
 }
 
 impl ChromeTree {
+    /// Whether `process` carries this Chrome's profile directory switch.
+    fn carries_profile(&self, process: &Process) -> bool {
+        user_data_dir_switch(&command_line(process)) == Some(self.user_data_dir_switch.as_str())
+    }
+
+    /// Processes in `system` that were seen before or carry our profile
+    /// directory.
+    fn survivors<'a>(&self, system: &'a System) -> Vec<&'a Process> {
+        processes(system)
+            .filter(|p| {
+                self.carries_profile(p)
+                    || self.seen.contains(&Seen {
+                        pid: p.pid(),
+                        start_time: p.start_time(),
+                    })
+            })
+            .collect()
+    }
+
+    /// Add `pids` and everything carrying our profile directory, plus the
+    /// crash handlers they name, to [`ChromeTree::seen`].
+    fn remember(&mut self, system: &System, pids: impl IntoIterator<Item = Pid>) {
+        let mut pids: Vec<Pid> = pids.into_iter().collect();
+        pids.extend(
+            processes(system)
+                .filter(|p| self.carries_profile(p))
+                .map(Process::pid),
+        );
+        let crashpad: Vec<Pid> = pids
+            .iter()
+            .filter_map(|pid| system.process(*pid))
+            .filter_map(|p| crashpad_handler_pid(&command_line(p)))
+            .collect();
+        pids.extend(crashpad);
+        for pid in pids {
+            if let Some(process) = system.process(pid) {
+                self.seen.insert(Seen {
+                    pid,
+                    start_time: process.start_time(),
+                });
+            }
+        }
+    }
+
+    /// The tree whose browser process is `browser_pid`.
+    fn of_browser_process(system: &System, browser_pid: Pid) -> Self {
+        let process = system
+            .process(browser_pid)
+            .unwrap_or_else(|| panic!("Chrome browser process {browser_pid} isn't running"));
+        let line = command_line(process);
+        let switch = user_data_dir_switch(&line)
+            .unwrap_or_else(|| panic!("Chrome has no --user-data-dir switch: {line}"));
+        let dir = switch.trim_start_matches("--user-data-dir=");
+        assert!(
+            Path::new(dir).is_dir(),
+            "can't tell where Chrome's --user-data-dir ends in {line:?}; took it as {dir:?}",
+        );
+        let mut tree = Self {
+            user_data_dir_switch: switch.to_string(),
+            seen: HashSet::new(),
+        };
+        tree.remember(system, [browser_pid]);
+        tree
+    }
+
+    /// Record `listed` and every process the command lines tie to this
+    /// Chrome; return how many of this Chrome's processes are alive.
+    async fn record(&mut self, listed: Vec<Pid>) -> usize {
+        let system = scan().await;
+        self.remember(&system, listed);
+        self.survivors(&system).len()
+    }
+
     /// Identify the Chrome behind `browser`. Panics if it can't, since a
     /// tracker that sees nothing would pass every leak check.
     pub async fn of(browser: &Browser) -> Self {
@@ -177,27 +250,6 @@ impl ChromeTree {
         }
     }
 
-    /// The tree whose browser process is `browser_pid`.
-    fn of_browser_process(system: &System, browser_pid: Pid) -> Self {
-        let process = system
-            .process(browser_pid)
-            .unwrap_or_else(|| panic!("Chrome browser process {browser_pid} isn't running"));
-        let line = command_line(process);
-        let switch = user_data_dir_switch(&line)
-            .unwrap_or_else(|| panic!("Chrome has no --user-data-dir switch: {line}"));
-        let dir = switch.trim_start_matches("--user-data-dir=");
-        assert!(
-            Path::new(dir).is_dir(),
-            "can't tell where Chrome's --user-data-dir ends in {line:?}; took it as {dir:?}",
-        );
-        let mut tree = Self {
-            user_data_dir_switch: switch.to_string(),
-            seen: HashSet::new(),
-        };
-        tree.remember(system, [browser_pid]);
-        tree
-    }
-
     /// Record every process of this Chrome alive now, and return how many
     /// there are. Call it while the browser is still up, right before
     /// closing it, so processes started since [`ChromeTree::of`] count. If
@@ -218,14 +270,6 @@ impl ChromeTree {
     /// this Chrome, which on Linux is all of them.
     pub async fn snapshot_by_command_line(&mut self) -> usize {
         self.record(Vec::new()).await
-    }
-
-    /// Record `listed` and every process the command lines tie to this
-    /// Chrome; return how many of this Chrome's processes are alive.
-    async fn record(&mut self, listed: Vec<Pid>) -> usize {
-        let system = scan().await;
-        self.remember(&system, listed);
-        self.survivors(&system).len()
     }
 
     /// Wait up to `within` for every process seen to exit, and for no
@@ -256,49 +300,6 @@ impl ChromeTree {
         for process in self.survivors(&system) {
             process.kill();
         }
-    }
-
-    /// Add `pids` and everything carrying our profile directory, plus the
-    /// crash handlers they name, to [`ChromeTree::seen`].
-    fn remember(&mut self, system: &System, pids: impl IntoIterator<Item = Pid>) {
-        let mut pids: Vec<Pid> = pids.into_iter().collect();
-        pids.extend(
-            processes(system)
-                .filter(|p| self.carries_profile(p))
-                .map(Process::pid),
-        );
-        let crashpad: Vec<Pid> = pids
-            .iter()
-            .filter_map(|pid| system.process(*pid))
-            .filter_map(|p| crashpad_handler_pid(&command_line(p)))
-            .collect();
-        pids.extend(crashpad);
-        for pid in pids {
-            if let Some(process) = system.process(pid) {
-                self.seen.insert(Seen {
-                    pid,
-                    start_time: process.start_time(),
-                });
-            }
-        }
-    }
-
-    /// Processes in `system` that were seen before or carry our profile
-    /// directory.
-    fn survivors<'a>(&self, system: &'a System) -> Vec<&'a Process> {
-        processes(system)
-            .filter(|p| {
-                self.carries_profile(p)
-                    || self.seen.contains(&Seen {
-                        pid: p.pid(),
-                        start_time: p.start_time(),
-                    })
-            })
-            .collect()
-    }
-
-    fn carries_profile(&self, process: &Process) -> bool {
-        user_data_dir_switch(&command_line(process)) == Some(self.user_data_dir_switch.as_str())
     }
 }
 

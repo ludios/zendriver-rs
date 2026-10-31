@@ -446,6 +446,19 @@ pub fn disagreements(probe: &Value, requests: &[RecordedRequest]) -> Claims {
     claims
 }
 
+/// `disagreements` as readable text, one field per paragraph.
+pub fn describe_disagreements(disagreements: &Claims) -> String {
+    let mut text = String::new();
+    for (field, values) in disagreements {
+        text.push_str(field);
+        text.push_str(":\n");
+        for (source, value) in values {
+            text.push_str(&format!("    {source}: {value}\n"));
+        }
+    }
+    text
+}
+
 /// The TODO item for workers, which no stealth patch reaches: they report
 /// the host's hardware and the real GPU (SwiftShader, since workers get no
 /// GPU).
@@ -515,19 +528,6 @@ pub fn check_known_disagreements(
          All disagreements:\n{}",
         describe_disagreements(found),
     ))
-}
-
-/// `disagreements` as readable text, one field per paragraph.
-pub fn describe_disagreements(disagreements: &Claims) -> String {
-    let mut text = String::new();
-    for (field, values) in disagreements {
-        text.push_str(field);
-        text.push_str(":\n");
-        for (source, value) in values {
-            text.push_str(&format!("    {source}: {value}\n"));
-        }
-    }
-    text
 }
 
 #[cfg(test)]
