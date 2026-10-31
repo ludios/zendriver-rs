@@ -1812,6 +1812,12 @@ pub struct Browser {
 pub(crate) struct BrowserInner {
     pub(crate) conn: Connection,
     pub(crate) main_tab: Tab,
+    /// CDP `browserContextId` of the default `BrowserContext`, taken from
+    /// the initial page's `TargetInfo`. Chrome names the default context
+    /// too, but Chrome before ~153 rejects that id in `browserContextId`,
+    /// so a tab in this context records none ([`Tab`]'s cookie jar then
+    /// names no context).
+    pub(crate) default_context_id: Option<String>,
     pub(crate) child: tokio::sync::Mutex<Option<Child>>,
     /// Windows job object confining Chrome's whole process tree; a zero-sized
     /// no-op elsewhere. Killing the tracked `child` alone is not enough on
@@ -2079,6 +2085,7 @@ pub(crate) fn test_only_inner_with_host_port(
         BrowserInner {
             conn,
             main_tab,
+            default_context_id: None,
             child: tokio::sync::Mutex::new(None),
             job: ProcessJob::none(),
             _user_data: None,
@@ -2335,7 +2342,11 @@ impl TargetObserver for TabRegistrar {
                     weak_inner,
                     input,
                     session.target_info.target_id.clone(),
-                    session.target_info.browser_context_id.clone(),
+                    session
+                        .target_info
+                        .browser_context_id
+                        .clone()
+                        .filter(|id| browser.default_context_id.as_ref() != Some(id)),
                 );
 
                 // Dedupe by `target_id`: if `flatten: true` re-fires
@@ -2980,7 +2991,7 @@ pub(crate) async fn finish_connect(
         .and_then(|t| t["targetId"].as_str())
         .ok_or_else(|| ZendriverError::Navigation("no initial target found".into()))?
         .to_string();
-    let browser_context_id = main_target
+    let default_context_id = main_target
         .and_then(|t| t["browserContextId"].as_str())
         .map(str::to_string);
 
@@ -3055,16 +3066,11 @@ pub(crate) async fn finish_connect(
     // `Arc::new_cyclic` self-referential pattern.
     let inner = Arc::new_cyclic(|weak: &std::sync::Weak<BrowserInner>| {
         let main_tab_input = InputController::new(input_profile.clone());
-        let main_tab = Tab::new(
-            main_session,
-            weak.clone(),
-            main_tab_input,
-            target_id,
-            browser_context_id,
-        );
+        let main_tab = Tab::new(main_session, weak.clone(), main_tab_input, target_id, None);
         BrowserInner {
             conn,
             main_tab,
+            default_context_id,
             // Take ownership of the child only now, once every CDP round-trip
             // has succeeded. Until this point `guard_handshake` owns the
             // cleanup: if the budget expires mid-handshake the child is still
@@ -4166,10 +4172,10 @@ impl Browser {
         &self.inner.conn
     }
 
-    /// Browser-wide cookie store handle. Cookies in Chrome are stored once
-    /// per profile and shared across all tabs, so the jar binds to the
-    /// browser's root [`Connection`] and dispatches `Network.*Cookies*`
-    /// commands at browser scope (no `sessionId`).
+    /// Cookie store of the default `BrowserContext`, which every tab shares
+    /// except those opened in an isolated [`crate::BrowserContext`] (use
+    /// [`Tab::cookies`] for those). The jar sends `Storage.*Cookies`
+    /// commands on the browser's root [`Connection`] (no `sessionId`).
     ///
     /// Cheap to call — [`crate::CookieJar`] is an `Arc`-backed handle, and
     /// each invocation constructs a fresh wrapper around the cloned
@@ -6295,6 +6301,7 @@ mod tests {
             BrowserInner {
                 conn: conn.clone(),
                 main_tab,
+                default_context_id: None,
                 child: tokio::sync::Mutex::new(None),
                 job: ProcessJob::none(),
                 _user_data: None,
@@ -6402,6 +6409,7 @@ mod tests {
             BrowserInner {
                 conn: conn.clone(),
                 main_tab,
+                default_context_id: None,
                 child: tokio::sync::Mutex::new(None),
                 job: ProcessJob::none(),
                 _user_data: None,
@@ -6523,6 +6531,7 @@ mod tests {
             BrowserInner {
                 conn: conn.clone(),
                 main_tab,
+                default_context_id: None,
                 child: tokio::sync::Mutex::new(None),
                 job: ProcessJob::none(),
                 _user_data: None,
@@ -6616,6 +6625,7 @@ mod tests {
             BrowserInner {
                 conn: conn.clone(),
                 main_tab,
+                default_context_id: None,
                 child: tokio::sync::Mutex::new(None),
                 job: ProcessJob::none(),
                 _user_data: None,
@@ -6733,6 +6743,7 @@ mod tests {
             BrowserInner {
                 conn: conn.clone(),
                 main_tab,
+                default_context_id: None,
                 child: tokio::sync::Mutex::new(None),
                 job: ProcessJob::none(),
                 _user_data: None,
@@ -6849,6 +6860,7 @@ mod tests {
             BrowserInner {
                 conn: conn.clone(),
                 main_tab,
+                default_context_id: None,
                 child: tokio::sync::Mutex::new(None),
                 job: ProcessJob::none(),
                 _user_data: None,
@@ -6926,6 +6938,7 @@ mod tests {
             BrowserInner {
                 conn: conn.clone(),
                 main_tab,
+                default_context_id: None,
                 child: tokio::sync::Mutex::new(None),
                 job: ProcessJob::none(),
                 _user_data: None,
@@ -7005,6 +7018,7 @@ mod tests {
             BrowserInner {
                 conn: conn.clone(),
                 main_tab,
+                default_context_id: None,
                 child: tokio::sync::Mutex::new(None),
                 job: ProcessJob::none(),
                 _user_data: None,
@@ -7074,6 +7088,7 @@ mod tests {
             BrowserInner {
                 conn: conn.clone(),
                 main_tab,
+                default_context_id: None,
                 child: tokio::sync::Mutex::new(None),
                 job: ProcessJob::none(),
                 _user_data: None,
@@ -7220,6 +7235,7 @@ mod tests {
             BrowserInner {
                 conn: conn.clone(),
                 main_tab,
+                default_context_id: None,
                 child: tokio::sync::Mutex::new(None),
                 job: ProcessJob::none(),
                 _user_data: None,

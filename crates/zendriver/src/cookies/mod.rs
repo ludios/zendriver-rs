@@ -1,4 +1,5 @@
-//! Browser-wide cookie store backed by CDP `Storage.*Cookies` methods.
+//! Cookie stores of browser contexts, backed by CDP `Storage.*Cookies`
+//! methods.
 //!
 //! [`CookieJar`] wraps a [`Connection`] and exposes ergonomic CRUD over
 //! Chrome's cookie store. The jar is cheap to clone — internally an `Arc`
@@ -384,7 +385,7 @@ impl CookieJar {
         Ok(self.inner.conn.call_raw(method, params, None).await?)
     }
 
-    /// Return every cookie in the browser's store.
+    /// Return every cookie in the jar's context.
     ///
     /// Maps to `Storage.getCookies`.
     ///
@@ -549,11 +550,9 @@ impl CookieJar {
         Ok(())
     }
 
-    /// Clear the entire browser cookie store.
+    /// Delete every cookie in the jar's context.
     ///
-    /// Maps to `Storage.clearCookies` (the modern CDP method; newer
-    /// Chrome / Chromium builds dropped `Storage.clearCookies`
-    /// from the wire). No params, no response payload.
+    /// Maps to `Storage.clearCookies`.
     ///
     /// # Examples
     ///

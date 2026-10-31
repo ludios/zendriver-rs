@@ -204,3 +204,28 @@ async fn tab_cookies_stay_in_an_isolated_context() {
     assert!(!has_cookie(&left), "tab.cookies().delete left: {left:?}");
     browser.close().await;
 }
+
+/// A default-context tab's jar names no context: Chrome before ~153 knows
+/// only the contexts DevTools created, and rejects the default one's id.
+/// (Chrome 156 accepts it, so this reads the jar's `Debug`.)
+#[tokio::test]
+async fn only_isolated_tab_jars_name_their_context() {
+    let browser = launch_for_test(Browser::builder()).await;
+    let new_tab = browser.new_tab().await.expect("new_tab");
+    for tab in [browser.main_tab(), new_tab] {
+        let jar = format!("{:?}", tab.cookies());
+        assert!(jar.contains("browser_context_id: None"), "{jar}");
+    }
+    let context = browser
+        .browser_context()
+        .build()
+        .await
+        .expect("browser context");
+    let isolated = context.new_tab().await.expect("isolated tab");
+    let jar = format!("{:?}", isolated.cookies());
+    assert!(
+        jar.contains(&format!("browser_context_id: Some({:?})", context.id())),
+        "{jar}"
+    );
+    browser.close().await;
+}

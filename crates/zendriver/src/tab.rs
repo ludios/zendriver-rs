@@ -298,9 +298,8 @@ pub(crate) struct TabInner {
     /// dispatch by `targetId` without re-querying `Target.getTargetInfo`
     /// per call.
     pub(crate) target_id: String,
-    /// CDP `browserContextId` of the context this tab's target lives in,
-    /// from its `TargetInfo`; `None` when Chrome didn't say, which
-    /// [`Tab::cookies`] takes as the default context.
+    /// CDP `browserContextId` of the isolated context this tab's target
+    /// lives in, from its `TargetInfo`; `None` for the default context.
     pub(crate) browser_context_id: Option<String>,
     /// Per-Tab in-flight network request tracker. Constructed in
     /// [`Tab::new`] alongside a background task (spawned via
@@ -440,6 +439,15 @@ impl Default for IdleOptions {
 }
 
 impl Tab {
+    /// Wrap a page target and start its background trackers.
+    ///
+    /// - `session`: the CDP session (or per-tab socket) the tab talks on.
+    /// - `browser`: the owning Browser, held weakly to break the cycle.
+    /// - `input`: the tab's cursor and keyboard state.
+    /// - `target_id`: the page target's CDP `targetId`.
+    /// - `browser_context_id`: the isolated `BrowserContext` the target is
+    ///   in, or `None` for the default one (see
+    ///   `BrowserInner::default_context_id`).
     pub(crate) fn new(
         session: SessionHandle,
         browser: std::sync::Weak<crate::browser::BrowserInner>,
@@ -5230,6 +5238,7 @@ mod tests {
                 crate::browser::BrowserInner {
                     conn: conn.clone(),
                     main_tab,
+                    default_context_id: None,
                     child: tokio::sync::Mutex::new(None),
                     job: crate::browser::ProcessJob::none(),
                     _user_data: None,
