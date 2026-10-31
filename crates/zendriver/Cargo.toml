@@ -111,7 +111,9 @@ tracing-subscriber.workspace  = true
 sysinfo.workspace             = true
 zendriver-transport = { workspace = true, features = ["testing"] }
 # Shared real-Chrome fixtures (fixture server, `launch_for_test`). Path-only,
-# so `cargo publish` strips it: the crate is unpublished.
+# so `cargo publish` strips it: the crate is unpublished. For tests/ only: it
+# depends on zendriver, so inside src/ unit tests its `zendriver::Browser` is
+# a different type from `crate::Browser`.
 zendriver-testkit = { path = "../zendriver-testkit" }
 # Unconditional (unlike the `dep:wiremock` optional entry above, which only
 # gates the real-Chrome `integration-tests` binaries): the `geo_resolver`

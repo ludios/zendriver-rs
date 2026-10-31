@@ -137,9 +137,10 @@ const COMMANDS: &[(&str, Scope)] = &[
     ("Target.setAutoAttach", B),
 ];
 
-/// Commands the library sends where Chrome doesn't have them: known bugs.
-/// The test checks they still fail, so whoever fixes one must also delete
-/// its row. Each names the TODO item it belongs to.
+/// Commands the library sends where Chrome doesn't have them: known bugs,
+/// each naming its TODO item. Chrome keeps rejecting them, so nothing here
+/// notices when the library stops sending one: whoever fixes it deletes the
+/// row. The scope is hand-kept, like everywhere in these tables.
 const KNOWN_MISSING: &[(&str, Scope, &str)] = &[
     (
         "Network.deleteCookies",
@@ -187,6 +188,42 @@ const EVENTS: &[&str] = &[
 /// How long one probing call may take. Chrome answers a parameter error at
 /// once; this only bounds a wedged page.
 const CALL_BUDGET: Duration = Duration::from_secs(5);
+
+/// GET `path` from Chrome's DevTools HTTP endpoint and parse the body. Chrome
+/// doesn't answer HTTP/1.0 and keeps HTTP/1.1 connections open, so this
+/// reads exactly `Content-Length` bytes. Bounded by [`CALL_BUDGET`].
+async fn http_get_json(host_port: &str, path: &str) -> Value {
+    let get = async {
+        let mut stream = tokio::net::TcpStream::connect(host_port)
+            .await
+            .expect("connect to DevTools HTTP");
+        let request = format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.expect("send");
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            let n = stream.read(&mut chunk).await.expect("read");
+            assert!(n > 0, "DevTools HTTP closed before the whole body arrived");
+            buf.extend_from_slice(&chunk[..n]);
+            let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or_else(|| panic!("no Content-Length in {head:?}"));
+            let body = head_end + 4;
+            if buf.len() >= body + length {
+                return serde_json::from_slice(&buf[body..body + length]).expect("JSON body");
+            }
+        }
+    };
+    tokio::time::timeout(CALL_BUDGET, get)
+        .await
+        .unwrap_or_else(|_| panic!("GET {path} from {host_port} took over {CALL_BUDGET:?}"))
+}
 
 /// The protocol a running Chrome speaks, from its `/json/protocol`.
 struct Protocol {
@@ -265,37 +302,6 @@ impl Protocol {
     }
 }
 
-/// GET `path` from Chrome's DevTools HTTP endpoint and parse the body. Chrome
-/// doesn't answer HTTP/1.0 and keeps HTTP/1.1 connections open, so this
-/// reads exactly `Content-Length` bytes.
-async fn http_get_json(host_port: &str, path: &str) -> Value {
-    let mut stream = tokio::net::TcpStream::connect(host_port)
-        .await
-        .expect("connect to DevTools HTTP");
-    let request = format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\n\r\n");
-    stream.write_all(request.as_bytes()).await.expect("send");
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 64 * 1024];
-    loop {
-        let n = stream.read(&mut chunk).await.expect("read");
-        assert!(n > 0, "DevTools HTTP closed before the whole body arrived");
-        buf.extend_from_slice(&chunk[..n]);
-        let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
-            continue;
-        };
-        let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
-        let length: usize = head
-            .lines()
-            .find_map(|line| line.strip_prefix("content-length:"))
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or_else(|| panic!("no Content-Length in {head:?}"));
-        let body = head_end + 4;
-        if buf.len() >= body + length {
-            return serde_json::from_slice(&buf[body..body + length]).expect("JSON body");
-        }
-    }
-}
-
 /// Send `command` with `params` at `scope`.
 async fn send(
     browser: &TestBrowser,
@@ -323,6 +329,8 @@ async fn send(
     }
 }
 
+/// A browser whose main tab is on a fixture page, and the server behind
+/// it, which the caller must keep alive.
 async fn launch_on_a_page() -> (FixtureServer, TestBrowser) {
     let server = FixtureServer::start().await;
     let browser = launch_for_test(Browser::builder()).await;
