@@ -53,11 +53,10 @@ async fn open_at(server: &McpServer, open_args: Value, url: &str) {
 }
 
 /// Panic unless every process of `chrome` exits within
-/// [`CHROME_EXIT_WITHIN`]; kill the survivors first. `after` says what
-/// should have made it exit.
+/// [`CHROME_EXIT_WITHIN`]. `after` says what should have made it exit. (The
+/// survivors die with the [`McpServer`].)
 async fn assert_chrome_exits(chrome: &ChromeTree, after: &str) {
     if let Err(survivors) = chrome.wait_gone(CHROME_EXIT_WITHIN).await {
-        chrome.kill_survivors().await;
         panic!(
             "{} Chrome process(es) still running {CHROME_EXIT_WITHIN:?} after {after}:\n  {}",
             survivors.len(),
@@ -80,7 +79,7 @@ async fn browse_and_close(transport: Transport) {
         .await;
     assert_eq!(title["value"], "Hello");
 
-    let mut chrome = server.chrome().await;
+    let mut chrome = server.chrome();
     assert!(chrome.snapshot_by_command_line().await > 1);
     server.call("browser_close", json!({})).await;
     assert_chrome_exits(&chrome, "browser_close").await;
@@ -111,7 +110,7 @@ async fn chrome_exits_when_server_stops(transport: Transport, stop: Stop) {
     let fixtures = FixtureServer::start().await;
     let mut server = McpServer::start(transport).await;
     open_at(&server, json!({}), &fixtures.url("127.0.0.1", "/plain")).await;
-    let mut chrome = server.chrome().await;
+    let mut chrome = server.chrome();
     assert!(chrome.snapshot_by_command_line().await > 1);
 
     match stop {
@@ -120,10 +119,10 @@ async fn chrome_exits_when_server_stops(transport: Transport, stop: Stop) {
     }
     let what = format!("{stop:?} over {transport:?}");
     if server.wait_exit(SERVER_EXIT_WITHIN).await.is_none() {
-        let log = server.stderr();
-        drop(server);
-        chrome.kill_survivors().await;
-        panic!("server still running {SERVER_EXIT_WITHIN:?} after {what}; its log:\n{log}");
+        panic!(
+            "server still running {SERVER_EXIT_WITHIN:?} after {what}; its log:\n{}",
+            server.stderr()
+        );
     }
     assert_chrome_exits(&chrome, &what).await;
 }
@@ -203,7 +202,7 @@ async fn probe_agrees_under_spoof_windows() {
         .await;
     let found = disagreements(&probe["value"], &fixtures.requests());
 
-    let chrome = server.chrome().await;
+    let chrome = server.chrome();
     server.call("browser_close", json!({})).await;
     assert_chrome_exits(&chrome, "browser_close").await;
 

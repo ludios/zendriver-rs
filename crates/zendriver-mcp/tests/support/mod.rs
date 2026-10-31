@@ -34,13 +34,15 @@ pub enum Transport {
 }
 
 /// A running `zendriver-mcp` with a connected client. Dropping it kills the
-/// server (not the Chrome it launched).
+/// server, and the Chrome it launched, if any.
 pub struct McpServer {
     child: Child,
     /// `None` once [`McpServer::close_stdin`] has disconnected it.
     client: Option<RunningService<RoleClient, ()>>,
     /// Everything the server has logged so far, one entry per line.
     stderr: Arc<Mutex<Vec<String>>>,
+    /// The Chrome the last `browser_open` launched.
+    chrome: Mutex<Option<ChromeTree>>,
 }
 
 /// The `127.0.0.1:PORT` in a log line, which may contain ANSI colour codes.
@@ -93,8 +95,7 @@ impl McpServer {
             .args(["--log", "info"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
         if let Transport::Http = transport {
             command.args(["--http", "127.0.0.1:0"]);
         }
@@ -132,6 +133,7 @@ impl McpServer {
             child,
             client: Some(client),
             stderr,
+            chrome: Mutex::new(None),
         }
     }
 
@@ -155,12 +157,21 @@ impl McpServer {
         if result.is_error == Some(true) {
             panic!("{tool} reported an error: {:?}", result.content);
         }
+        if tool == "browser_open" {
+            let pid = self.child.id().expect("the server is running");
+            let tree = ChromeTree::launched_by(pid).await;
+            *self.chrome.lock().expect("chrome") = Some(tree);
+        }
         structured(result)
     }
 
-    /// The Chrome this server launched. Call it after `browser_open`.
-    pub async fn chrome(&self) -> ChromeTree {
-        ChromeTree::launched_by(self.child.id().expect("the server is running")).await
+    /// The Chrome the last `browser_open` launched.
+    pub fn chrome(&self) -> ChromeTree {
+        self.chrome
+            .lock()
+            .expect("chrome")
+            .clone()
+            .expect("no browser_open yet")
     }
 
     /// Disconnect the client, which for stdio closes the server's stdin, as
@@ -184,6 +195,18 @@ impl McpServer {
     pub async fn wait_exit(&mut self, within: Duration) -> Option<ExitStatus> {
         let exited = tokio::time::timeout(within, self.child.wait()).await.ok()?;
         Some(exited.expect("wait for the server"))
+    }
+}
+
+impl Drop for McpServer {
+    /// Kill the server, then its Chrome: a test that fails before closing
+    /// the browser would otherwise leave Chrome running, since Chrome
+    /// outlives a killed server.
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+        if let Some(chrome) = self.chrome.get_mut().ok().and_then(Option::take) {
+            chrome.kill();
+        }
     }
 }
 

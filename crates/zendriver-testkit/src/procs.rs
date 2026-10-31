@@ -83,19 +83,22 @@ fn crashpad_handler_pid(line: &str) -> Option<Pid> {
 /// Every process on the machine, with command lines. Reads `/proc` and the
 /// like for every process, so it runs off the async runtime.
 async fn scan() -> System {
-    tokio::task::spawn_blocking(|| {
-        let mut system = System::new();
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::new()
-                .with_cmd(UpdateKind::Always)
-                .with_exe(UpdateKind::Always),
-        );
-        system
-    })
-    .await
-    .expect("process scan")
+    tokio::task::spawn_blocking(scan_blocking)
+        .await
+        .expect("process scan")
+}
+
+/// [`scan`] on the calling thread.
+fn scan_blocking() -> System {
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::new()
+            .with_cmd(UpdateKind::Always)
+            .with_exe(UpdateKind::Always),
+    );
+    system
 }
 
 /// The processes in `system`. On Linux, sysinfo also lists each thread as a
@@ -244,10 +247,12 @@ impl ChromeTree {
         }
     }
 
-    /// Kill (SIGKILL) every process of this Chrome that's still running, so
-    /// that a test which found survivors doesn't leave them behind.
-    pub async fn kill_survivors(&self) {
-        let system = scan().await;
+    /// Kill (SIGKILL) every process of this Chrome that's still running: to
+    /// crash it on purpose, or so that a test which found survivors doesn't
+    /// leave them behind. Blocks while it reads the process table (tens of
+    /// milliseconds), so that it also works in a `Drop`.
+    pub fn kill(&self) {
+        let system = scan_blocking();
         for process in self.survivors(&system) {
             process.kill();
         }
