@@ -4,7 +4,6 @@ use std::ops::Deref;
 use std::time::Duration;
 
 use tokio::runtime::{Handle, RuntimeFlavor};
-use tracing::subscriber::DefaultGuard;
 use zendriver::{Browser, BrowserBuilder};
 
 use crate::logs::Logs;
@@ -24,30 +23,27 @@ const EXIT_GRACE: Duration = Duration::from_secs(10);
 /// by returning `Err`: the early return would drop this unclosed, and that
 /// panic would replace the error.
 pub struct TestBrowser {
-    browser: Browser,
+    /// `None` once closed.
+    browser: Option<Browser>,
     tree: ChromeTree,
     logs: Logs,
-    _log_guard: DefaultGuard,
-    closed: bool,
 }
 
 /// Launch `builder` headless, with every `*.test` host resolving to the
-/// fixture server, and capture this thread's `tracing` output from here
-/// until the browser is closed. Chrome gets a fresh temporary profile
-/// unless `builder` names one.
+/// fixture server (replacing any `--host-resolver-rules` in `builder`), and
+/// capture what this thread logs from here on. Chrome gets a fresh
+/// temporary profile unless `builder` names one.
 ///
 /// Panics if the launch fails, or if not on a current-thread runtime
 /// (`#[tokio::test]`'s default): the log capture is per-thread, and on a
-/// multi-thread runtime it would quietly miss events. With two browsers in
-/// one test, the later one's capture takes over from the earlier one's.
+/// multi-thread runtime it would quietly miss events.
 pub async fn launch_for_test(builder: BrowserBuilder) -> TestBrowser {
     assert_eq!(
         Handle::current().runtime_flavor(),
         RuntimeFlavor::CurrentThread,
         "launch_for_test needs a current-thread runtime, or the log capture misses events",
     );
-    let logs = Logs::default();
-    let log_guard = logs.capture();
+    let logs = Logs::from_now_on();
     let browser = builder
         .headless(true)
         .arg(HOST_RESOLVER_RULES)
@@ -56,30 +52,31 @@ pub async fn launch_for_test(builder: BrowserBuilder) -> TestBrowser {
         .unwrap_or_else(|e| panic!("launch_for_test: Chrome didn't launch: {e}"));
     let tree = ChromeTree::of(&browser).await;
     TestBrowser {
-        browser,
+        browser: Some(browser),
         tree,
         logs,
-        _log_guard: log_guard,
-        closed: false,
     }
 }
 
 impl TestBrowser {
-    /// What's been logged since launch.
+    /// What this thread has logged since the launch. With two browsers in
+    /// a test, each sees the other's events too.
     pub fn logs(&self) -> &Logs {
         &self.logs
     }
 
     /// Close the browser, then panic unless all of its processes exit
-    /// within a few seconds.
+    /// within a few seconds. Closes with the last handle this holds, as a
+    /// user's `close()` would, so hold no other `Browser` clones by then.
     pub async fn close(mut self) {
-        let live = self.tree.snapshot(&self.browser).await;
+        let browser = self.browser.take().expect("TestBrowser closed twice");
+        let live = self.tree.snapshot(&browser).await;
         assert!(
             live > 0,
             "found none of this Chrome's processes while it was running, so the exit check \
              below would pass without checking anything"
         );
-        self.browser.clone().close().await.expect("Browser::close");
+        browser.close().await.expect("Browser::close");
         if let Err(survivors) = self.tree.wait_gone(EXIT_GRACE).await {
             panic!(
                 "{} Chrome process(es) still running {EXIT_GRACE:?} after close:\n  {}",
@@ -87,7 +84,6 @@ impl TestBrowser {
                 survivors.join("\n  "),
             );
         }
-        self.closed = true;
     }
 }
 
@@ -95,13 +91,13 @@ impl Deref for TestBrowser {
     type Target = Browser;
 
     fn deref(&self) -> &Browser {
-        &self.browser
+        self.browser.as_ref().expect("TestBrowser used after close")
     }
 }
 
 impl Drop for TestBrowser {
     fn drop(&mut self) {
-        if !self.closed && !std::thread::panicking() {
+        if self.browser.is_some() && !std::thread::panicking() {
             panic!("TestBrowser dropped without close(), so nothing checked that Chrome exited");
         }
     }

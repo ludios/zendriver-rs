@@ -1,11 +1,11 @@
 //! Capture `tracing` output so a test can assert on what was logged, e.g.
 //! that a clean shutdown logged no error.
 
+use std::cell::OnceCell;
 use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex};
 
 use tracing::field::{Field, Visit};
-use tracing::subscriber::DefaultGuard;
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::{Context, SubscriberExt as _};
@@ -32,14 +32,102 @@ impl fmt::Display for LogLine {
     }
 }
 
-/// Events captured at `DEBUG` and above.
+/// Everything one thread has logged at `DEBUG` and above.
 #[derive(Clone, Debug, Default)]
-pub struct Logs(Arc<Mutex<Vec<LogLine>>>);
+struct Buffer(Arc<Mutex<Vec<LogLine>>>);
+
+#[derive(Default)]
+struct LineVisitor {
+    message: String,
+    fields: String,
+}
+
+impl Visit for LineVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" {
+            // A `format_args!` whose `Debug` is the plain text.
+            self.message = format!("{value:?}");
+        } else {
+            if !self.fields.is_empty() {
+                self.fields.push(' ');
+            }
+            let _ = write!(self.fields, "{}={value:?}", field.name());
+        }
+    }
+}
+
+impl<S: Subscriber> Layer<S> for Buffer {
+    fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
+        let mut visitor = LineVisitor::default();
+        event.record(&mut visitor);
+        let line = LogLine {
+            level: *event.metadata().level(),
+            target: event.metadata().target().to_string(),
+            message: visitor.message,
+            fields: visitor.fields,
+        };
+        // A poisoned buffer means another thread panicked mid-push; that
+        // panic is the one worth reading, so don't add a second.
+        if let Ok(mut lines) = self.0.lock() {
+            lines.push(line);
+        }
+    }
+}
+
+thread_local! {
+    static THREAD_BUFFER: OnceCell<Buffer> = const { OnceCell::new() };
+}
+
+impl Buffer {
+    /// This thread's buffer. The first call makes it the thread's subscriber
+    /// for good, so captures never have to be undone in order. If `RUST_LOG`
+    /// is set, events are also printed to the test output, filtered by it.
+    fn of_this_thread() -> Self {
+        THREAD_BUFFER.with(|cell| {
+            cell.get_or_init(|| {
+                let buffer = Self::default();
+                let echo = std::env::var_os("RUST_LOG").map(|_| {
+                    tracing_subscriber::fmt::layer()
+                        .with_test_writer()
+                        .with_filter(EnvFilter::from_default_env())
+                });
+                let subscriber = tracing_subscriber::registry()
+                    .with(buffer.clone().with_filter(LevelFilter::DEBUG))
+                    .with(echo);
+                std::mem::forget(tracing::subscriber::set_default(subscriber));
+                buffer
+            })
+            .clone()
+        })
+    }
+
+    fn lines(&self) -> std::sync::MutexGuard<'_, Vec<LogLine>> {
+        self.0.lock().expect("log buffer")
+    }
+}
+
+/// What one thread logged at `DEBUG` and above, from some point on.
+///
+/// Thread-local, so it sees a task only if that task runs on this thread:
+/// the caller must be on a current-thread runtime.
+#[derive(Clone, Debug)]
+pub struct Logs {
+    buffer: Buffer,
+    /// Where in `buffer` this view starts.
+    from: usize,
+}
 
 impl Logs {
+    /// What this thread logs from now on.
+    pub(crate) fn from_now_on() -> Self {
+        let buffer = Buffer::of_this_thread();
+        let from = buffer.lines().len();
+        Self { buffer, from }
+    }
+
     /// Every captured line, oldest first.
     pub fn lines(&self) -> Vec<LogLine> {
-        self.0.lock().expect("log buffer").clone()
+        self.buffer.lines()[self.from..].to_vec()
     }
 
     /// Captured lines at `level` or more severe: `at_least(Level::WARN)` is
@@ -60,60 +148,5 @@ impl Logs {
             "expected nothing logged at {level} or above, got:\n{}",
             lines.iter().map(|l| format!("  {l}\n")).collect::<String>(),
         );
-    }
-
-    /// Capture this thread's events into `self` until the guard drops. If
-    /// `RUST_LOG` is set, also print them to the test output, filtered by it.
-    ///
-    /// Thread-local, so it sees a task only if that task runs on this
-    /// thread; the caller must be on a current-thread runtime.
-    pub(crate) fn capture(&self) -> DefaultGuard {
-        let echo = std::env::var_os("RUST_LOG").map(|_| {
-            tracing_subscriber::fmt::layer()
-                .with_test_writer()
-                .with_filter(EnvFilter::from_default_env())
-        });
-        let subscriber = tracing_subscriber::registry()
-            .with(self.clone().with_filter(LevelFilter::DEBUG))
-            .with(echo);
-        tracing::subscriber::set_default(subscriber)
-    }
-}
-
-impl<S: Subscriber> Layer<S> for Logs {
-    fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
-        let mut visitor = LineVisitor::default();
-        event.record(&mut visitor);
-        let line = LogLine {
-            level: *event.metadata().level(),
-            target: event.metadata().target().to_string(),
-            message: visitor.message,
-            fields: visitor.fields,
-        };
-        // A poisoned buffer means another thread panicked mid-push; that
-        // panic is the one worth reading, so don't add a second.
-        if let Ok(mut lines) = self.0.lock() {
-            lines.push(line);
-        }
-    }
-}
-
-#[derive(Default)]
-struct LineVisitor {
-    message: String,
-    fields: String,
-}
-
-impl Visit for LineVisitor {
-    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        if field.name() == "message" {
-            // A `format_args!` whose `Debug` is the plain text.
-            self.message = format!("{value:?}");
-        } else {
-            if !self.fields.is_empty() {
-                self.fields.push(' ');
-            }
-            let _ = write!(self.fields, "{}={value:?}", field.name());
-        }
     }
 }

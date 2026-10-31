@@ -428,3 +428,19 @@ async fn logs_capture_zendriver_events() {
     );
     browser.close().await;
 }
+
+/// Closing an earlier browser first doesn't end a later one's capture.
+#[tokio::test]
+async fn closing_an_earlier_browser_keeps_a_later_ones_logs() {
+    const MESSAGE: &str = "logged after the first browser closed";
+    let first = launch().await;
+    let second = launch().await;
+    first.close().await;
+    tracing::warn!("{MESSAGE}");
+    let warnings = second.logs().at_least(tracing::Level::WARN);
+    assert!(
+        warnings.iter().any(|l| l.message == MESSAGE),
+        "the later browser's capture missed it: {warnings:#?}",
+    );
+    second.close().await;
+}
