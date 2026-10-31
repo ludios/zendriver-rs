@@ -58,7 +58,21 @@ If more external information is needed, think and keep iterating on web search q
 
 If you can't fetch something, use google-chrome or curl_chrome150 on this machine.
 
+# English
+
+All new English must be maximally unambiguous, even if it becomes slightly longer! Think as a reader, and read the text every possible way. For example, never write "cannot change a hash once set" instead of "cannot change a hash (if already set)".
+
+You can ask Astra via codex to rewrite stuff.
+
 # Code conventions
+
+For Rust code:
+
+- No useless use of tuple: `let (size, frame_size) = (self.size, self.frame_size);` should be two lines instead.
+- It's okay to keep things simple; no need to use combinators like `and_then` unless they're ideal.
+- Bodies of e.g. `if` / `else` expressions should be on their own lines unless they are very simple.
+- Prefer e.g. `let mut x = None` followed by `x = ...` over a `match` with a None or more lines.
+- Prefer `if let ` / `let ... else {` where it results in fewer lines than `match`.
 
 When writing _any_ kind of code:
 
