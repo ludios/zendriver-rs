@@ -16,13 +16,13 @@
 
 mod support;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use support::{McpServer, Transport};
 use zendriver_testkit::{
-    ChromeTree, FixtureServer, PROBE_JS, PROBE_PATH, assert_eventually, check_known_disagreements,
-    disagreements,
+    ChromeTree, FixtureServer, PROBE_JS, PROBE_PATH, assert_eventually, assert_not_before,
+    check_known_disagreements, disagreements,
 };
 
 /// How long the server gets to exit once told to stop.
@@ -194,6 +194,35 @@ async fn probe_agrees_under_spoof_windows() {
     if let Err(mismatch) = check_known_disagreements("spoofed win32", &found, &host_dependent) {
         panic!("{mismatch}");
     }
+}
+
+/// `browser_back` and `browser_reload` report the page that they navigated
+/// to, once its `load` event has fired (MCP #4).
+#[tokio::test]
+async fn history_tools_wait_for_the_page_they_reach() {
+    let fixtures = FixtureServer::start().await;
+    let mut server = McpServer::start(Transport::Stdio).await;
+    let first = fixtures.url("127.0.0.1", "/plain?title=First");
+    open_at(&mut server, json!({}), &first).await;
+    let second = fixtures.url("127.0.0.1", "/plain?title=Second");
+    server.call("browser_goto", json!({ "url": second })).await;
+    let back = server.call("browser_back", json!({})).await;
+    assert_eq!(
+        (back["url"].as_str(), back["title"].as_str()),
+        (Some(first.as_str()), Some("First")),
+        "browser_back reported {back}"
+    );
+
+    // `fresh=1`: each load of the page asks for the slow resource anew.
+    let slow = fixtures.url("127.0.0.1", "/slow-load?fresh=1");
+    server.call("browser_goto", json!({ "url": slow })).await;
+    let since = fixtures.requests_to("/slow-resource").len();
+    server.call("browser_reload", json!({})).await;
+    let returned = Instant::now();
+    let answered = fixtures
+        .last_responded_at_after("/slow-resource", since)
+        .expect("browser_reload returned before the page's slow resource was answered");
+    assert_not_before(returned, answered, "browser_reload: the slow resource");
 }
 
 /// How long a selector tool may look for an element before giving up.

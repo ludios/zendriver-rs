@@ -136,7 +136,19 @@ pub struct HistoryInput {
     pub return_snapshot: bool,
 }
 
-/// Step back one entry in the tab's history.
+/// Wait for the navigation that `tab`'s last history step or reload
+/// started, then report the page it reached.
+async fn loaded_output(
+    tab: &zendriver::Tab,
+    return_snapshot: bool,
+) -> Result<NavOutput, ErrorData> {
+    tab.wait_for_load()
+        .await
+        .map_err(|e| map_error(McpServerError::from(e)))?;
+    nav_output(tab, return_snapshot).await
+}
+
+/// Step back one entry in the tab's history and wait for the page to load.
 pub async fn back(
     state: Arc<Mutex<SessionState>>,
     input: HistoryInput,
@@ -146,10 +158,11 @@ pub async fn back(
     tab.back()
         .await
         .map_err(|e| map_error(McpServerError::from(e)))?;
-    nav_output(&tab, input.return_snapshot).await
+    loaded_output(&tab, input.return_snapshot).await
 }
 
-/// Step forward one entry in the tab's history.
+/// Step forward one entry in the tab's history and wait for the page to
+/// load.
 pub async fn forward(
     state: Arc<Mutex<SessionState>>,
     input: HistoryInput,
@@ -159,7 +172,7 @@ pub async fn forward(
     tab.forward()
         .await
         .map_err(|e| map_error(McpServerError::from(e)))?;
-    nav_output(&tab, input.return_snapshot).await
+    loaded_output(&tab, input.return_snapshot).await
 }
 
 /// Arg block for `browser_reload`.
@@ -175,7 +188,8 @@ pub struct ReloadInput {
     pub return_snapshot: bool,
 }
 
-/// Reload the current page, optionally bypassing the cache.
+/// Reload the current page, optionally bypassing the cache, and wait for it
+/// to load.
 pub async fn reload(
     state: Arc<Mutex<SessionState>>,
     input: ReloadInput,
@@ -194,7 +208,7 @@ pub async fn reload(
             .await
             .map_err(|e| map_error(McpServerError::from(e)))?;
     }
-    nav_output(&tab, input.return_snapshot).await
+    loaded_output(&tab, input.return_snapshot).await
 }
 
 /// Document-ready milestone `browser_wait_for_load` can target.
