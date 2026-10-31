@@ -8,7 +8,9 @@ single Chrome process. Tabs opened in a `BrowserContext` see their
 own cookie jar, IndexedDB, and (optionally) their own proxy; tabs in
 the default context still share the browser-wide jar, exactly as
 before. The two APIs coexist; existing code that calls
-`browser.new_tab()` is unaffected.
+`browser.new_tab()` is unaffected. `tab.cookies()` reads and writes the
+jar of the tab's own context, while `browser.cookies()` always means the
+default context's jar.
 
 > **When to use it.** Per-request proxy bindings, parallel sessions
 > with different logins under one Chrome process, A/B fingerprint

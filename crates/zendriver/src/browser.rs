@@ -2067,7 +2067,13 @@ pub(crate) fn test_only_inner_with_host_port(
     Arc::new_cyclic(|weak: &std::sync::Weak<BrowserInner>| {
         let main_session = SessionHandle::new(conn.clone(), "S1");
         let main_input = InputController::new(input_profile.clone());
-        let main_tab = Tab::new(main_session, weak.clone(), main_input, "T1".to_string());
+        let main_tab = Tab::new(
+            main_session,
+            weak.clone(),
+            main_input,
+            "T1".to_string(),
+            None,
+        );
         let mut map = HashMap::new();
         map.insert("S1".to_string(), main_tab.clone());
         BrowserInner {
@@ -2329,6 +2335,7 @@ impl TargetObserver for TabRegistrar {
                     weak_inner,
                     input,
                     session.target_info.target_id.clone(),
+                    session.target_info.browser_context_id.clone(),
                 );
 
                 // Dedupe by `target_id`: if `flatten: true` re-fires
@@ -2965,13 +2972,17 @@ pub(crate) async fn finish_connect(
     let targets = list["targetInfos"].as_array().unwrap_or(&no_targets);
     // Preference rule (unchanged): the first page target, else the first
     // target of any type.
-    let target_id = targets
+    let main_target = targets
         .iter()
         .find(|t| t["type"] == "page")
-        .or_else(|| targets.first())
+        .or_else(|| targets.first());
+    let target_id = main_target
         .and_then(|t| t["targetId"].as_str())
         .ok_or_else(|| ZendriverError::Navigation("no initial target found".into()))?
         .to_string();
+    let browser_context_id = main_target
+        .and_then(|t| t["browserContextId"].as_str())
+        .map(str::to_string);
 
     // Every *other* page target is a window we are not driving. Chrome opens
     // some on its own (a Windows first-run window, a `chrome://newtab/`), and
@@ -3044,7 +3055,13 @@ pub(crate) async fn finish_connect(
     // `Arc::new_cyclic` self-referential pattern.
     let inner = Arc::new_cyclic(|weak: &std::sync::Weak<BrowserInner>| {
         let main_tab_input = InputController::new(input_profile.clone());
-        let main_tab = Tab::new(main_session, weak.clone(), main_tab_input, target_id);
+        let main_tab = Tab::new(
+            main_session,
+            weak.clone(),
+            main_tab_input,
+            target_id,
+            browser_context_id,
+        );
         BrowserInner {
             conn,
             main_tab,
@@ -6266,7 +6283,13 @@ mod tests {
         let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
             let main_session = SessionHandle::new(conn.clone(), "S1");
             let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(main_session, weak.clone(), main_input, "T1".to_string());
+            let main_tab = Tab::new(
+                main_session,
+                weak.clone(),
+                main_input,
+                "T1".to_string(),
+                None,
+            );
             let mut map = HashMap::new();
             map.insert("S1".to_string(), main_tab.clone());
             BrowserInner {
@@ -6361,7 +6384,13 @@ mod tests {
         let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
             let main_session = SessionHandle::new(conn.clone(), "S1");
             let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(main_session, weak.clone(), main_input, "T1".to_string());
+            let main_tab = Tab::new(
+                main_session,
+                weak.clone(),
+                main_input,
+                "T1".to_string(),
+                None,
+            );
             let mut map = HashMap::new();
             map.insert("S1".to_string(), main_tab.clone());
             // Seed credentials for context CTX1.
@@ -6476,7 +6505,13 @@ mod tests {
         let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
             let main_session = SessionHandle::new(conn.clone(), "S1");
             let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(main_session, weak.clone(), main_input, "T1".to_string());
+            let main_tab = Tab::new(
+                main_session,
+                weak.clone(),
+                main_input,
+                "T1".to_string(),
+                None,
+            );
             let mut map = HashMap::new();
             map.insert("S1".to_string(), main_tab.clone());
             // Seed BOTH a tracker matcher and proxy credentials for CTX1.
@@ -6569,7 +6604,13 @@ mod tests {
         let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
             let main_session = SessionHandle::new(conn.clone(), "S1");
             let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(main_session, weak.clone(), main_input, "T1".to_string());
+            let main_tab = Tab::new(
+                main_session,
+                weak.clone(),
+                main_input,
+                "T1".to_string(),
+                None,
+            );
             let mut map = HashMap::new();
             map.insert("S1".to_string(), main_tab.clone());
             BrowserInner {
@@ -6680,7 +6721,13 @@ mod tests {
         let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
             let main_session = SessionHandle::new(conn.clone(), "S1");
             let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(main_session, weak.clone(), main_input, "T1".to_string());
+            let main_tab = Tab::new(
+                main_session,
+                weak.clone(),
+                main_input,
+                "T1".to_string(),
+                None,
+            );
             let mut map = HashMap::new();
             map.insert("S1".to_string(), main_tab.clone());
             BrowserInner {
@@ -6780,10 +6827,22 @@ mod tests {
         let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
             let main_session = SessionHandle::new(conn.clone(), "S1");
             let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(main_session, weak.clone(), main_input, "T1".to_string());
+            let main_tab = Tab::new(
+                main_session,
+                weak.clone(),
+                main_input,
+                "T1".to_string(),
+                None,
+            );
             let extra_session = SessionHandle::new(conn.clone(), "S2");
             let extra_input = InputController::new(input_profile.clone());
-            let extra_tab = Tab::new(extra_session, weak.clone(), extra_input, "T2".to_string());
+            let extra_tab = Tab::new(
+                extra_session,
+                weak.clone(),
+                extra_input,
+                "T2".to_string(),
+                None,
+            );
             let mut map = HashMap::new();
             map.insert("S1".to_string(), main_tab.clone());
             map.insert("S2".to_string(), extra_tab);
@@ -6855,7 +6914,13 @@ mod tests {
         let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
             let main_session = SessionHandle::new(conn.clone(), "S1");
             let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(main_session, weak.clone(), main_input, "T1".to_string());
+            let main_tab = Tab::new(
+                main_session,
+                weak.clone(),
+                main_input,
+                "T1".to_string(),
+                None,
+            );
             let mut map = HashMap::new();
             map.insert("S1".to_string(), main_tab.clone());
             BrowserInner {
@@ -6928,7 +6993,13 @@ mod tests {
         let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
             let main_session = SessionHandle::new(conn.clone(), "S1");
             let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(main_session, weak.clone(), main_input, "T1".to_string());
+            let main_tab = Tab::new(
+                main_session,
+                weak.clone(),
+                main_input,
+                "T1".to_string(),
+                None,
+            );
             let mut map = HashMap::new();
             map.insert("S1".to_string(), main_tab.clone());
             BrowserInner {
@@ -6991,7 +7062,13 @@ mod tests {
         let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
             let main_session = SessionHandle::new(conn.clone(), "S1");
             let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(main_session, weak.clone(), main_input, "T1".to_string());
+            let main_tab = Tab::new(
+                main_session,
+                weak.clone(),
+                main_input,
+                "T1".to_string(),
+                None,
+            );
             let mut map = HashMap::new();
             map.insert("S1".to_string(), main_tab.clone());
             BrowserInner {
@@ -7131,7 +7208,13 @@ mod tests {
         let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
             let main_session = SessionHandle::new(conn.clone(), "S1");
             let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(main_session, weak.clone(), main_input, "T1".to_string());
+            let main_tab = Tab::new(
+                main_session,
+                weak.clone(),
+                main_input,
+                "T1".to_string(),
+                None,
+            );
             let mut map = HashMap::new();
             map.insert("S1".to_string(), main_tab.clone());
             BrowserInner {

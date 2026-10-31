@@ -173,10 +173,7 @@ async fn delete_by_name_alone_deletes_it_on_every_domain() {
 /// A tab in an isolated browser context: its jar reads, finds and deletes
 /// that context's cookies, and the browser's jar doesn't see them.
 #[tokio::test]
-#[ignore = "known bug, TODO P0 'Tab cookie jars use the default context': Storage.*Cookies on \
-            the tab's session reads the default context, so all() (and, since 0b3e9bee5, \
-            for_url() and delete()) miss an isolated context's cookies"]
-async fn known_bug_tab_cookies_stay_in_an_isolated_context() {
+async fn tab_cookies_stay_in_an_isolated_context() {
     let server = FixtureServer::start().await;
     let browser = launch_for_test(Browser::builder()).await;
     let context = browser
