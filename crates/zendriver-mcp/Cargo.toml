@@ -84,6 +84,9 @@ zendriver-interception = { path = "../zendriver-interception", features = ["test
 # same reason as the dev-dep above: `cargo publish` strips it, so crates.io's
 # `zendriver-transport` is not asked for an extra feature.
 zendriver-transport = { path = "../zendriver-transport", features = ["testing"] }
+# Shared real-Chrome fixtures (fixture server, Chrome process tracking).
+# Path-only, so `cargo publish` strips it: the crate is unpublished.
+zendriver-testkit = { path = "../zendriver-testkit" }
 
 [lints]
 workspace = true

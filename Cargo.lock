@@ -3600,6 +3600,7 @@ dependencies = [
  "zendriver-fingerprints",
  "zendriver-interception",
  "zendriver-stealth",
+ "zendriver-testkit",
  "zendriver-transport",
 ]
 
