@@ -3092,28 +3092,52 @@ pub(crate) async fn finish_connect(
     Ok(inner)
 }
 
-/// The length of the HTTP response that starts `buf` (its headers plus
-/// `Content-Length` bytes of body) once all of it is in `buf`; `None` while
-/// more is needed, or when the headers carry no `Content-Length` (then the
-/// response ends when the server closes the connection).
-fn complete_response_len(buf: &[u8]) -> Option<usize> {
+/// `body` decoded from chunked transfer encoding, once its last (empty)
+/// chunk is in; `None` before then, or if the framing is malformed.
+fn dechunk(mut body: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    loop {
+        let line_end = body.windows(2).position(|w| w == b"\r\n")?;
+        let size_line = std::str::from_utf8(&body[..line_end]).ok()?;
+        // A chunk size may carry `;extensions`.
+        let size = usize::from_str_radix(size_line.split(';').next()?.trim(), 16).ok()?;
+        if size == 0 {
+            return Some(out);
+        }
+        let rest = &body[line_end + 2..];
+        out.extend_from_slice(rest.get(..size)?);
+        body = rest.get(size..)?.strip_prefix(b"\r\n")?;
+    }
+}
+
+/// The body of the HTTP response that starts `buf`, once all of it is in
+/// `buf`: its `Content-Length` bytes, or its chunks up to the last one
+/// under `Transfer-Encoding: chunked`. `None` while more is needed, and
+/// when neither header says where the body ends (then it ends when the
+/// server closes the connection).
+fn complete_body(buf: &[u8]) -> Option<Vec<u8>> {
     let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
     let headers = String::from_utf8_lossy(&buf[..header_end]);
-    let body_len = headers.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        if !name.trim().eq_ignore_ascii_case("content-length") {
-            return None;
-        }
-        value.trim().parse::<usize>().ok()
-    })?;
-    let len = header_end + body_len;
-    (buf.len() >= len).then_some(len)
+    let header = |name: &str| {
+        headers.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_string())
+        })
+    };
+    let body = &buf[header_end..];
+    if header("transfer-encoding").is_some_and(|v| v.eq_ignore_ascii_case("chunked")) {
+        return dechunk(body);
+    }
+    let len: usize = header("content-length")?.parse().ok()?;
+    body.get(..len).map(<[u8]>::to_vec)
 }
 
 /// Resolve a `webSocketDebuggerUrl` from a DevTools HTTP base by issuing a
 /// minimal `GET {endpoint}/json/version` over a raw [`tokio::net::TcpStream`].
 ///
-/// Hand-rolled (HTTP/1.1, read headers then `Content-Length` bytes, parse the
+/// Hand-rolled (HTTP/1.1, read headers then the body they delimit, parse the
 /// JSON body) so the always-on dependency set does not grow an HTTP client —
 /// `connect`'s `ws://` path needs no HTTP at all, and the `fetcher`-gated
 /// `reqwest` must not leak into the default build. Mirrors nodriver /
@@ -3121,8 +3145,11 @@ fn complete_response_len(buf: &[u8]) -> Option<usize> {
 ///
 /// Chrome's DevTools HTTP server never answers HTTP/1.0, and keeps an
 /// HTTP/1.1 connection open after the response whatever `Connection` says,
-/// so the body is delimited by its `Content-Length`, not by the close. It
-/// speaks plain HTTP only, so `https://` is rejected.
+/// so the body is delimited by its `Content-Length` (or, through a proxy,
+/// its chunks), not by the close. It speaks plain HTTP only, so `https://`
+/// is rejected. It refuses a `Host` that isn't an IP address or
+/// `localhost`, so for any other host name the request names the address
+/// dialled instead.
 ///
 /// # Errors
 ///
@@ -3154,8 +3181,15 @@ pub(crate) async fn resolve_ws_from_http(endpoint: &str) -> Result<String, Zendr
         let mut stream = TcpStream::connect((host.as_str(), port))
             .await
             .map_err(BrowserError::SpawnFailed)?;
+        let host_header = match url.host() {
+            Some(url::Host::Domain(domain)) if !domain.eq_ignore_ascii_case("localhost") => stream
+                .peer_addr()
+                .map_err(BrowserError::SpawnFailed)?
+                .to_string(),
+            _ => authority.to_string(),
+        };
         let req = format!(
-            "GET /json/version HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+            "GET /json/version HTTP/1.1\r\nHost: {host_header}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
         );
         stream
             .write_all(req.as_bytes())
@@ -3164,9 +3198,8 @@ pub(crate) async fn resolve_ws_from_http(endpoint: &str) -> Result<String, Zendr
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
         loop {
-            if let Some(len) = complete_response_len(&buf) {
-                buf.truncate(len);
-                return Ok::<Vec<u8>, ZendriverError>(buf);
+            if let Some(body) = complete_body(&buf) {
+                return Ok::<Vec<u8>, ZendriverError>(body);
             }
             let n = stream
                 .read(&mut chunk)
@@ -3730,8 +3763,9 @@ impl BrowserBuilder {
     ///   WebSocket URL (the `webSocketDebuggerUrl` Chrome prints to stderr as
     ///   `DevTools listening on …`).
     /// - `http://host:port` — a DevTools HTTP base; `connect` performs
-    ///   `GET {endpoint}/json/version` and reads `webSocketDebuggerUrl` from
-    ///   the JSON body (matching nodriver / zendriver-py). An IPv6 host goes
+    ///   `GET /json/version` on that host and port (ignoring any path) and
+    ///   reads `webSocketDebuggerUrl` from the JSON body (matching nodriver /
+    ///   zendriver-py). An IPv6 host goes
     ///   in brackets: `http://[::1]:9222`. `https://` is rejected: Chrome's
     ///   DevTools HTTP server speaks plain HTTP only.
     ///
@@ -7415,46 +7449,59 @@ mod tests {
 
     // ----- BrowserBuilder::connect (C1) ----------------------------------
 
-    /// A response is complete once its `Content-Length` bytes of body are
-    /// in, and not before; without the header, only the close ends it.
+    /// A body is complete once its `Content-Length` bytes, or its last
+    /// chunk, are in, and not before; without either header, only the close
+    /// ends it.
     #[test]
-    fn complete_response_len_counts_content_length() {
+    fn complete_body_follows_content_length_or_chunks() {
         let head = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n";
-        assert_eq!(complete_response_len(b"HTTP/1.1 200 OK\r\nContent-"), None);
-        assert_eq!(complete_response_len(format!("{head}abc").as_bytes()), None);
-        let len = head.len() + 4;
+        assert_eq!(complete_body(b"HTTP/1.1 200 OK\r\nContent-"), None);
+        assert_eq!(complete_body(format!("{head}abc").as_bytes()), None);
         assert_eq!(
-            complete_response_len(format!("{head}abcd").as_bytes()),
-            Some(len)
+            complete_body(format!("{head}abcd").as_bytes()).unwrap(),
+            b"abcd"
         );
         assert_eq!(
-            complete_response_len(format!("{head}abcdEXTRA").as_bytes()),
-            Some(len)
+            complete_body(format!("{head}abcdEXTRA").as_bytes()).unwrap(),
+            b"abcd"
         );
-        let lower = "HTTP/1.1 200 OK\r\ncontent-length:  2\r\n\r\nab";
-        assert_eq!(complete_response_len(lower.as_bytes()), Some(lower.len()));
-        assert_eq!(complete_response_len(b"HTTP/1.1 200 OK\r\n\r\nbody"), None);
+        let lower = b"HTTP/1.1 200 OK\r\ncontent-length:  2\r\n\r\nab";
+        assert_eq!(complete_body(lower).unwrap(), b"ab");
+        assert_eq!(complete_body(b"HTTP/1.1 200 OK\r\n\r\nbody"), None);
+        let huge = b"HTTP/1.1 200 OK\r\nContent-Length: 18446744073709551615\r\n\r\nab";
+        assert_eq!(complete_body(huge), None);
+
+        let chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let chunks = "3\r\nabc\r\n2;x=y\r\nde\r\n0\r\n\r\n";
+        for cut in [chunks.len() - 5, chunks.len() - 9] {
+            let partial = format!("{chunked}{}", &chunks[..cut]);
+            assert_eq!(complete_body(partial.as_bytes()), None, "cut at {cut}");
+        }
+        let whole = format!("{chunked}{chunks}");
+        assert_eq!(complete_body(whole.as_bytes()).unwrap(), b"abcde");
     }
 
     /// Answer one `/json/version` request at `bind` the way Chrome's
     /// DevTools HTTP server does: HTTP/1.1 with a `Content-Length`, then
-    /// keep the connection open. Returns the address and the server's task,
-    /// or `None` if `bind` can't be bound.
+    /// keep the connection open. Returns the address, the request it got
+    /// (once it has it), and the server's task; or `None` if `bind` can't be
+    /// bound.
     async fn serve_like_chrome(
         bind: &str,
-    ) -> Option<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+    ) -> Option<(
+        std::net::SocketAddr,
+        tokio::sync::oneshot::Receiver<String>,
+        tokio::task::JoinHandle<()>,
+    )> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind(bind).await.ok()?;
         let addr = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = vec![0u8; 1024];
             let n = stream.read(&mut request).await.unwrap();
-            assert!(
-                request[..n].starts_with(b"GET /json/version HTTP/1.1\r\n"),
-                "{}",
-                String::from_utf8_lossy(&request[..n])
-            );
+            let _ = request_tx.send(String::from_utf8_lossy(&request[..n]).into_owned());
             let body = r#"{"webSocketDebuggerUrl":"ws://host/devtools/browser/x"}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
@@ -7464,30 +7511,30 @@ mod tests {
             // Keep the connection open well past the client's patience.
             tokio::time::sleep(Duration::from_secs(30)).await;
         });
-        Some((addr, server))
+        Some((addr, request_rx, server))
     }
 
-    /// The HTTP lookup reads the body by its length, not to the close, and
-    /// dials an IPv6 host without its brackets.
+    /// The HTTP lookup sends HTTP/1.1, reads the body by its length (not to
+    /// the close), and dials an IPv6 host without its brackets.
     #[tokio::test]
     async fn resolve_ws_from_http_reads_a_kept_open_http_1_1_response() {
-        let (addr, server) = serve_like_chrome("127.0.0.1:0").await.unwrap();
-        let ws = tokio::time::timeout(
-            Duration::from_secs(5),
-            resolve_ws_from_http(&format!("http://{addr}")),
-        )
-        .await
-        .expect("resolve_ws_from_http waited for the close")
-        .unwrap();
-        assert_eq!(ws, "ws://host/devtools/browser/x");
-        server.abort();
-
         // Skipped where the host has no IPv6 loopback.
-        if let Some((addr, server)) = serve_like_chrome("[::1]:0").await {
-            let ws = resolve_ws_from_http(&format!("http://[::1]:{}", addr.port()))
+        for (bind, host) in [("127.0.0.1:0", "127.0.0.1"), ("[::1]:0", "[::1]")] {
+            let Some((addr, request, server)) = serve_like_chrome(bind).await else {
+                continue;
+            };
+            let endpoint = format!("http://{host}:{}", addr.port());
+            let ws = tokio::time::timeout(Duration::from_secs(5), resolve_ws_from_http(&endpoint))
                 .await
+                .expect("resolve_ws_from_http waited for the close")
                 .unwrap();
             assert_eq!(ws, "ws://host/devtools/browser/x");
+            let request = request.await.unwrap();
+            let want = format!(
+                "GET /json/version HTTP/1.1\r\nHost: {host}:{}\r\n",
+                addr.port()
+            );
+            assert!(request.starts_with(&want), "{request}");
             server.abort();
         }
     }
