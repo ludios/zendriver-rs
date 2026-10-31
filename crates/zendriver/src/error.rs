@@ -397,8 +397,13 @@ pub enum BrowserError {
     #[error("timed out during chrome CDP handshake")]
     HandshakeTimeout,
 
-    /// Stderr contained an unparseable DevTools URL line.
-    #[error("could not parse devtools endpoint from chrome stderr")]
+    /// Chrome's DevTools WebSocket URL couldn't be found: in Chrome's stderr
+    /// at launch, or from the endpoint given to `connect` (which must be
+    /// `ws://`, `wss://` or `http://`).
+    #[error(
+        "could not get Chrome's DevTools WebSocket URL, from its stderr or from the endpoint \
+         given to connect"
+    )]
     DevtoolsParse,
 
     /// `tempfile` cleanup of the `user_data_dir` failed.

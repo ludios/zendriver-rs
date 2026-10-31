@@ -3092,72 +3092,96 @@ pub(crate) async fn finish_connect(
     Ok(inner)
 }
 
+/// The length of the HTTP response that starts `buf` (its headers plus
+/// `Content-Length` bytes of body) once all of it is in `buf`; `None` while
+/// more is needed, or when the headers carry no `Content-Length` (then the
+/// response ends when the server closes the connection).
+fn complete_response_len(buf: &[u8]) -> Option<usize> {
+    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+    let headers = String::from_utf8_lossy(&buf[..header_end]);
+    let body_len = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("content-length") {
+            return None;
+        }
+        value.trim().parse::<usize>().ok()
+    })?;
+    let len = header_end + body_len;
+    (buf.len() >= len).then_some(len)
+}
+
 /// Resolve a `webSocketDebuggerUrl` from a DevTools HTTP base by issuing a
 /// minimal `GET {endpoint}/json/version` over a raw [`tokio::net::TcpStream`].
 ///
-/// Hand-rolled (HTTP/1.0, read-until-close, split headers from body, parse the
+/// Hand-rolled (HTTP/1.1, read headers then `Content-Length` bytes, parse the
 /// JSON body) so the always-on dependency set does not grow an HTTP client —
 /// `connect`'s `ws://` path needs no HTTP at all, and the `fetcher`-gated
 /// `reqwest` must not leak into the default build. Mirrors nodriver /
 /// zendriver-py, which read the same `webSocketDebuggerUrl` field.
 ///
+/// Chrome's DevTools HTTP server never answers HTTP/1.0, and keeps an
+/// HTTP/1.1 connection open after the response whatever `Connection` says,
+/// so the body is delimited by its `Content-Length`, not by the close. It
+/// speaks plain HTTP only, so `https://` is rejected.
+///
 /// # Errors
 ///
-/// Returns [`BrowserError::DevtoolsParse`] when the endpoint is malformed, the
-/// TCP round-trip fails / times out, the response has no body, or the JSON
-/// lacks a string `webSocketDebuggerUrl`.
+/// Returns [`BrowserError::DevtoolsParse`] when the endpoint isn't an
+/// `http://` URL with a host, the response has no body, or the JSON lacks a
+/// string `webSocketDebuggerUrl`; [`BrowserError::SpawnFailed`] when the TCP
+/// round-trip fails; [`BrowserError::WsTimeout`] when it takes longer than
+/// [`JSON_VERSION_TIMEOUT`].
 pub(crate) async fn resolve_ws_from_http(endpoint: &str) -> Result<String, ZendriverError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
-    // Parse `scheme://host[:port]` → (host, port). Strip any trailing path.
-    let after_scheme = endpoint
-        .strip_prefix("http://")
-        .or_else(|| endpoint.strip_prefix("https://"))
-        .ok_or(BrowserError::DevtoolsParse)?;
-    let authority = after_scheme
-        .split('/')
-        .next()
-        .unwrap_or(after_scheme)
-        .trim();
-    if authority.is_empty() {
+    let url = url::Url::parse(endpoint).map_err(|_| BrowserError::DevtoolsParse)?;
+    if url.scheme() != "http" {
         return Err(BrowserError::DevtoolsParse.into());
     }
-    // host:port split — default to 80 when no explicit port (DevTools is
-    // typically explicit, e.g. 9222, but be lenient).
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) => (
-            h,
-            p.parse::<u16>().map_err(|_| BrowserError::DevtoolsParse)?,
-        ),
-        None => (authority, 80u16),
+    // The address to dial: an IPv6 host without the brackets the URL has.
+    let host = match url.host() {
+        Some(url::Host::Domain(domain)) => domain.to_string(),
+        Some(url::Host::Ipv4(ip)) => ip.to_string(),
+        Some(url::Host::Ipv6(ip)) => ip.to_string(),
+        None => return Err(BrowserError::DevtoolsParse.into()),
     };
+    let port = url.port_or_known_default().unwrap_or(80);
+    // The `Host` header as the URL spells it, brackets included.
+    let authority = &url[url::Position::BeforeHost..url::Position::AfterPort];
 
-    let body = timeout(JSON_VERSION_TIMEOUT, async {
-        let mut stream = TcpStream::connect((host, port))
+    let response = timeout(JSON_VERSION_TIMEOUT, async {
+        let mut stream = TcpStream::connect((host.as_str(), port))
             .await
             .map_err(BrowserError::SpawnFailed)?;
-        // HTTP/1.0 + Connection: close → server closes the socket after the
-        // response, so a read-to-end cleanly delimits the message.
         let req = format!(
-            "GET /json/version HTTP/1.0\r\nHost: {authority}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+            "GET /json/version HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
         );
         stream
             .write_all(req.as_bytes())
             .await
             .map_err(BrowserError::SpawnFailed)?;
-        stream.flush().await.map_err(BrowserError::SpawnFailed)?;
         let mut buf = Vec::new();
-        stream
-            .read_to_end(&mut buf)
-            .await
-            .map_err(BrowserError::SpawnFailed)?;
-        Ok::<Vec<u8>, ZendriverError>(buf)
+        let mut chunk = [0u8; 4096];
+        loop {
+            if let Some(len) = complete_response_len(&buf) {
+                buf.truncate(len);
+                return Ok::<Vec<u8>, ZendriverError>(buf);
+            }
+            let n = stream
+                .read(&mut chunk)
+                .await
+                .map_err(BrowserError::SpawnFailed)?;
+            if n == 0 {
+                return Ok(buf);
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
     })
     .await
     .map_err(|_| BrowserError::WsTimeout)??;
 
-    parse_ws_from_json_version(&body)
+    parse_ws_from_json_version(&response)
 }
 
 /// Split an HTTP/1.x response into its body and parse the
@@ -3705,10 +3729,11 @@ impl BrowserBuilder {
     /// - `ws://…` / `wss://…` — used directly as the DevTools browser
     ///   WebSocket URL (the `webSocketDebuggerUrl` Chrome prints to stderr as
     ///   `DevTools listening on …`).
-    /// - `http://host:port` / `https://host:port` — a DevTools HTTP base;
-    ///   `connect` performs `GET {endpoint}/json/version` and reads
-    ///   `webSocketDebuggerUrl` from the JSON body (matching nodriver /
-    ///   zendriver-py).
+    /// - `http://host:port` — a DevTools HTTP base; `connect` performs
+    ///   `GET {endpoint}/json/version` and reads `webSocketDebuggerUrl` from
+    ///   the JSON body (matching nodriver / zendriver-py). An IPv6 host goes
+    ///   in brackets: `http://[::1]:9222`. `https://` is rejected: Chrome's
+    ///   DevTools HTTP server speaks plain HTTP only.
     ///
     /// The connected [`Browser`] does **not** own the Chrome process: its
     /// [`Browser::close`] shuts down only the transport, and dropping it does
@@ -3729,7 +3754,7 @@ impl BrowserBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`ZendriverError::Browser`] when an `http(s)://` endpoint
+    /// Returns [`ZendriverError::Browser`] when an `http://` endpoint
     /// cannot be resolved to a `webSocketDebuggerUrl`, and
     /// [`ZendriverError::Transport`] when the WebSocket attach fails.
     ///
@@ -3755,7 +3780,7 @@ impl BrowserBuilder {
         // Resolve the browser WebSocket URL from the endpoint scheme.
         let ws_url = if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
             endpoint
-        } else if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        } else if endpoint.starts_with("http://") {
             resolve_ws_from_http(&endpoint).await?
         } else {
             return Err(BrowserError::DevtoolsParse.into());
@@ -7390,7 +7415,100 @@ mod tests {
 
     // ----- BrowserBuilder::connect (C1) ----------------------------------
 
-    /// Unit-test the `/json/version` body parse used by the `http(s)://`
+    /// A response is complete once its `Content-Length` bytes of body are
+    /// in, and not before; without the header, only the close ends it.
+    #[test]
+    fn complete_response_len_counts_content_length() {
+        let head = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n";
+        assert_eq!(complete_response_len(b"HTTP/1.1 200 OK\r\nContent-"), None);
+        assert_eq!(complete_response_len(format!("{head}abc").as_bytes()), None);
+        let len = head.len() + 4;
+        assert_eq!(
+            complete_response_len(format!("{head}abcd").as_bytes()),
+            Some(len)
+        );
+        assert_eq!(
+            complete_response_len(format!("{head}abcdEXTRA").as_bytes()),
+            Some(len)
+        );
+        let lower = "HTTP/1.1 200 OK\r\ncontent-length:  2\r\n\r\nab";
+        assert_eq!(complete_response_len(lower.as_bytes()), Some(lower.len()));
+        assert_eq!(complete_response_len(b"HTTP/1.1 200 OK\r\n\r\nbody"), None);
+    }
+
+    /// Answer one `/json/version` request at `bind` the way Chrome's
+    /// DevTools HTTP server does: HTTP/1.1 with a `Content-Length`, then
+    /// keep the connection open. Returns the address and the server's task,
+    /// or `None` if `bind` can't be bound.
+    async fn serve_like_chrome(
+        bind: &str,
+    ) -> Option<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(bind).await.ok()?;
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 1024];
+            let n = stream.read(&mut request).await.unwrap();
+            assert!(
+                request[..n].starts_with(b"GET /json/version HTTP/1.1\r\n"),
+                "{}",
+                String::from_utf8_lossy(&request[..n])
+            );
+            let body = r#"{"webSocketDebuggerUrl":"ws://host/devtools/browser/x"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            // Keep the connection open well past the client's patience.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        Some((addr, server))
+    }
+
+    /// The HTTP lookup reads the body by its length, not to the close, and
+    /// dials an IPv6 host without its brackets.
+    #[tokio::test]
+    async fn resolve_ws_from_http_reads_a_kept_open_http_1_1_response() {
+        let (addr, server) = serve_like_chrome("127.0.0.1:0").await.unwrap();
+        let ws = tokio::time::timeout(
+            Duration::from_secs(5),
+            resolve_ws_from_http(&format!("http://{addr}")),
+        )
+        .await
+        .expect("resolve_ws_from_http waited for the close")
+        .unwrap();
+        assert_eq!(ws, "ws://host/devtools/browser/x");
+        server.abort();
+
+        // Skipped where the host has no IPv6 loopback.
+        if let Some((addr, server)) = serve_like_chrome("[::1]:0").await {
+            let ws = resolve_ws_from_http(&format!("http://[::1]:{}", addr.port()))
+                .await
+                .unwrap();
+            assert_eq!(ws, "ws://host/devtools/browser/x");
+            server.abort();
+        }
+    }
+
+    /// `https://` (Chrome's DevTools server has no TLS) and endpoints that
+    /// aren't URLs are rejected before any dial.
+    #[tokio::test]
+    async fn resolve_ws_from_http_rejects_https_and_non_urls() {
+        for endpoint in ["https://127.0.0.1:9222", "http://", "127.0.0.1:9222"] {
+            let res = resolve_ws_from_http(endpoint).await;
+            assert!(
+                matches!(
+                    res,
+                    Err(ZendriverError::Browser(BrowserError::DevtoolsParse))
+                ),
+                "{endpoint}: {res:?}"
+            );
+        }
+    }
+
+    /// Unit-test the `/json/version` body parse used by the `http://`
     /// connect path: a `webSocketDebuggerUrl` string is extracted, with and
     /// without a leading HTTP/1.x header block.
     #[test]
