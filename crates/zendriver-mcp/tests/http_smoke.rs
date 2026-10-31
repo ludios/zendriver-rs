@@ -12,12 +12,12 @@
 //! # Assumed test port
 //!
 //! Binds 127.0.0.1:18765 — a high port unlikely to collide with running
-//! services on a developer's machine. `axum::serve` does not surface the
-//! bound address back over the CLI, so we cannot use `:0` and have the
-//! kernel pick a free port (we would need a separate channel to learn the
-//! chosen port). If 18765 is occupied the test will fail at the bind
-//! step inside the spawned binary, surfacing as a connect-refused on the
-//! client side after the polling window expires.
+//! services on a developer's machine. If 18765 is occupied the test will
+//! fail at the bind step inside the spawned binary, surfacing as a
+//! connect-refused on the client side after the polling window expires.
+//! The server logs the address it actually bound, so `tests/support`
+//! (which the real-Chrome tests use) runs it on port 0 instead; this test
+//! predates that.
 //!
 //! # Child cleanup
 //!

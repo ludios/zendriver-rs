@@ -130,8 +130,9 @@ Real-Chrome tests share their fixtures through `zendriver-testkit`
 `b.test` as two sites), `launch_for_test` (headless, captured logs, and a
 check on close that Chrome's whole process tree exited), timing helpers, and
 the stealth consistency probe. Prefer it to a hand-rolled
-`Browser::builder()` + `MockServer`. `zendriver-mcp`'s real-Chrome tests
-drive the built server through `tests/support/`.
+`Browser::builder()` + `MockServer`. In `zendriver-mcp`, `tests/support/`
+drives the built server over stdio or HTTP and cleans up its Chrome; newer
+real-Chrome tests use it.
 
 A real-Chrome test that reproduces an open bug is named `known_bug_*` and
 `#[ignore]`d, with the bug in the reason; the fix deletes both. The stealth

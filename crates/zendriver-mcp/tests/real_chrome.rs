@@ -36,18 +36,19 @@ const CHROME_EXIT_WITHIN: Duration = Duration::from_secs(10);
 const LOAD_WITHIN: Duration = Duration::from_secs(10);
 
 /// Open a browser through `server` (with `open_args`) and load `url`,
-/// waiting for its `load` event by polling the page.
-async fn open_at(server: &McpServer, open_args: Value, url: &str) {
-    server.call("browser_open", open_args).await;
+/// waiting for its `load` event by polling the page. A poll that fails, as
+/// one can while the page swaps documents, is tried again.
+async fn open_at(server: &mut McpServer, open_args: Value, url: &str) {
+    server.open(open_args).await;
     server.call("browser_goto", json!({ "url": url })).await;
     assert_eventually(LOAD_WITHIN, &format!("{url} finishes loading"), || async {
         let state = server
-            .call(
+            .try_call(
                 "browser_evaluate",
                 json!({ "expression": "location.href + ' ' + document.readyState" }),
             )
             .await;
-        state["value"] == format!("{url} complete")
+        state.is_ok_and(|s| s["value"] == format!("{url} complete"))
     })
     .await;
 }
@@ -68,9 +69,9 @@ async fn assert_chrome_exits(chrome: &ChromeTree, after: &str) {
 /// Load a page through `transport`, read it back, and close the browser.
 async fn browse_and_close(transport: Transport) {
     let fixtures = FixtureServer::start().await;
-    let server = McpServer::start(transport).await;
+    let mut server = McpServer::start(transport).await;
     let url = fixtures.url("127.0.0.1", "/plain?title=Hello");
-    open_at(&server, json!({}), &url).await;
+    open_at(&mut server, json!({}), &url).await;
     let title = server
         .call(
             "browser_evaluate",
@@ -109,7 +110,7 @@ enum Stop {
 async fn chrome_exits_when_server_stops(transport: Transport, stop: Stop) {
     let fixtures = FixtureServer::start().await;
     let mut server = McpServer::start(transport).await;
-    open_at(&server, json!({}), &fixtures.url("127.0.0.1", "/plain")).await;
+    open_at(&mut server, json!({}), &fixtures.url("127.0.0.1", "/plain")).await;
     let mut chrome = server.chrome();
     assert!(chrome.snapshot_by_command_line().await > 1);
 
@@ -172,9 +173,14 @@ async fn known_bug_chrome_exits_on_sigkill_over_http() {
 #[tokio::test]
 async fn probe_agrees_under_spoof_windows() {
     let fixtures = FixtureServer::start().await;
-    let server = McpServer::start(Transport::Stdio).await;
+    let mut server = McpServer::start(Transport::Stdio).await;
     let url = fixtures.url("127.0.0.1", PROBE_PATH);
-    open_at(&server, json!({ "stealth_profile": "spoof_windows" }), &url).await;
+    open_at(
+        &mut server,
+        json!({ "stealth_profile": "spoof_windows" }),
+        &url,
+    )
+    .await;
     let probe = server
         .call("browser_evaluate_main", json!({ "expression": PROBE_JS }))
         .await;
@@ -197,9 +203,9 @@ const FIND_WITHIN_MS: u64 = 2000;
 #[ignore = "known bug, TODO P0 'MCP selector tools can't see off-screen elements' (MCP #1)"]
 async fn known_bug_click_reaches_a_button_below_the_fold() {
     let fixtures = FixtureServer::start().await;
-    let server = McpServer::start(Transport::Stdio).await;
+    let mut server = McpServer::start(Transport::Stdio).await;
     open_at(
-        &server,
+        &mut server,
         json!({}),
         &fixtures.url("127.0.0.1", "/below-fold"),
     )
@@ -223,9 +229,9 @@ async fn known_bug_click_reaches_a_button_below_the_fold() {
 #[ignore = "known bug, TODO P0 'MCP selector tools can't see off-screen elements' (MCP #1)"]
 async fn known_bug_scroll_into_view_finds_an_off_screen_element() {
     let fixtures = FixtureServer::start().await;
-    let server = McpServer::start(Transport::Stdio).await;
+    let mut server = McpServer::start(Transport::Stdio).await;
     open_at(
-        &server,
+        &mut server,
         json!({}),
         &fixtures.url("127.0.0.1", "/below-fold"),
     )
@@ -261,9 +267,9 @@ fn cookie_names(result: &Value) -> Vec<String> {
             \"method not found\"' (R5, MEC #3)"]
 async fn known_bug_cookies_get_by_url_and_delete() {
     let fixtures = FixtureServer::start().await;
-    let server = McpServer::start(Transport::Stdio).await;
+    let mut server = McpServer::start(Transport::Stdio).await;
     let url = fixtures.url("127.0.0.1", "/plain");
-    open_at(&server, json!({}), &url).await;
+    open_at(&mut server, json!({}), &url).await;
     server
         .call(
             "browser_evaluate_main",

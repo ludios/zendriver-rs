@@ -41,8 +41,8 @@ pub struct McpServer {
     client: Option<RunningService<RoleClient, ()>>,
     /// Everything the server has logged so far, one entry per line.
     stderr: Arc<Mutex<Vec<String>>>,
-    /// The Chrome the last `browser_open` launched.
-    chrome: Mutex<Option<ChromeTree>>,
+    /// The Chrome the last [`McpServer::open`] launched.
+    chrome: Option<ChromeTree>,
 }
 
 /// The `127.0.0.1:PORT` in a log line, which may contain ANSI colour codes.
@@ -53,19 +53,29 @@ fn loopback_address(line: &str) -> Option<String> {
     (!port.is_empty()).then(|| format!("127.0.0.1:{port}"))
 }
 
-/// Read `stderr` line by line into `lines` until it closes. Sends the bound
-/// address to `listening` when the HTTP server logs it.
+/// Read `stderr` line by line into `lines` until it closes, so the server
+/// never blocks on a full pipe. Sends the bound address to `listening` when
+/// the HTTP server logs it.
 async fn drain(
     stderr: ChildStderr,
     lines: Arc<Mutex<Vec<String>>>,
     listening: oneshot::Sender<String>,
 ) {
     let mut listening = Some(listening);
-    let mut reader = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = reader.next_line().await {
+    let mut reader = BufReader::new(stderr);
+    let mut bytes = Vec::new();
+    while reader
+        .read_until(b'\n', &mut bytes)
+        .await
+        .is_ok_and(|n| n > 0)
+    {
+        let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
+        bytes.clear();
         if line.contains(LISTENING_LINE) {
-            if let (Some(tx), Some(addr)) = (listening.take(), loopback_address(&line)) {
-                let _ = tx.send(addr);
+            if let Some(addr) = loopback_address(&line) {
+                if let Some(tx) = listening.take() {
+                    let _ = tx.send(addr);
+                }
             }
         }
         lines.lock().expect("stderr lines").push(line);
@@ -91,14 +101,18 @@ impl McpServer {
     /// connect a client to it.
     pub async fn start(transport: Transport) -> Self {
         let mut command = Command::new(BIN_PATH);
+        // Killed if `start` fails before there's an `McpServer` to drop.
         command
             .args(["--log", "info"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Transport::Http = transport {
-            command.args(["--http", "127.0.0.1:0"]);
-        }
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        match transport {
+            Transport::Stdio => command.stdin(Stdio::piped()).stdout(Stdio::piped()),
+            Transport::Http => command
+                .args(["--http", "127.0.0.1:0"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null()),
+        };
         let mut child = command.spawn().expect("spawn zendriver-mcp");
         let stderr = Arc::<Mutex<Vec<String>>>::default();
         let (listening_tx, listening_rx) = oneshot::channel();
@@ -133,7 +147,7 @@ impl McpServer {
             child,
             client: Some(client),
             stderr,
-            chrome: Mutex::new(None),
+            chrome: None,
         }
     }
 
@@ -142,9 +156,9 @@ impl McpServer {
         self.stderr.lock().expect("stderr lines").join("\n")
     }
 
-    /// Call `tool` with `arguments` (a JSON object) and return its result.
-    /// Panics if the call fails or the tool reports an error.
-    pub async fn call(&self, tool: &str, arguments: Value) -> Value {
+    /// Call `tool` with `arguments` (a JSON object). Returns its result, or
+    /// the error the call or the tool reported.
+    pub async fn try_call(&self, tool: &str, arguments: Value) -> Result<Value, String> {
         let Value::Object(arguments) = arguments else {
             panic!("{tool}: arguments must be a JSON object, not {arguments}");
         };
@@ -153,25 +167,32 @@ impl McpServer {
         let result = client
             .call_tool(params)
             .await
-            .unwrap_or_else(|e| panic!("{tool}: {e}\nserver log:\n{}", self.stderr()));
+            .map_err(|e| format!("{tool}: {e}"))?;
         if result.is_error == Some(true) {
-            panic!("{tool} reported an error: {:?}", result.content);
+            return Err(format!("{tool} reported an error: {:?}", result.content));
         }
-        if tool == "browser_open" {
-            let pid = self.child.id().expect("the server is running");
-            let tree = ChromeTree::launched_by(pid).await;
-            *self.chrome.lock().expect("chrome") = Some(tree);
-        }
-        structured(result)
+        Ok(structured(result))
     }
 
-    /// The Chrome the last `browser_open` launched.
+    /// [`McpServer::try_call`], panicking on an error.
+    pub async fn call(&self, tool: &str, arguments: Value) -> Value {
+        self.try_call(tool, arguments)
+            .await
+            .unwrap_or_else(|e| panic!("{e}\nserver log:\n{}", self.stderr()))
+    }
+
+    /// `browser_open` with `arguments`, then note which Chrome it launched,
+    /// for [`McpServer::chrome`] and so that dropping this kills it.
+    pub async fn open(&mut self, arguments: Value) -> Value {
+        let opened = self.call("browser_open", arguments).await;
+        let pid = self.child.id().expect("the server is running");
+        self.chrome = Some(ChromeTree::launched_by(pid).await);
+        opened
+    }
+
+    /// The Chrome the last [`McpServer::open`] launched.
     pub fn chrome(&self) -> ChromeTree {
-        self.chrome
-            .lock()
-            .expect("chrome")
-            .clone()
-            .expect("no browser_open yet")
+        self.chrome.clone().expect("no McpServer::open yet")
     }
 
     /// Disconnect the client, which for stdio closes the server's stdin, as
@@ -204,7 +225,7 @@ impl Drop for McpServer {
     /// outlives a killed server.
     fn drop(&mut self) {
         let _ = self.child.start_kill();
-        if let Some(chrome) = self.chrome.get_mut().ok().and_then(Option::take) {
+        if let Some(chrome) = &self.chrome {
             chrome.kill();
         }
     }
