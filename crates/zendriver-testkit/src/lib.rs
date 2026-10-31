@@ -7,7 +7,8 @@
 //!   `*.test` hosts ([`SITE_A`], [`SITE_B`]) resolving to the fixture server
 //!   as distinct sites, and its `tracing` output captured. Closing it checks
 //!   that its whole process tree exited.
-//! - [`assert_eventually`] and [`assert_not_before`] for timing.
+//! - [`assert_eventually`] and [`assert_not_before`] for timing, and
+//!   [`load`] / [`wait_loaded`] to wait for a page without zendriver's waits.
 //!
 //! ```no_run
 //! use zendriver::Browser;
@@ -26,6 +27,7 @@
 
 mod launch;
 mod logs;
+mod nav;
 mod procs;
 mod server;
 mod timing;
@@ -33,6 +35,7 @@ mod timing;
 pub use axum;
 pub use launch::{TestBrowser, launch_for_test};
 pub use logs::{LogLine, Logs};
+pub use nav::{eval, load, wait_loaded};
 pub use procs::ChromeTree;
 pub use server::{
     BASIC_AUTH_PASSWORD, BASIC_AUTH_USER, DOWNLOAD_BODY, FixtureServer, HOST_RESOLVER_RULES,

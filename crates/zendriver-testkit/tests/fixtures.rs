@@ -12,42 +12,17 @@
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use zendriver::Browser;
 use zendriver::stealth::StealthProfile;
-use zendriver::{Browser, Tab};
 use zendriver_testkit::{
     BASIC_AUTH_PASSWORD, BASIC_AUTH_USER, ChromeTree, DOWNLOAD_BODY, FixtureServer, SITE_A, SITE_B,
-    TestBrowser, assert_eventually, assert_not_before, launch_for_test, trickle_body,
+    TestBrowser, assert_eventually, assert_not_before, eval, launch_for_test, load, trickle_body,
+    wait_loaded,
 };
 
 /// Bound on any one wait for the page; the slowest fixture used here takes
 /// under a second.
 const WAIT: Duration = Duration::from_secs(10);
-
-/// Wait until `tab` is at `url` and its `load` event has fired, by polling
-/// the page itself.
-async fn wait_loaded(tab: &Tab, url: &str) {
-    assert_eventually(WAIT, &format!("{url} finishes loading"), || async {
-        let state: Result<String, _> = tab
-            .evaluate_main("location.href + ' ' + document.readyState")
-            .await;
-        state.is_ok_and(|s| s == format!("{url} complete"))
-    })
-    .await;
-}
-
-/// Navigate `tab` to `url` and wait for its `load` event.
-async fn load(tab: &Tab, url: &str) {
-    tab.goto(url)
-        .await
-        .unwrap_or_else(|e| panic!("goto {url}: {e}"));
-    wait_loaded(tab, url).await;
-}
-
-async fn eval(tab: &Tab, js: &str) -> Value {
-    tab.evaluate_main(js)
-        .await
-        .unwrap_or_else(|e| panic!("evaluate {js}: {e}"))
-}
 
 async fn launch() -> TestBrowser {
     launch_for_test(Browser::builder()).await
