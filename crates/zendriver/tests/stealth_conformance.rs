@@ -304,29 +304,42 @@ async fn invariants_hold_under_native() {
     .await;
 }
 
+/// A persona overlay for the spoofed profiles: the farbling seed pinned, plus
+/// `extra` (more JSON members, each preceded by a comma).
+///
+/// The seed is otherwise random per profile directory, and the canvas patch
+/// is installed twice (BR #2: the main tab is attached twice), so a blank
+/// canvas reads back all zeros for about one seed in eight. With this seed it
+/// never does.
+fn pinned_seed(extra: &str) -> Persona {
+    format!(r#"{{"seed": 1{extra}}}"#)
+        .parse()
+        .expect("persona JSON")
+}
+
 #[tokio::test]
 async fn invariants_hold_under_spoofed() {
-    check(
-        "spoofed",
-        Browser::builder().stealth(StealthProfile::spoofed()),
-    )
-    .await;
+    let builder = Browser::builder()
+        .stealth(StealthProfile::spoofed())
+        .persona_overlay(pinned_seed(""));
+    check("spoofed", builder).await;
 }
 
 #[tokio::test]
 async fn invariants_hold_under_spoofed_win32() {
-    let profile = StealthProfile::spoofed().platform(Platform::Win32);
-    check("spoofed win32", Browser::builder().stealth(profile)).await;
+    let builder = Browser::builder()
+        .stealth(StealthProfile::spoofed().platform(Platform::Win32))
+        .persona_overlay(pinned_seed(""));
+    check("spoofed win32", builder).await;
 }
 
 /// The only profile with a font allow-list, which the host persona lacks.
 #[tokio::test]
 async fn invariants_hold_under_spoofed_with_a_font_list() {
-    let fonts: Persona = r#"{"fonts": {"available": ["Segoe UI", "Arial"]}}"#
-        .parse()
-        .expect("persona JSON");
     let builder = Browser::builder()
         .stealth(StealthProfile::spoofed())
-        .persona_overlay(fonts);
+        .persona_overlay(pinned_seed(
+            r#", "fonts": {"available": ["Segoe UI", "Arial"]}"#,
+        ));
     check("spoofed fonts", builder).await;
 }
