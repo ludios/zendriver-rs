@@ -47,6 +47,6 @@ pub use probe::{
 pub use procs::ChromeTree;
 pub use server::{
     BASIC_AUTH_PASSWORD, BASIC_AUTH_USER, DOWNLOAD_BODY, FixtureServer, HOST_RESOLVER_RULES,
-    RecordedRequest, SITE_A, SITE_B, trickle_body,
+    PROXY_PASSWORD, PROXY_USER, RecordedRequest, SITE_A, SITE_B, trickle_body,
 };
 pub use timing::{assert_eventually, assert_not_before};

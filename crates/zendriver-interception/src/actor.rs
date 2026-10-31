@@ -14,9 +14,9 @@
 //! 2. Sends `Fetch.enable { patterns, handleAuthRequests }` with the
 //!    explicit pattern list supplied by the builder; `handleAuthRequests`
 //!    flips to `true` when the builder also called
-//!    [`InterceptBuilder::handle_auth`](crate::builder::InterceptBuilder::handle_auth)
+//!    [`InterceptBuilder::handle_proxy_auth`](crate::builder::InterceptBuilder::handle_proxy_auth)
 //!    so Chrome surfaces `Fetch.authRequired` events the actor answers with
-//!    `Fetch.continueWithAuth`.
+//!    `Fetch.continueWithAuth` (see [`auth_response`]).
 //! 3. Per `Fetch.requestPaused` event: walks `rules` in registration order,
 //!    first match wins, dispatches the matching action's CDP call. No
 //!    match → plain `Fetch.continueRequest` (let through).
@@ -31,6 +31,8 @@
 //! reached the wire before `stop()` returns.
 //!
 //! [`stop`]: InterceptHandle::stop
+
+use std::collections::HashSet;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -223,6 +225,34 @@ pub(crate) struct HeaderPair {
     pub(crate) value: String,
 }
 
+/// The `authChallengeResponse` to send for a `Fetch.authRequired` event.
+///
+/// - `proxy_auth`: the `(user, password)` to give a proxy, if any.
+/// - `from_proxy`: whether a proxy sent the challenge
+///   (`authChallenge.source == "Proxy"`), rather than the server.
+/// - `first_try`: whether this request hasn't been given the credentials
+///   yet. Chrome challenges again after the proxy rejects them, so
+///   answering every time would loop forever.
+///
+/// Credentials go only to a proxy, and only once per request; a server's
+/// challenge gets `Default`, so a site can't collect the proxy credentials
+/// by answering 401.
+fn auth_response(
+    proxy_auth: Option<&(String, String)>,
+    from_proxy: bool,
+    first_try: bool,
+) -> Value {
+    match proxy_auth {
+        Some((user, pass)) if from_proxy && first_try => json!({
+            "response": "ProvideCredentials",
+            "username": user,
+            "password": pass,
+        }),
+        Some(_) if from_proxy => json!({ "response": "CancelAuth" }),
+        _ => json!({ "response": "Default" }),
+    }
+}
+
 /// Run the interception actor until `cancel` fires.
 ///
 /// See the module-level docs for the lifecycle contract. The function exits
@@ -235,7 +265,7 @@ pub(crate) async fn run_actor(
     session: SessionHandle,
     rules: Vec<Rule>,
     patterns: Vec<RequestPattern>,
-    auth: Option<(String, String)>,
+    proxy_auth: Option<(String, String)>,
     cancel: CancellationToken,
     done: oneshot::Sender<()>,
 ) {
@@ -246,7 +276,7 @@ pub(crate) async fn run_actor(
     // actor before any subscription existed.
     let mut paused = session.subscribe::<Value>("Fetch.requestPaused");
     // When `handleAuthRequests: true`, Chrome additionally emits
-    // `Fetch.authRequired` events for proxy / HTTP basic-auth challenges.
+    // `Fetch.authRequired` events for proxy and server auth challenges.
     // Subscribe up-front for the same race-free reason as `requestPaused`.
     let mut auth_required = session.subscribe::<Value>("Fetch.authRequired");
 
@@ -257,7 +287,10 @@ pub(crate) async fn run_actor(
     // any other torn-down session).
     let enable_session = session.clone();
     let enable_patterns: Vec<Value> = patterns.iter().map(serialize_pattern).collect();
-    let handle_auth_requests = auth.is_some();
+    let handle_auth_requests = proxy_auth.is_some();
+    // Requests already given the proxy credentials: a second challenge for
+    // one means the proxy rejected them.
+    let mut answered: HashSet<String> = HashSet::new();
     tokio::spawn(async move {
         if let Err(e) = enable_session
             .call(
@@ -296,10 +329,8 @@ pub(crate) async fn run_actor(
             }
             Some(ev_value) = auth_required.next() => {
                 // `Fetch.authRequired` carries a `requestId` we must echo
-                // back via `Fetch.continueWithAuth`. If `auth` is None the
-                // user didn't ask for auth handling — fall back to
-                // `Default` so Chrome surfaces a normal auth dialog instead
-                // of hanging the pause forever.
+                // back via `Fetch.continueWithAuth`, or the request stays
+                // paused forever.
                 let Some(request_id) = ev_value
                     .get("requestId")
                     .and_then(Value::as_str)
@@ -308,14 +339,15 @@ pub(crate) async fn run_actor(
                     warn!("interception: Fetch.authRequired without requestId");
                     continue;
                 };
-                let response = match &auth {
-                    Some((user, pass)) => json!({
-                        "response": "ProvideCredentials",
-                        "username": user,
-                        "password": pass,
-                    }),
-                    None => json!({ "response": "Default" }),
-                };
+                let from_proxy = ev_value
+                    .pointer("/authChallenge/source")
+                    .and_then(Value::as_str)
+                    == Some("Proxy");
+                let first_try = from_proxy && answered.insert(request_id.clone());
+                if from_proxy && !first_try {
+                    warn!(%request_id, "interception: the proxy rejected the credentials");
+                }
+                let response = auth_response(proxy_auth.as_ref(), from_proxy, first_try);
                 if let Err(e) = session
                     .call(
                         "Fetch.continueWithAuth",
@@ -836,12 +868,28 @@ mod tests {
         conn.shutdown();
     }
 
+    /// Proxy credentials go to a proxy's first challenge only: a server's
+    /// challenge gets `Default`, and a repeat challenge (the proxy rejected
+    /// them) gets `CancelAuth`.
+    #[test]
+    fn auth_response_gives_credentials_to_a_proxy_once() {
+        let creds = ("u".to_string(), "p".to_string());
+        let response = |auth, from_proxy, first_try| {
+            auth_response(auth, from_proxy, first_try)["response"].clone()
+        };
+        assert_eq!(response(Some(&creds), true, true), "ProvideCredentials");
+        assert_eq!(response(Some(&creds), true, false), "CancelAuth");
+        assert_eq!(response(Some(&creds), false, true), "Default");
+        assert_eq!(response(None, true, true), "Default");
+        assert_eq!(auth_response(Some(&creds), true, true)["password"], "p");
+    }
+
     #[tokio::test]
     async fn actor_handles_auth_required_with_credentials() {
-        // cdpdriver/zendriver#208: proxy / HTTP basic-auth support. When the
-        // builder is configured with `handle_auth(user, pass)`, the actor
+        // cdpdriver/zendriver#208: proxy auth support. When the builder is
+        // configured with `handle_proxy_auth(user, pass)`, the actor
         // must (a) send `Fetch.enable { handleAuthRequests: true }` and
-        // (b) respond to each `Fetch.authRequired` event with
+        // (b) respond to a proxy's `Fetch.authRequired` event with
         // `Fetch.continueWithAuth { authChallengeResponse:
         // ProvideCredentials + user/pass }`.
         let (mut mock, conn) = MockConnection::pair();

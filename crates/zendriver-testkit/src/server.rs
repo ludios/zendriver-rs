@@ -42,6 +42,12 @@ pub const BASIC_AUTH_USER: &str = "fixture-user";
 /// Password `/basic-auth` accepts.
 pub const BASIC_AUTH_PASSWORD: &str = "fixture-password";
 
+/// Username the server accepts as an HTTP proxy.
+pub const PROXY_USER: &str = "proxy-user";
+
+/// Password the server accepts as an HTTP proxy.
+pub const PROXY_PASSWORD: &str = "proxy-password";
+
 /// A 1x1 transparent GIF, served as the slow subresource.
 const PIXEL_GIF: &[u8] = &[
     0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -55,7 +61,8 @@ pub struct RecordedRequest {
     /// The `Host` header without its port, e.g. `a.test`; empty if absent.
     pub host: String,
     pub method: Method,
-    /// Path and query, e.g. `/form-result?q=x`.
+    /// Path and query, e.g. `/form-result?q=x`; the whole URL for a
+    /// request sent to the server as a proxy.
     pub uri: Uri,
     pub headers: HeaderMap,
     /// When the request reached the server.
@@ -291,11 +298,13 @@ async fn download_tiny() -> Response {
     attachment("tiny.txt", "text/plain", "x")
 }
 
+/// The `Authorization` / `Proxy-Authorization` value for Basic `user`:`pass`.
+fn basic_credentials(user: &str, pass: &str) -> String {
+    format!("Basic {}", BASE64.encode(format!("{user}:{pass}")))
+}
+
 async fn basic_auth(headers: HeaderMap) -> Response {
-    let expected = format!(
-        "Basic {}",
-        BASE64.encode(format!("{BASIC_AUTH_USER}:{BASIC_AUTH_PASSWORD}"))
-    );
+    let expected = basic_credentials(BASIC_AUTH_USER, BASIC_AUTH_PASSWORD);
     let given = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
@@ -450,6 +459,29 @@ async fn record(State(log): State<RequestLog>, request: Request, next: Next) -> 
     response
 }
 
+/// A request in absolute form (`GET http://a.test:PORT/plain`) was sent to
+/// this server as an HTTP proxy: answer `407` unless it carries
+/// [`PROXY_USER`]:[`PROXY_PASSWORD`], and serve it as usual if it does.
+async fn proxy_gate(request: Request, next: Next) -> Response {
+    if request.uri().scheme().is_none() {
+        return next.run(request).await;
+    }
+    let expected = basic_credentials(PROXY_USER, PROXY_PASSWORD);
+    let given = request
+        .headers()
+        .get(header::PROXY_AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    if given == Some(expected.as_str()) {
+        return next.run(request).await;
+    }
+    (
+        StatusCode::PROXY_AUTHENTICATION_REQUIRED,
+        [(header::PROXY_AUTHENTICATE, r#"Basic realm="fixture-proxy""#)],
+        "proxy credentials required",
+    )
+        .into_response()
+}
+
 fn canned_routes() -> Router {
     Router::new()
         .route("/plain", get(plain))
@@ -478,6 +510,11 @@ fn canned_routes() -> Router {
 
 /// The fixture server. Dropping it stops it, closing idle keep-alive
 /// connections too; requests in flight are answered first.
+///
+/// It also works as an HTTP proxy ([`FixtureServer::proxy_url`]) that
+/// requires Basic credentials [`PROXY_USER`]:[`PROXY_PASSWORD`]: a proxied
+/// request without them gets `407`; with them, it's served from the routes
+/// below, whatever its host.
 ///
 /// Canned routes (`delay_ms` and the other numbers are query parameters):
 ///
@@ -529,6 +566,7 @@ impl FixtureServer {
         let log = RequestLog::default();
         let app = canned_routes()
             .merge(extra)
+            .layer(middleware::from_fn(proxy_gate))
             .layer(middleware::from_fn_with_state(log.clone(), record));
         let (stop, stopped) = oneshot::channel::<()>();
         tokio::spawn(async move {
@@ -555,6 +593,11 @@ impl FixtureServer {
     pub fn url(&self, host: &str, path: &str) -> String {
         assert!(path.starts_with('/'), "path must start with '/': {path:?}");
         format!("http://{host}:{}{path}", self.port)
+    }
+
+    /// `http://127.0.0.1:{port}`, for using the server as a proxy.
+    pub fn proxy_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
     }
 
     /// Every request so far, oldest first.

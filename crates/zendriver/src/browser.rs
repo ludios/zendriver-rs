@@ -894,19 +894,19 @@ impl BrowserBuilder {
         self
     }
 
-    /// Auto-respond to proxy / HTTP basic-auth challenges with
-    /// `(username, password)`.
+    /// Answer the proxy's auth challenges with `(username, password)`.
     ///
     /// At launch, an interception actor is spawned on the main tab session
-    /// that sends `Fetch.enable { handleAuthRequests: true }` and answers
-    /// every `Fetch.authRequired` event with `Fetch.continueWithAuth`
-    /// carrying these credentials. Combine with `.arg("--proxy-server=...")`
+    /// that sends `Fetch.enable { handleAuthRequests: true }` and answers a
+    /// proxy's `Fetch.authRequired` with `Fetch.continueWithAuth` carrying
+    /// these credentials, once per request (a rejected request then fails).
+    /// A site's own challenge (HTTP 401) never gets them. Combine with `.arg("--proxy-server=...")`
     /// to drive Chrome through an authenticated upstream proxy without the
     /// extension-based workarounds the upstream Python project requires.
     ///
     /// Scope: applies to the main tab only — tabs opened later via
     /// [`Browser::new_tab`] do **not** inherit auth handling. For those,
-    /// wire `tab.intercept().handle_auth(user, pass).start()` yourself.
+    /// wire `tab.intercept().handle_proxy_auth(user, pass).start()` yourself.
     ///
     /// See cdpdriver/zendriver#208.
     ///
@@ -2372,7 +2372,7 @@ impl TargetObserver for TabRegistrar {
                     if let Some(ctx_id) = session.target_info.browser_context_id.as_deref() {
                         let creds = browser.context_proxy_auth.lock().await.get(ctx_id).cloned();
                         if let Some((user, pass)) = creds {
-                            builder = builder.handle_auth(user, pass);
+                            builder = builder.handle_proxy_auth(user, pass);
                             needs_actor = true;
                         }
                     }
@@ -3743,7 +3743,7 @@ impl BrowserBuilder {
         }
 
         // 14. Spawn a single main-session interception actor carrying BOTH
-        // proxy-auth (handle_auth) and tracker blocking (block_hosts), so they
+        // proxy-auth (handle_proxy_auth) and tracker blocking (block_hosts), so they
         // don't double-resolve the same Fetch.requestPaused. New tabs get their
         // own tracker-only actor via the TabRegistrar (proxy auth is
         // main-tab-only). The InterceptHandle is parked on BrowserInner so the
@@ -3755,7 +3755,7 @@ impl BrowserBuilder {
             let mut builder = zendriver_interception::InterceptBuilder::new(&main_session);
             let mut needs_actor = false;
             if let Some((user, pass)) = self.proxy_auth.clone() {
-                builder = builder.handle_auth(user, pass);
+                builder = builder.handle_proxy_auth(user, pass);
                 needs_actor = true;
             }
             #[cfg(feature = "tracker-blocking")]

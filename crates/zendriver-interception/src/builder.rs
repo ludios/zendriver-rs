@@ -91,11 +91,11 @@ pub struct InterceptBuilder<'tab> {
     tab: &'tab SessionHandle,
     patterns: Vec<RequestPattern>,
     rules: Vec<Rule>,
-    /// Optional proxy/server credentials. When set, `Fetch.enable` is sent
-    /// with `handleAuthRequests: true` and the actor responds to each
-    /// `Fetch.authRequired` event with `Fetch.continueWithAuth` carrying
-    /// these credentials. See cdpdriver/zendriver#208.
-    auth: Option<(String, String)>,
+    /// Optional proxy credentials. When set, `Fetch.enable` is sent with
+    /// `handleAuthRequests: true` and the actor answers a proxy's
+    /// `Fetch.authRequired` with these credentials. See
+    /// cdpdriver/zendriver#208.
+    proxy_auth: Option<(String, String)>,
 }
 
 impl<'tab> InterceptBuilder<'tab> {
@@ -122,23 +122,26 @@ impl<'tab> InterceptBuilder<'tab> {
             tab,
             patterns: Vec::new(),
             rules: Vec::new(),
-            auth: None,
+            proxy_auth: None,
         }
     }
 
-    /// Auto-respond to `Fetch.authRequired` challenges with the given
-    /// credentials.
+    /// Answer a proxy's auth challenges with the given credentials.
     ///
-    /// This is the proxy-auth (and HTTP basic-auth) path: `Fetch.enable` is
-    /// sent with `handleAuthRequests: true` and every `Fetch.authRequired`
-    /// event is answered with `Fetch.continueWithAuth { authChallengeResponse:
-    /// { response: "ProvideCredentials", username, password } }`.
+    /// `Fetch.enable` is sent with `handleAuthRequests: true`, and each
+    /// `Fetch.authRequired` whose challenge comes from a proxy is answered
+    /// with `Fetch.continueWithAuth { authChallengeResponse: { response:
+    /// "ProvideCredentials", username, password } }`. Each request gets the
+    /// credentials once: if the proxy challenges it again, which means it
+    /// rejected them, the challenge is cancelled and the request fails. A
+    /// challenge from the server (HTTP 401) gets `Default`, never these
+    /// credentials, so a site can't collect them.
     ///
-    /// Compose with rules: an `InterceptBuilder` configured with `handle_auth`
-    /// and `block` / `redirect` / `respond` rules handles both paths from the
-    /// same actor. Combine with [`BrowserBuilder::proxy_auth`] in the
-    /// `zendriver` crate if you want the wiring installed automatically on
-    /// every tab.
+    /// Compose with rules: an `InterceptBuilder` configured with
+    /// `handle_proxy_auth` and `block` / `redirect` / `respond` rules
+    /// handles both from the same actor. Combine with
+    /// [`BrowserBuilder::proxy_auth`] in the `zendriver` crate if you want
+    /// the wiring installed automatically.
     ///
     /// **Only [`start`](Self::start) honors this.** The
     /// [`subscribe`](Self::subscribe) escape hatch has no auth path — it never
@@ -148,17 +151,17 @@ impl<'tab> InterceptBuilder<'tab> {
     ///
     /// See cdpdriver/zendriver#208.
     #[must_use]
-    pub fn handle_auth(mut self, user: impl Into<String>, pass: impl Into<String>) -> Self {
-        self.auth = Some((user.into(), pass.into()));
+    pub fn handle_proxy_auth(mut self, user: impl Into<String>, pass: impl Into<String>) -> Self {
+        self.proxy_auth = Some((user.into(), pass.into()));
         self
     }
 
-    /// Auto-respond to `Fetch.authRequired` challenges with the given
-    /// credentials, scoped to `Document`-type requests only.
+    /// Answer a proxy's auth challenges with the given credentials, for
+    /// `Document`-type requests only.
     ///
-    /// Equivalent to [`handle_auth`](Self::handle_auth) plus
+    /// Equivalent to [`handle_proxy_auth`](Self::handle_proxy_auth) plus
     /// `.pattern("*").resource(ResourceType::Document)`, packaged as its own
-    /// preset so a proxy/HTTP-auth-only caller doesn't have to discover — by
+    /// preset so a proxy-auth-only caller doesn't have to discover — by
     /// reading [`start`](Self::start)'s source — that leaving patterns unset
     /// pauses *every* request on the page, not just the one carrying the auth
     /// challenge.
@@ -167,16 +170,17 @@ impl<'tab> InterceptBuilder<'tab> {
     /// round-trips through the interception actor; other requests (XHR,
     /// subresources, and any parallel/pipelined connection that also needs
     /// credentials) are not paused and will not have their auth challenge
-    /// answered by this builder. Use plain [`handle_auth`](Self::handle_auth)
+    /// answered by this builder. Use plain
+    /// [`handle_proxy_auth`](Self::handle_proxy_auth)
     /// (which falls back to a match-all pattern in [`start`](Self::start)) if
     /// you need every connection's 407 covered.
     #[must_use]
-    pub fn handle_auth_scoped_to_document(
+    pub fn handle_proxy_auth_scoped_to_document(
         self,
         user: impl Into<String>,
         pass: impl Into<String>,
     ) -> Self {
-        self.handle_auth(user, pass)
+        self.handle_proxy_auth(user, pass)
             .pattern("*")
             .resource(ResourceType::Document)
     }
@@ -335,7 +339,7 @@ impl<'tab> InterceptBuilder<'tab> {
     /// list would never fire.
     #[must_use = "interception stops when the handle is dropped — bind the returned InterceptHandle to keep it alive"]
     pub fn start(mut self) -> InterceptHandle {
-        if self.patterns.is_empty() && (!self.rules.is_empty() || self.auth.is_some()) {
+        if self.patterns.is_empty() && (!self.rules.is_empty() || self.proxy_auth.is_some()) {
             // A match-all pattern is required in two cases:
             //
             // 1. Rules need Chrome to actually pause requests — without a
@@ -369,7 +373,7 @@ impl<'tab> InterceptBuilder<'tab> {
         let actor_cancel = cancel.clone();
         let actor_rules = self.rules;
         let actor_patterns = self.patterns;
-        let actor_auth = self.auth;
+        let actor_auth = self.proxy_auth;
         tokio::spawn(async move {
             run_actor(
                 actor_session,
@@ -398,7 +402,7 @@ impl<'tab> InterceptBuilder<'tab> {
     /// themselves. Use [`start`](Self::start) when you want the actor to
     /// apply rules automatically.
     ///
-    /// [`handle_auth`](Self::handle_auth) credentials are **also ignored**
+    /// [`handle_proxy_auth`](Self::handle_proxy_auth) credentials are **also ignored**
     /// here, and calling both logs an error. This path never subscribes to
     /// `Fetch.authRequired`, so `Fetch.enable` is deliberately sent with
     /// `handleAuthRequests: false`: flipping it on would make Chrome pause
@@ -412,15 +416,15 @@ impl<'tab> InterceptBuilder<'tab> {
     /// the caller.
     #[must_use = "the returned stream is the only handle on the subscription"]
     pub fn subscribe(mut self) -> impl Stream<Item = PausedRequest> + Send + use<> {
-        if self.auth.is_some() {
+        if self.proxy_auth.is_some() {
             // Loud, because the alternative failure is invisible: behind a
             // proxy every navigation 407s and the caller sees only empty
             // pages. We cannot honor the credentials here — this path has no
             // `Fetch.authRequired` subscription, and enabling
             // `handleAuthRequests` without one converts the 407 into a hang.
             tracing::error!(
-                "interception: handle_auth() credentials are ignored by subscribe(); \
-                 auth challenges will NOT be answered — use start() for proxy / HTTP auth"
+                "interception: handle_proxy_auth() credentials are ignored by subscribe(); \
+                 auth challenges will NOT be answered — use start() for proxy auth"
             );
         }
         if self.patterns.is_empty() {
@@ -624,7 +628,7 @@ mod tests {
     }
 
     /// Regression guard for the "empty patterns with handleAuth" breakage: the
-    /// proxy / HTTP-auth-ONLY path (`handle_auth`, no rules, no explicit
+    /// proxy-auth-ONLY path (`handle_proxy_auth`, no rules, no explicit
     /// pattern) must still send a NON-empty `patterns` on `Fetch.enable`.
     /// Modern Chrome (~M132+) rejects `{ patterns: [], handleAuthRequests:
     /// true }` with CDP -32602 ("Can't specify empty patterns with handleAuth
@@ -632,12 +636,12 @@ mod tests {
     /// navigation. `start()` must inject a match-all `"*"` and set
     /// `handleAuthRequests`.
     #[tokio::test]
-    async fn start_auth_only_sends_match_all_pattern_with_handle_auth() {
+    async fn start_auth_only_sends_match_all_pattern_with_handle_proxy_auth() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
 
         let handle = InterceptBuilder::new(&sess)
-            .handle_auth("puser", "ppass")
+            .handle_proxy_auth("puser", "ppass")
             .start();
 
         let enable_id =
@@ -670,7 +674,7 @@ mod tests {
         let sess = SessionHandle::new(conn.clone(), "S1");
 
         let handle = InterceptBuilder::new(&sess)
-            .handle_auth_scoped_to_document("puser", "ppass")
+            .handle_proxy_auth_scoped_to_document("puser", "ppass")
             .start();
 
         let enable_id =
@@ -686,7 +690,7 @@ mod tests {
         assert_eq!(arr[0]["urlPattern"], "*");
         assert_eq!(
             arr[0]["resourceType"], "Document",
-            "scoped preset must narrow to the Document navigation — the difference from plain handle_auth"
+            "scoped preset must narrow to the Document navigation — the difference from plain handle_proxy_auth"
         );
         mock.reply(enable_id, json!({})).await;
 
@@ -702,7 +706,7 @@ mod tests {
         let builder = InterceptBuilder::new(&sess)
             .block("*/ads/*")
             .unwrap()
-            .handle_auth_scoped_to_document("puser", "ppass");
+            .handle_proxy_auth_scoped_to_document("puser", "ppass");
         assert_eq!(
             builder.rules_count(),
             1,
@@ -786,7 +790,7 @@ mod tests {
         conn.shutdown();
     }
 
-    /// `subscribe()` cannot honor `handle_auth`: it never subscribes to
+    /// `subscribe()` cannot honor `handle_proxy_auth`: it never subscribes to
     /// `Fetch.authRequired`, so `handleAuthRequests: true` would leave Chrome
     /// pausing auth challenges nobody answers — a hang instead of a 407.
     /// Pin the flag to `false` (the caller is warned via `tracing::error!`)
@@ -798,7 +802,7 @@ mod tests {
 
         let stream = Box::pin(
             InterceptBuilder::new(&sess)
-                .handle_auth("puser", "ppass")
+                .handle_proxy_auth("puser", "ppass")
                 .subscribe(),
         );
 

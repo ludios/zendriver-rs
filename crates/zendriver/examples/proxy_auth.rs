@@ -8,7 +8,7 @@
 //! `Fetch.continueWithAuth`.
 //!
 //! Scope: applies to the main tab only. For multi-tab apps, install per-tab
-//! via `tab.intercept().handle_auth(user, pass).start()`.
+//! via `tab.intercept().handle_proxy_auth(user, pass).start()`.
 
 #[tokio::main]
 #[allow(clippy::result_large_err)]
