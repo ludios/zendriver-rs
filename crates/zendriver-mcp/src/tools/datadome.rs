@@ -33,7 +33,9 @@ pub struct SolveDataDomeInput {
     /// Override the bypass driver's internal poll cadence, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_interval_ms: Option<u64>,
-    /// Enable the Fetch-domain interception fast-path. Default `false`.
+    /// Also probe as soon as a DataDome sensor response arrives with a 2xx,
+    /// rather than at the next poll. Watches network responses; pauses no
+    /// request. Default `false`.
     #[serde(default)]
     pub with_interception: bool,
 }

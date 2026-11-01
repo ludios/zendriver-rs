@@ -80,9 +80,11 @@ impl<'tab> DataDomeBypass<'tab> {
         self
     }
 
-    /// Enable the Fetch-domain fast-path. Spawns a `Fetch` subscription that
-    /// signals on first 2xx response to `captcha-delivery.com` or any
-    /// `datadome*` URL, waking the poll loop immediately.
+    /// Also watch this session's network responses (`Network.responseReceived`,
+    /// after `Network.enable`), and probe again as soon as a URL containing
+    /// `captcha-delivery.com` or `datadome` gets a 2xx, rather than at the
+    /// next poll. Nothing is intercepted: despite the name, no request is
+    /// paused.
     #[must_use]
     pub fn with_interception(mut self) -> Self {
         self.interception_enabled = true;
@@ -131,8 +133,7 @@ impl<'tab> DataDomeBypass<'tab> {
     /// # Errors
     /// - [`DataDomeError::CaptchaRequired`] — captcha surface, no solver.
     /// - [`DataDomeError::CaptchaSolver`] — registered solver errored.
-    /// - [`DataDomeError::Interception`] / [`DataDomeError::Call`] /
-    ///   [`DataDomeError::JsError`].
+    /// - [`DataDomeError::Call`] / [`DataDomeError::JsError`].
     pub async fn wait_for_clearance(self) -> Result<ClearanceOutcome, DataDomeError> {
         let deadline = Instant::now() + self.timeout;
 
@@ -156,12 +157,12 @@ impl<'tab> DataDomeBypass<'tab> {
             return Ok(ClearanceOutcome::AlreadyClear);
         }
 
-        // Optional Fetch-domain fast-path. Spawned before any escalation so
+        // Optional sensor-response fast path. Spawned before any escalation so
         // the CAPTCHA route gets the same fast wake-up as the device-check
         // route. The guard's `Drop` cooperatively cancels the spawned task
         // (token check at every loop boundary) with `abort()` as a backstop.
         let (interception_rx, interception_guard) = if self.interception_enabled {
-            let (rx, guard) = crate::interception::spawn_signal(self.session);
+            let (rx, guard) = crate::sensor_signal::spawn_signal(self.session);
             (Some(rx), Some(guard))
         } else {
             (None, None)
@@ -196,13 +197,13 @@ impl<'tab> DataDomeBypass<'tab> {
     /// probe is handled exactly like one present from the start.
     ///
     /// Factored out so unit tests can drive it with a controlled interception
-    /// receiver without standing up the real `Fetch.enable` plumbing.
+    /// receiver without a `Network.enable` round trip.
     pub(crate) async fn poll_loop(
         self,
         deadline: Instant,
         mut next_snapshot: Option<DetectionSnapshot>,
         mut interception_rx: Option<tokio::sync::oneshot::Receiver<()>>,
-        _interception_guard: Option<crate::interception::InterceptionGuard>,
+        _interception_guard: Option<crate::sensor_signal::SignalGuard>,
     ) -> Result<ClearanceOutcome, DataDomeError> {
         use tokio::time::{Interval, MissedTickBehavior};
 
@@ -841,7 +842,7 @@ mod tests {
     /// `with_interception()` used to be dropped on the CAPTCHA route: that
     /// branch returned into the poll loop with no receiver and no guard, so
     /// the fast path was silently off exactly where it matters most. A
-    /// `Fetch.enable` on the wire proves the subscription is armed.
+    /// `Network.enable` on the wire proves the watch is armed.
     #[tokio::test]
     async fn captcha_route_arms_the_interception_fast_path() {
         let (mut mock, conn) = MockConnection::pair();
@@ -862,12 +863,12 @@ mod tests {
             }
         });
 
-        let mut saw_fetch_enable = false;
+        let mut saw_network_enable = false;
         let mut reloaded = false;
         while let Some((method, id)) = mock.recv_cmd_timeout(DRAIN_BUDGET).await {
             match method.as_str() {
-                "Fetch.enable" => {
-                    saw_fetch_enable = true;
+                "Network.enable" => {
+                    saw_network_enable = true;
                     mock.reply(id, json!({})).await;
                 }
                 "Runtime.evaluate" => {
@@ -907,8 +908,8 @@ mod tests {
             other => panic!("expected Cleared, got {other:?}"),
         }
         assert!(
-            saw_fetch_enable,
-            "with_interception() must arm the Fetch fast path on the captcha route too"
+            saw_network_enable,
+            "with_interception() must arm the fast path on the captcha route too"
         );
         conn.shutdown();
     }

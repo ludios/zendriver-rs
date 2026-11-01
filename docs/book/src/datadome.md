@@ -71,7 +71,7 @@ async fn main() -> zendriver::Result<()> {
 |---|---|---|
 | `.timeout(Duration)` | 30 s | Maximum total wait for a terminal outcome. |
 | `.poll_interval(Duration)` | 250 ms | How often to re-probe the page during the poll loop. |
-| `.with_interception()` | off | Enable Fetch-domain fast-path: signals on first 2xx response from `captcha-delivery.com` or any `datadome*` URL. |
+| `.with_interception()` | off | Probe again as soon as a URL containing `captcha-delivery.com` or `datadome` gets a 2xx response. |
 | `.on_captcha(solver)` | none | Register an async CAPTCHA solver. Without it, a CAPTCHA surface returns `DataDomeError::CaptchaRequired`. |
 
 Call `.wait_for_clearance().await` to start the drive.
@@ -147,11 +147,13 @@ again if you want a second solve.
   observed. Common causes: fingerprint scoring failure (see stealth note),
   IP reputation, or a CAPTCHA with no solver registered.
 
-## Fetch-domain fast path
+## Sensor-response fast path
 
-`.with_interception()` spawns a `Fetch` subscription that signals on first
-2xx response to `captcha-delivery.com` or any `datadome*` URL. Polling
-continues in parallel; the first signal wins. Useful on sites where the cookie
+`.with_interception()` also watches the tab's network responses
+(`Network.responseReceived`), and probes again as soon as a URL containing
+`captcha-delivery.com` or `datadome` gets a 2xx response. Polling continues
+in parallel; the first signal wins. Despite the name, nothing is
+intercepted: no request is paused. Useful on sites where the cookie
 is set faster than the default 250 ms poll cadence.
 
 ```rust,no_run

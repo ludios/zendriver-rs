@@ -128,11 +128,13 @@ per `wait_for_clearance`, raced against that call's timeout: injecting
 the response does not remove the widget, so the surface stays `Captcha`
 afterwards, and an unlatched loop would buy a fresh solve every tick.
 
-## Fetch-domain fast path
+## Sensor-response fast path
 
-`with_interception()` spawns a `Fetch` subscription that signals on
-first 2xx response to `Reese.js` or `_Incapsula_Resource*`. Polling
-continues in parallel; first signal wins. Useful on sites where the
+`with_interception()` also watches the tab's network responses
+(`Network.responseReceived`), and probes again as soon as a `Reese.js` or
+`_Incapsula_Resource` request gets a 2xx response. Polling continues in
+parallel; the first signal wins. Despite the name, nothing is
+intercepted: no request is paused. Useful on sites where the
 token cookie is set faster than the default 250ms poll cadence.
 
 ```rust,no_run

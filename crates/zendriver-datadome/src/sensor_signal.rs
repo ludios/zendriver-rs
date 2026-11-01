@@ -1,101 +1,118 @@
-//! Fetch-domain fast-path for DataDome clearance detection.
+//! Network-event fast path for DataDome clearance detection.
 //!
-//! Opt-in via [`DataDomeBypass::with_interception`]. Subscribes to
-//! Fetch responses matching `captcha-delivery.com` or `datadome` URL
-//! patterns; signals the waiter via a oneshot when a 2xx is observed.
-//! Polling continues in parallel — first signal wins.
+//! Opt-in via [`DataDomeBypass::with_interception`]. Watches
+//! `Network.responseReceived` for a 2xx response from a DataDome sensor
+//! (`captcha-delivery.com` or `datadome` in the URL) and signals the waiter
+//! through a oneshot. Polling continues in parallel; the first signal wins.
+//! Nothing is paused, so no request can be left waiting.
 //!
 //! [`DataDomeBypass::with_interception`]: crate::bypass::DataDomeBypass::with_interception
 
 use futures::StreamExt;
+use serde::Deserialize;
+use serde_json::json;
 use tokio::sync::oneshot;
-use tokio_util::sync::CancellationToken;
-use zendriver_interception::InterceptBuilder;
 use zendriver_transport::SessionHandle;
 
-/// Spawn a background task that signals on first 2xx DataDome-sensor
-/// response and returns the receiver half of a oneshot.
+/// What the URL of a DataDome sensor contains.
+const SENSOR_URL_PARTS: [&str; 2] = ["captcha-delivery.com", "datadome"];
+
+/// The part of a `Network.responseReceived` event that is read here.
+#[derive(Deserialize)]
+struct ResponseReceived {
+    response: Response,
+}
+
+#[derive(Deserialize)]
+struct Response {
+    url: String,
+    status: u16,
+}
+
+/// Watch `session` for the first 2xx response from a DataDome sensor.
 ///
-/// Infallible: the `InterceptBuilder` chain used here (`new` → `pattern` →
-/// `at_response` → `subscribe`) is pure sync setup with no `Result`-returning
-/// step. The actual `Fetch.enable` CDP round-trip is fire-and-forget inside
-/// `subscribe()`; transport errors there are surfaced as a warn log + an
-/// empty stream, not as a `spawn_signal` failure. Treating this as `-> _`
-/// rather than `Result<_, DataDomeError>` avoids the
-/// `clippy::result_large_err` warning that `DataDomeError`'s 136-byte
-/// `CallError` variant would otherwise trip for a tiny `Ok` payload.
-///
-/// Caller must keep the returned [`InterceptionGuard`] alive until they are
-/// done with the receiver. Dropping the guard cancels the spawned task
-/// cooperatively via a `CancellationToken` checked at every loop boundary,
-/// then aborts it as a backstop. Cooperative cancel is preferred over a
-/// bare `abort()` because abort is asynchronous: the task may run one more
-/// `paused.continue_().await` after the abort signal lands — harmless, but
-/// the token lets the loop exit cleanly between events instead.
-pub(crate) fn spawn_signal(session: &SessionHandle) -> (oneshot::Receiver<()>, InterceptionGuard) {
+/// Returns the receiver that gets `()` then, and the guard that stops the
+/// watch when dropped. If `Network.enable` fails, the receiver's sender is
+/// dropped, and the bypass relies on polling alone.
+pub(crate) fn spawn_signal(session: &SessionHandle) -> (oneshot::Receiver<()>, SignalGuard) {
     let (tx, rx) = oneshot::channel();
-    let cancel = CancellationToken::new();
-    let task_cancel = cancel.clone();
-
-    // `subscribe()` is sync and returns `impl Stream<Item = PausedRequest>`.
-    // `pattern()` returns `Self` (not a `Result`), so no `?` needed on chain.
-    let stream = InterceptBuilder::new(session)
-        .pattern("*captcha-delivery.com*")
-        .at_response()
-        .pattern("*datadome*")
-        .at_response()
-        .subscribe();
-
-    let handle = tokio::spawn(async move {
-        let mut stream = Box::pin(stream);
-        let mut tx = Some(tx);
-        loop {
-            tokio::select! {
-                biased;
-                () = task_cancel.cancelled() => break,
-                next = stream.next() => {
-                    let Some(paused) = next else { break };
-                    let is_2xx = paused
-                        .response
-                        .as_ref()
-                        .map(|r| (200..300).contains(&r.status))
-                        .unwrap_or(false);
-                    // Always release the pause so the page keeps loading.
-                    let _ = paused.continue_().await;
-                    if is_2xx {
-                        if let Some(t) = tx.take() {
-                            let _ = t.send(());
-                        }
-                        break;
-                    }
-                }
+    // Subscribed before `Network.enable`, so no response between the two is
+    // missed.
+    let mut responses = session.subscribe::<ResponseReceived>("Network.responseReceived");
+    let session = session.clone();
+    let task = tokio::spawn(async move {
+        if let Err(e) = session.call("Network.enable", json!({})).await {
+            tracing::warn!(error = %e, "datadome: Network.enable failed; detecting clearance by polling only");
+            return;
+        }
+        while let Some(ResponseReceived { response }) = responses.next().await {
+            let is_sensor = SENSOR_URL_PARTS.iter().any(|p| response.url.contains(p));
+            if is_sensor && (200..300).contains(&response.status) {
+                let _ = tx.send(());
+                return;
             }
         }
     });
-
-    (
-        rx,
-        InterceptionGuard {
-            cancel,
-            handle: Some(handle),
-        },
-    )
+    (rx, SignalGuard(task))
 }
 
-/// Guard for the background interception task. On drop, signals
-/// cooperative cancellation first (clean exit between events) and then
-/// aborts as a backstop in case the task is parked on a non-cancellable
-/// future.
-pub(crate) struct InterceptionGuard {
-    cancel: CancellationToken,
-    handle: Option<tokio::task::JoinHandle<()>>,
-}
+/// Stops the watch started by [`spawn_signal`] when dropped.
+pub(crate) struct SignalGuard(tokio::task::JoinHandle<()>);
 
-impl Drop for InterceptionGuard {
+impl Drop for SignalGuard {
     fn drop(&mut self) {
-        self.cancel.cancel();
-        if let Some(h) = self.handle.take() {
-            h.abort();
+        self.0.abort();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use zendriver_transport::testing::MockConnection;
+
+    /// The signal comes from a sensor's 2xx response, not from another
+    /// URL's 2xx or a sensor's 403, and nothing is paused: the only command
+    /// sent is `Network.enable`.
+    #[tokio::test]
+    async fn a_sensor_2xx_response_signals_and_nothing_is_paused() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let (mut rx, _guard) = spawn_signal(&sess);
+
+        let enable = mock.recv_cmd_timeout(Duration::from_secs(2)).await;
+        let (method, id) = enable.expect("no command sent");
+        assert_eq!(method, "Network.enable");
+        mock.reply(id, json!({})).await;
+
+        let respond = |url: &str, status: u16| json!({ "requestId": "R", "response": { "url": url, "status": status } });
+        for (url, status) in [
+            ("https://site.test/app.js", 200),
+            ("https://geo.captcha-delivery.com/captcha/?cid=1", 403),
+        ] {
+            mock.emit_event_for_session("Network.responseReceived", respond(url, status), "S1")
+                .await;
         }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(rx.try_recv().is_err(), "signalled without a sensor 2xx");
+
+        mock.emit_event_for_session(
+            "Network.responseReceived",
+            respond("https://js.datadome.co/tags.js", 200),
+            "S1",
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("no signal after a sensor 2xx")
+            .unwrap();
+        assert_eq!(
+            mock.recv_cmd_timeout(Duration::from_millis(50)).await,
+            None,
+            "a command was sent after Network.enable"
+        );
+        conn.shutdown();
     }
 }

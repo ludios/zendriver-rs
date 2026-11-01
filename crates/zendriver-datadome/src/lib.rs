@@ -30,7 +30,7 @@ pub mod bypass;
 pub mod captcha;
 pub mod detection;
 pub mod error;
-mod interception;
+mod sensor_signal;
 
 pub use bypass::{ClearanceOutcome, DataDomeBypass};
 pub use captcha::{DataDomeChallenge, DataDomeSolution};

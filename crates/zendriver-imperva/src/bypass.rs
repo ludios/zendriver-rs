@@ -3,8 +3,8 @@
 //! Public entry is [`ImpervaBypass`] — constructed via `Tab::imperva()`
 //! (zendriver crate, feature-gated). Single-struct dispatch: one
 //! `wait_for_clearance` runs the surface-aware poll loop, the optional
-//! [`ImpervaBypass::with_interception`] hook enables a Fetch-domain
-//! fast-path, and [`ImpervaBypass::on_captcha`] plugs a caller-supplied
+//! [`ImpervaBypass::with_interception`] option also watches the sensor
+//! responses, and [`ImpervaBypass::on_captcha`] plugs a caller-supplied
 //! solver into the CAPTCHA escalation path. See module docs of
 //! [`crate::detection`] for surface inference rules.
 
@@ -164,10 +164,11 @@ impl<'tab> ImpervaBypass<'tab> {
         self
     }
 
-    /// Enable the Fetch-domain escape hatch: the bypass driver spins up
-    /// its own [`InterceptBuilder::subscribe`] hook against this session,
-    /// listening for `Reese.js` / `_Incapsula_Resource` 2xx responses to
-    /// signal clearance faster than polling alone.
+    /// Also watch this session's network responses (`Network.responseReceived`,
+    /// after `Network.enable`), and probe again as soon as a `Reese.js` or
+    /// `_Incapsula_Resource` request gets a 2xx, rather than at the next
+    /// poll. Nothing is intercepted: despite the name, no request is
+    /// paused.
     ///
     /// ```no_run
     /// # async fn ex(tab: &zendriver_transport::SessionHandle)
@@ -181,8 +182,6 @@ impl<'tab> ImpervaBypass<'tab> {
     /// println!("{outcome:?}");
     /// # Ok(()) }
     /// ```
-    ///
-    /// [`InterceptBuilder::subscribe`]: zendriver_interception::InterceptBuilder::subscribe
     #[must_use]
     pub fn with_interception(mut self) -> Self {
         self.interception_enabled = true;
@@ -212,8 +211,6 @@ impl<'tab> ImpervaBypass<'tab> {
     ///   escalating.
     /// - [`ImpervaError::CaptchaSolver`] — registered solver returned an
     ///   error.
-    /// - [`ImpervaError::Interception`] — Fetch-domain hook (when set via
-    ///   [`with_interception`](Self::with_interception)) failed.
     /// - [`ImpervaError::Call`] / [`ImpervaError::JsError`] — CDP or
     ///   in-page evaluator failure.
     ///
@@ -254,11 +251,11 @@ impl<'tab> ImpervaBypass<'tab> {
         // reese84 device check to a CAPTCHA a few seconds in, so the loop owns
         // that branch and the pre-loop snapshot just primes it.
 
-        // Optional Fetch-domain fast-path. The guard's `Drop` cooperatively
+        // Optional sensor-response fast path. The guard's `Drop` cooperatively
         // cancels the spawned task (token check at every loop boundary)
         // with `abort()` as a backstop.
         let (interception_rx, interception_guard) = if self.interception_enabled {
-            let (rx, guard) = crate::interception::spawn_signal(self.session);
+            let (rx, guard) = crate::sensor_signal::spawn_signal(self.session);
             (Some(rx), Some(guard))
         } else {
             (None, None)
@@ -297,18 +294,18 @@ impl<'tab> ImpervaBypass<'tab> {
     /// handled exactly like one present from the start.
     ///
     /// Factored out so unit tests can drive it with a
-    /// controlled interception receiver without standing up the real
-    /// InterceptBuilder + Fetch.enable plumbing. Production callers go
+    /// controlled interception receiver without a `Network.enable` round
+    /// trip. Production callers go
     /// through [`wait_for_clearance`](Self::wait_for_clearance), which
     /// constructs the receiver via [`spawn_signal`].
     ///
-    /// [`spawn_signal`]: crate::interception::spawn_signal
+    /// [`spawn_signal`]: crate::sensor_signal::spawn_signal
     pub(crate) async fn poll_loop(
         self,
         deadline: Instant,
         mut next_snapshot: Option<DetectionSnapshot>,
         mut interception_rx: Option<tokio::sync::oneshot::Receiver<()>>,
-        _interception_guard: Option<crate::interception::InterceptionGuard>,
+        _interception_guard: Option<crate::sensor_signal::SignalGuard>,
     ) -> Result<ClearanceOutcome, ImpervaError> {
         use tokio::time::{Interval, MissedTickBehavior};
 

@@ -1,6 +1,5 @@
 //! Imperva-bypass errors.
 
-use zendriver_interception::InterceptionError;
 use zendriver_transport::CallError;
 
 use crate::detection::CaptchaKind;
@@ -18,13 +17,6 @@ pub enum ImpervaError {
     /// User-supplied CAPTCHA solver returned an error.
     #[error("CAPTCHA solver failed: {0}")]
     CaptchaSolver(Box<dyn std::error::Error + Send + Sync>),
-
-    /// Fetch-domain interception hook failed at startup (only when
-    /// [`ImpervaBypass::with_interception`] was set).
-    ///
-    /// [`ImpervaBypass::with_interception`]: crate::bypass::ImpervaBypass::with_interception
-    #[error("interception hook error: {0}")]
-    Interception(#[from] InterceptionError),
 
     /// CDP transport / call error.
     #[error("call failed: {0}")]

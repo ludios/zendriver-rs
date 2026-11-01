@@ -53,9 +53,10 @@ pub struct SolveImpervaInput {
     /// knob for slow / sandboxed environments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_interval_ms: Option<u64>,
-    /// Enable the Fetch-domain interception fast-path
-    /// ([`ImpervaBypass::with_interception`]) for quicker reese84 capture on
-    /// modern surfaces. Default `false`.
+    /// Also probe as soon as an Imperva sensor response arrives with a 2xx,
+    /// rather than at the next poll ([`ImpervaBypass::with_interception`]),
+    /// for quicker reese84 capture. Watches network responses; pauses no
+    /// request. Default `false`.
     ///
     /// [`ImpervaBypass::with_interception`]: zendriver_imperva::ImpervaBypass::with_interception
     #[serde(default)]

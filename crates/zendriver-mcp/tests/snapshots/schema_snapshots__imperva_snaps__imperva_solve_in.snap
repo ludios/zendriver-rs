@@ -21,7 +21,7 @@ properties:
     default: 30000
     minimum: 0
   with_interception:
-    description: "Enable the Fetch-domain interception fast-path\n([`ImpervaBypass::with_interception`]) for quicker reese84 capture on\nmodern surfaces. Default `false`.\n\n[`ImpervaBypass::with_interception`]: zendriver_imperva::ImpervaBypass::with_interception"
+    description: "Also probe as soon as an Imperva sensor response arrives with a 2xx,\nrather than at the next poll ([`ImpervaBypass::with_interception`]),\nfor quicker reese84 capture. Watches network responses; pauses no\nrequest. Default `false`.\n\n[`ImpervaBypass::with_interception`]: zendriver_imperva::ImpervaBypass::with_interception"
     type: boolean
     default: false
 additionalProperties: false

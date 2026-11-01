@@ -1,6 +1,5 @@
 //! DataDome-bypass errors.
 
-use zendriver_interception::InterceptionError;
 use zendriver_transport::CallError;
 
 /// Error returned by [`DataDomeBypass`] operations. Faults only — flow
@@ -19,10 +18,6 @@ pub enum DataDomeError {
     /// User-supplied CAPTCHA solver returned an error.
     #[error("CAPTCHA solver failed: {0}")]
     CaptchaSolver(Box<dyn std::error::Error + Send + Sync>),
-
-    /// Fetch-domain interception hook failed at startup.
-    #[error("interception hook error: {0}")]
-    Interception(#[from] InterceptionError),
 
     /// CDP transport / call error.
     #[error("call failed: {0}")]
