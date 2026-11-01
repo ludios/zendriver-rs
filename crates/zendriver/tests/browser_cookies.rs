@@ -305,6 +305,30 @@ async fn delete_removes_secure_cookies_from_loopback_pages() {
     browser.close().await;
 }
 
+/// Cookies read with `all` can be set again with `set_many`, including a
+/// `Secure` cookie that a loopback page set over http (whose source scheme
+/// Chrome reports as `NonSecure`).
+#[tokio::test]
+async fn cookies_read_with_all_can_be_set_again() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    for (host, cookie) in [("a.test", "plain=1"), ("127.0.0.1", "loopback=2; secure")] {
+        load(&tab, &server.url(host, "/plain")).await;
+        eval(&tab, &format!("document.cookie = '{cookie}'")).await;
+    }
+    let jar = browser.cookies();
+    let saved = jar.all().await.expect("all");
+    jar.clear().await.expect("clear");
+    jar.set_many(saved.clone()).await.expect("set_many");
+    let restored = jar.all().await.expect("all");
+    assert_eq!(
+        names(restored.into_iter().map(|c| c.name)),
+        names(saved.into_iter().map(|c| c.name))
+    );
+    browser.close().await;
+}
+
 /// A tab in an isolated browser context: its jar reads, finds and deletes
 /// that context's cookies, and the browser's jar doesn't see them.
 #[tokio::test]

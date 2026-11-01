@@ -303,6 +303,15 @@ struct CdpCookie {
 
 impl From<Cookie> for CdpCookie {
     fn from(c: Cookie) -> Self {
+        // Chrome rejects a `Secure` cookie whose source scheme is
+        // `NonSecure`, as one that an `http` loopback page set is, so a
+        // cookie read from the jar couldn't be set again. Unless Chrome binds
+        // cookies to their scheme (by default it doesn't), the scheme isn't
+        // part of a cookie's identity, so leaving it out changes nothing
+        // else.
+        let source_scheme = c
+            .source_scheme
+            .filter(|scheme| !(c.secure && *scheme == CookieSourceScheme::NonSecure));
         Self {
             name: c.name,
             value: c.value,
@@ -315,7 +324,7 @@ impl From<Cookie> for CdpCookie {
             url: c.url,
             priority: c.priority,
             same_party: c.same_party,
-            source_scheme: c.source_scheme,
+            source_scheme,
             source_port: c.source_port,
             partition_key: c.partition_key,
         }
@@ -577,20 +586,9 @@ impl CookieJar {
                     && domain.is_none_or(|d| c.domain.trim_start_matches('.') == d)
                     && path.is_none_or(|p| c.path == p)
             })
-            .map(|c| {
-                let mut expired = CdpCookie {
-                    expires: Some(EXPIRED),
-                    ..c.into()
-                };
-                // Chrome rejects a `Secure` cookie whose source scheme is
-                // `NonSecure`, as one that an `http` loopback page set is.
-                // Unless Chrome binds cookies to their scheme (by default it
-                // doesn't), the scheme isn't part of a cookie's identity, so
-                // the copy without it still replaces the cookie.
-                if expired.secure && expired.source_scheme == Some(CookieSourceScheme::NonSecure) {
-                    expired.source_scheme = None;
-                }
-                expired
+            .map(|c| CdpCookie {
+                expires: Some(EXPIRED),
+                ..c.into()
             })
             .collect();
         if expired.is_empty() {
