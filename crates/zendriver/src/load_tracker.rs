@@ -13,7 +13,7 @@
 //! create it before the action that navigates.
 //!
 //! After lost events, the page's `document.readyState` says whether the
-//! frame is loading, but only once the load in progress has replaced the old
+//! frame is loading, but only after the load in progress has replaced the old
 //! document, which reads as complete. So a tracker whose own navigation
 //! hasn't stopped first asks Chrome whether the frame shows the
 //! navigation's [`Destination`], and a tracker that saw another load start
@@ -241,7 +241,8 @@ fn change_queued(changes: &mut Peekable<impl Stream<Item = Change> + Unpin>) -> 
 }
 
 /// Feed `changes` into `loading`, for the load `initial`. `destination` is
-/// where an `Initial::Navigating` navigation leads, once known.
+/// where an `Initial::Navigating` navigation leads, after its command has
+/// replied.
 async fn follow(
     changes: impl Stream<Item = Change> + Unpin,
     session: SessionHandle,
@@ -346,8 +347,8 @@ pub(crate) async fn next_stop(
 #[derive(Debug)]
 pub(crate) struct LoadTracker {
     loading: watch::Receiver<bool>,
-    /// Where the navigation leads, once known; only a tracker made by
-    /// [`LoadTracker::before_navigating`] reads it.
+    /// Where the navigation leads, after its command has replied; only a
+    /// tracker made by [`LoadTracker::before_navigating`] reads it.
     destination: watch::Sender<Option<Destination>>,
     task: JoinHandle<()>,
 }
@@ -374,7 +375,7 @@ impl LoadTracker {
 
     /// For a caller that is about to start a navigation of the main frame,
     /// whose id is `frame_id`, on `session`: loading until that navigation
-    /// has started and stopped. Call [`LoadTracker::heading_to`] once the
+    /// has started and stopped. Call [`LoadTracker::heading_to`] after the
     /// command that starts it has replied.
     pub(crate) fn before_navigating(session: &SessionHandle, frame_id: &str) -> Self {
         Self::start(session, frame_id, Initial::Navigating)
@@ -446,7 +447,7 @@ mod tests {
     }
 
     /// Emit frame `F`'s starts (`true`) and stops (`false`) on session `S1`,
-    /// and return once they are on the event bus, so a tracker gets them
+    /// and return after they are on the event bus, so a tracker gets them
     /// before anything that happens later. (A reconnect drops the frames the
     /// old socket hasn't delivered yet.)
     async fn emit_delivered(mock: &MockConnection, conn: &Connection, started: &[bool]) {
@@ -520,7 +521,7 @@ mod tests {
             } else {
                 let waiting = tokio::spawn(tracker.wait(LONG));
                 emit(&mock, false, "F", "S1").await;
-                waiting.await.unwrap().expect("loaded once it stopped");
+                waiting.await.unwrap().expect("loaded after it stopped");
             }
             conn.shutdown();
         }
@@ -553,7 +554,7 @@ mod tests {
             "the tracker probed the page after lost events"
         );
         emit(&mock, false, "F", "S1").await;
-        waiting.await.unwrap().expect("loaded once it stopped");
+        waiting.await.unwrap().expect("loaded after it stopped");
         conn.shutdown();
     }
 
@@ -658,7 +659,7 @@ mod tests {
         conn.shutdown();
     }
 
-    /// Once a load that the tracker didn't start has started, the page is
+    /// After a load that the tracker didn't start has started, the page is
     /// the old document until the new one commits, so after lost events the
     /// tracker doesn't ask the page: it waits for the next stop. Such a load
     /// starts after the tracker's own load stopped (or was found loaded), or
@@ -708,7 +709,7 @@ mod tests {
             let probe = mock.recv_cmd_timeout(SHORT).await;
             assert_eq!(probe, None, "{case}");
             emit(&mock, false, "F", "S1").await;
-            waiting.await.unwrap().expect("loaded once it stopped");
+            waiting.await.unwrap().expect("loaded after it stopped");
             conn.shutdown();
         }
     }
@@ -739,7 +740,7 @@ mod tests {
         conn.shutdown();
     }
 
-    /// Once its first navigation has stopped, a new tab's question (has the
+    /// After its first navigation has stopped, a new tab's question (has the
     /// page left about:blank?) no longer applies: after lost events its
     /// tracker asks for the `readyState`.
     #[tokio::test]

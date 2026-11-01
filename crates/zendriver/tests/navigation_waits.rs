@@ -257,10 +257,10 @@ async fn reload_then_wait_for_load_waits_for_the_page() {
     browser.close().await;
 }
 
-/// `reload` of a tab whose renderer crashed returns at once: it needs only
-/// the browser process, which handles `Page.reload`. (Whether Chrome then
-/// recovers the tab varies, and the tab's session answers no renderer
-/// command after the crash, even after a reload; see TODO.md.)
+/// `reload` of a tab whose renderer crashed doesn't wait for the renderer:
+/// it needs only the browser process, which handles `Page.reload`. (Whether
+/// Chrome then recovers the tab varies, and the tab's session answers no
+/// renderer command after the crash, even after a reload; see TODO.md.)
 #[tokio::test]
 async fn reload_of_a_crashed_tab_needs_no_renderer() {
     let server = FixtureServer::start().await;

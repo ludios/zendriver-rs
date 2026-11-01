@@ -843,7 +843,7 @@ impl Tab {
     /// that context's cookies, which are separate from the default
     /// context's; otherwise the same store as [`crate::Browser::cookies`].
     ///
-    /// Chrome takes a context id only on the browser target, so once the
+    /// Chrome takes a context id only on the browser target, so after the
     /// [`crate::Browser`] is gone, the jar of a tab in an isolated context
     /// that has its own page connection fails every call rather than reach
     /// another context's cookies.
@@ -3933,7 +3933,7 @@ mod tests {
     /// [`Tab::cookies`] writes into the tab's own `BrowserContext`: the
     /// command goes to the browser target (no `sessionId`, which would make
     /// Chrome use the default context) and names the tab's context, also
-    /// once the Browser is gone: the tab's context may outlive it (one that
+    /// after the Browser is gone: the tab's context may outlive it (one that
     /// zendriver didn't create), and naming it makes a page connection fail
     /// rather than reach the default context.
     #[tokio::test]

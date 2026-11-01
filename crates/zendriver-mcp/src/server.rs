@@ -1271,7 +1271,7 @@ mod tests {
         assert!(state.lock().await.browser.is_none());
     }
 
-    /// Once the session is shut down, `browser_open` refuses rather than
+    /// After the session is shut down, `browser_open` refuses rather than
     /// open a browser that nothing would close.
     #[tokio::test]
     async fn browser_open_refuses_after_the_shutdown() {
