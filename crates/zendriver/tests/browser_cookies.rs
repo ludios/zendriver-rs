@@ -6,7 +6,7 @@
 
 use serde_json::json;
 use url::Url;
-use zendriver::{Browser, Cookie, CookieJar, Tab};
+use zendriver::{Browser, Cookie, CookieJar, CookiePartitionKey, Tab};
 use zendriver_testkit::{FixtureServer, SITE_B, TestBrowser, eval, launch_for_test, load};
 
 /// The cookie each test sets, on 127.0.0.1.
@@ -74,6 +74,8 @@ const VARIED_COOKIES: &[(&str, &str)] = &[
     ("a.test", "deep_slash=1; path=/plain/"),
     ("sub.a.test", "sub_only=1"),
     ("127.0.0.1", "loopback_secure=1; secure"),
+    ("localhost", "localhost_secure=1; secure"),
+    ("localhost.", "dotted_localhost_secure=1; secure"),
 ];
 
 /// The names of `cookies`, sorted.
@@ -81,6 +83,17 @@ fn names(cookies: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut names: Vec<String> = cookies.into_iter().collect();
     names.sort();
     names
+}
+
+/// The names of the cookies in `Network.getCookies`'s reply `reply`.
+fn reply_names(reply: &serde_json::Value) -> Vec<String> {
+    names(
+        reply["cookies"]
+            .as_array()
+            .expect("a cookies array")
+            .iter()
+            .map(|c| c["name"].as_str().expect("a name").to_string()),
+    )
 }
 
 /// `for_url` filters every cookie by RFC 6265's rules itself; Chrome's own
@@ -105,11 +118,25 @@ async fn for_url_agrees_with_chrome() {
         "the cookies set"
     );
 
+    let hosts = [
+        "a.test",
+        "sub.a.test",
+        "x.sub.a.test",
+        SITE_B,
+        "127.0.0.1",
+        "localhost",
+        "localhost.",
+    ];
     let mut disagreements = Vec::new();
-    for scheme in ["http", "https"] {
-        for host in ["a.test", "sub.a.test", "x.sub.a.test", SITE_B, "127.0.0.1"] {
+    for scheme in ["http", "https", "ws", "wss", "ftp", "file"] {
+        for host in hosts {
             for path in ["/", "/plain", "/plain/x", "/plainer"] {
-                let url = format!("{scheme}://{host}:{}{path}", server.port());
+                let url = if scheme == "file" {
+                    // A file URL has no port.
+                    format!("file://{host}{path}")
+                } else {
+                    format!("{scheme}://{host}:{}{path}", server.port())
+                };
                 let ours = browser
                     .cookies()
                     .for_url(&Url::parse(&url).expect("URL"))
@@ -121,13 +148,7 @@ async fn for_url_agrees_with_chrome() {
                     .call("Network.getCookies", json!({ "urls": [url] }))
                     .await
                     .expect("Network.getCookies");
-                let chromes = names(
-                    chromes["cookies"]
-                        .as_array()
-                        .expect("a cookies array")
-                        .iter()
-                        .map(|c| c["name"].as_str().expect("a name").to_string()),
-                );
+                let chromes = reply_names(&chromes);
                 if ours != chromes {
                     disagreements.push(format!("{url}: ours {ours:?}, Chrome's {chromes:?}"));
                 }
@@ -139,6 +160,54 @@ async fn for_url_agrees_with_chrome() {
         "for_url disagrees with Chrome:\n  {}",
         disagreements.join("\n  ")
     );
+    browser.close().await;
+}
+
+/// Of the partitioned cookies, `for_url` returns those that a page at the
+/// URL sends: the ones partitioned under the URL's own site, set with no
+/// cross-site ancestor. `Network.getCookies` answers for the page the tab
+/// shows, so the tab shows the URL.
+#[tokio::test]
+async fn for_url_returns_only_the_urls_own_partition() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    let jar = browser.cookies();
+    let partitions = [
+        ("unpartitioned", None),
+        ("own", Some(("http://127.0.0.1", false))),
+        ("own_embedded", Some(("http://127.0.0.1", true))),
+        ("other_site", Some(("http://a.test", true))),
+    ];
+    for (name, partition) in partitions {
+        let partition_key = partition.map(|(site, cross)| CookiePartitionKey {
+            top_level_site: site.into(),
+            has_cross_site_ancestor: cross,
+        });
+        let cookie = Cookie {
+            name: name.into(),
+            value: "1".into(),
+            domain: "127.0.0.1".into(),
+            path: "/".into(),
+            secure: true,
+            partition_key,
+            ..Default::default()
+        };
+        jar.set(cookie).await.expect("set");
+    }
+    assert_eq!(jar.all().await.expect("all").len(), partitions.len());
+
+    let url = server.url("127.0.0.1", "/plain");
+    load(&tab, &url).await;
+    let ours = jar.for_url(&Url::parse(&url).expect("URL")).await;
+    let ours = names(ours.expect("for_url").into_iter().map(|c| c.name));
+    let chromes = tab
+        .session()
+        .call("Network.getCookies", json!({ "urls": [url] }))
+        .await
+        .expect("Network.getCookies");
+    assert_eq!(reply_names(&chromes), ["own", "unpartitioned"], "Chrome's");
+    assert_eq!(ours, ["own", "unpartitioned"], "ours");
     browser.close().await;
 }
 

@@ -195,21 +195,48 @@ pub struct Cookie {
     pub partition_key: Option<CookiePartitionKey>,
 }
 
+/// Whether `host` is `domain` or one of its subdomains. Both lowercase.
+fn is_at_or_under(host: &str, domain: &str) -> bool {
+    host == domain
+        || host
+            .strip_suffix(domain)
+            .is_some_and(|sub| sub.ends_with('.'))
+}
+
+/// Whether Chrome sends `Secure` cookies to `url`: a secure scheme, or a
+/// loopback host (a `localhost` name may end in a dot).
+fn is_secure(url: &url::Url) -> bool {
+    if matches!(url.scheme(), "https" | "wss") {
+        return true;
+    }
+    match url.host() {
+        Some(url::Host::Domain(d)) => {
+            let d = d.strip_suffix('.').unwrap_or(d);
+            d == "localhost" || d.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
 impl Cookie {
-    /// Whether a request to `url` would carry this cookie, by the rules
+    /// Whether a top-level page at `url` sends this cookie, by the rules
     /// that [`CookieJar::for_url`] lists.
     fn matches_url(&self, url: &url::Url) -> bool {
+        // Chrome's cookieable schemes. A WebSocket URL's site is its http
+        // counterpart's.
+        let site_scheme = match url.scheme() {
+            "http" | "ws" => "http",
+            "https" | "wss" => "https",
+            _ => return false,
+        };
         let Some(host) = url.host_str() else {
             return false;
         };
         let domain = self.domain.to_ascii_lowercase();
         let domain_matches = match domain.strip_prefix('.') {
-            Some(parent) => {
-                host == parent
-                    || host
-                        .strip_suffix(parent)
-                        .is_some_and(|sub| sub.ends_with('.'))
-            }
+            Some(parent) => is_at_or_under(host, parent),
             None => host == domain,
         };
         let request_path = url.path();
@@ -217,21 +244,17 @@ impl Cookie {
             || request_path
                 .strip_prefix(self.path.as_str())
                 .is_some_and(|rest| self.path.ends_with('/') || rest.starts_with('/'));
-        domain_matches && path_matches && (!self.secure || is_secure(url))
-    }
-}
-
-/// Whether Chrome sends `Secure` cookies to `url`: a secure scheme, or a
-/// loopback host.
-fn is_secure(url: &url::Url) -> bool {
-    if matches!(url.scheme(), "https" | "wss") {
-        return true;
-    }
-    match url.host() {
-        Some(url::Host::Domain(d)) => d == "localhost" || d.ends_with(".localhost"),
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
+        // A partition's top-level site is a scheme and a registrable domain,
+        // so the URL is on that site iff its host is at or under the domain.
+        let partition_matches = self.partition_key.as_ref().is_none_or(|key| {
+            let site = url::Url::parse(&key.top_level_site).ok();
+            !key.has_cross_site_ancestor
+                && site.as_ref().is_some_and(|site| {
+                    site.scheme() == site_scheme
+                        && site.host_str().is_some_and(|d| is_at_or_under(host, d))
+                })
+        });
+        domain_matches && path_matches && partition_matches && (!self.secure || is_secure(url))
     }
 }
 
@@ -405,24 +428,31 @@ impl CookieJar {
         parse_cookies(&resp)
     }
 
-    /// Return the cookies that a request to `url` would carry.
+    /// Return the cookies that a top-level page at `url` (for example, a
+    /// tab navigated to it) would send with a request to `url`.
     ///
     /// Reads every cookie with `Storage.getCookies` and keeps those whose
     /// domain, path and `Secure` flag match `url` by RFC 6265's rules
-    /// (section 5.4):
+    /// (section 5.4), and whose partition matches, as Chrome does:
     ///
+    /// - Scheme: only `http`, `https`, `ws` and `wss` URLs get cookies.
     /// - Domain: a cookie whose domain starts with a dot matches that
     ///   domain and its subdomains; any other matches exactly that host.
     /// - Path: the URL's path is the cookie's path, or below it.
     /// - `Secure`: only for a secure URL: `https`, `wss`, or a loopback
-    ///   host (`localhost`, `*.localhost`, `127.0.0.0/8`, `[::1]`), which
-    ///   Chrome treats as secure.
+    ///   host (`localhost`, `*.localhost`, either with a trailing dot,
+    ///   `127.0.0.0/8`, `[::1]`), which Chrome treats as secure.
+    /// - Partition: an unpartitioned cookie, or one partitioned under the
+    ///   URL's own site (its scheme, with `ws` as `http` and `wss` as
+    ///   `https`, and its registrable domain) and set with no cross-site
+    ///   ancestor. Cookies that an embedded page on another site would send
+    ///   aren't returned.
     ///
-    /// `SameSite` and the partition key are ignored: they depend on the
-    /// page making the request. Chrome's own `Network.getCookies` isn't
-    /// used because the browser target has no `Network` domain. Accepting
-    /// a parsed [`url::Url`] surfaces malformed-URL errors at construction
-    /// time instead of as a confusing empty result.
+    /// `SameSite` is ignored: it depends on the page making the request.
+    /// Chrome's own `Network.getCookies` isn't used because the browser
+    /// target has no `Network` domain. Accepting a parsed [`url::Url`]
+    /// surfaces malformed-URL errors at construction time instead of as a
+    /// confusing empty result.
     ///
     /// # Examples
     ///
@@ -904,11 +934,59 @@ mod tests {
         assert!(matches(&secure, "https://example.com/"));
         assert!(matches(&secure, "wss://example.com/"));
         assert!(!matches(&secure, "http://example.com/"));
-        for loopback in ["http://localhost/", "http://127.0.0.2/", "http://[::1]/"] {
+        for loopback in [
+            "http://localhost/",
+            "http://localhost./",
+            "http://a.localhost./",
+            "http://127.0.0.2/",
+            "http://[::1]/",
+        ] {
             let host = url::Url::parse(loopback).unwrap();
             let c = cookie(host.host_str().unwrap(), "/", true);
             assert!(c.matches_url(&host), "{loopback}");
         }
+    }
+
+    /// Only Chrome's cookieable schemes get cookies.
+    #[test]
+    fn matches_url_by_scheme() {
+        let c = cookie("example.com", "/", false);
+        for url in ["http", "https", "ws", "wss"].map(|s| format!("{s}://example.com/")) {
+            assert!(matches(&c, &url), "{url}");
+        }
+        for url in ["ftp://example.com/", "file://example.com/"] {
+            assert!(!matches(&c, url), "{url}");
+        }
+    }
+
+    /// A partitioned cookie matches a URL on its partition's top-level site
+    /// (WebSocket schemes count as http ones), set with no cross-site
+    /// ancestor.
+    #[test]
+    fn matches_url_by_partition() {
+        let partitioned = |site: &str, cross: bool| Cookie {
+            partition_key: Some(CookiePartitionKey {
+                top_level_site: site.into(),
+                has_cross_site_ancestor: cross,
+            }),
+            ..cookie(".example.com", "/", true)
+        };
+        let own = partitioned("https://example.com", false);
+        assert!(matches(&own, "https://example.com/"));
+        assert!(matches(&own, "https://a.example.com/"));
+        assert!(matches(&own, "wss://example.com/"));
+        assert!(!matches(
+            &partitioned("https://example.com", true),
+            "https://example.com/"
+        ));
+        assert!(!matches(
+            &partitioned("https://other.com", false),
+            "https://example.com/"
+        ));
+        assert!(!matches(
+            &partitioned("http://example.com", false),
+            "https://example.com/"
+        ));
     }
 
     /// A [`Cookie`] carrying the CHIPS / priority extension fields must
