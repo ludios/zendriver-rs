@@ -1071,3 +1071,12 @@ excluded = "geometry carried by ClickTarget into the on_click callback; callback
 [[entry]]
 api = "zendriver::CloudflareBypass::on_click"
 excluded = "callback API; no request/response tool shape"
+
+# ── connect endpoint errors (2026-11-01) ────────────────────────────────────
+[[entry]]
+api = "zendriver::error::BrowserError::ConnectEndpoint"
+excluded = "error variant, not an operation; only Browser::connect / BrowserBuilder::connect return it, and zendriver-mcp always launches its own Chrome (no connect tool)"
+
+[[entry]]
+api = "zendriver::BrowserError::ConnectEndpoint"
+excluded = "crate-root re-export of the above variant; same connect-only failure surface"

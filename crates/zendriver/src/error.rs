@@ -397,14 +397,24 @@ pub enum BrowserError {
     #[error("timed out during chrome CDP handshake")]
     HandshakeTimeout,
 
-    /// Chrome's DevTools WebSocket URL couldn't be found: in Chrome's stderr
-    /// at launch, or from the endpoint given to `connect` (which must be
-    /// `ws://`, `wss://` or `http://`).
-    #[error(
-        "could not get Chrome's DevTools WebSocket URL, from its stderr or from the endpoint \
-         given to connect"
-    )]
+    /// Chrome's DevTools WebSocket URL couldn't be found in Chrome's stderr
+    /// at launch.
+    #[error("could not get Chrome's DevTools WebSocket URL from its stderr")]
     DevtoolsParse,
+
+    /// [`crate::BrowserBuilder::connect`] got no browser WebSocket URL from
+    /// its endpoint: the endpoint isn't a `ws://`, `wss://` or `http://`
+    /// URL, or, for `http://`, connecting failed, or the reply to
+    /// `GET /json/version` wasn't a `200` with a `webSocketDebuggerUrl` in
+    /// its JSON body.
+    #[error("could not get a DevTools WebSocket URL from {endpoint}: {reason}")]
+    ConnectEndpoint {
+        /// The endpoint given to `connect`.
+        endpoint: String,
+        /// What went wrong, with the reply's status line and the start of
+        /// its body when there was a reply.
+        reason: String,
+    },
 
     /// `tempfile` cleanup of the `user_data_dir` failed.
     #[error("failed to clean user_data_dir: {0}")]

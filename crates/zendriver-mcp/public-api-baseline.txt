@@ -968,6 +968,9 @@ pub fn zendriver::element::Element::vzip(self) -> V
 pub mod zendriver::error
 #[non_exhaustive] pub enum zendriver::error::BrowserError
 pub zendriver::error::BrowserError::Cleanup(std::io::error::Error)
+pub zendriver::error::BrowserError::ConnectEndpoint
+pub zendriver::error::BrowserError::ConnectEndpoint::endpoint: alloc::string::String
+pub zendriver::error::BrowserError::ConnectEndpoint::reason: alloc::string::String
 pub zendriver::error::BrowserError::DevtoolsParse
 pub zendriver::error::BrowserError::EarlyExit(std::process::ExitStatus)
 pub zendriver::error::BrowserError::ExecutableNotFound
@@ -4833,6 +4836,9 @@ impl<V, T> ppv_lite86::types::VZip<V> for zendriver::query::role::AriaRole where
 pub fn zendriver::query::role::AriaRole::vzip(self) -> V
 #[non_exhaustive] pub enum zendriver::BrowserError
 pub zendriver::BrowserError::Cleanup(std::io::error::Error)
+pub zendriver::BrowserError::ConnectEndpoint
+pub zendriver::BrowserError::ConnectEndpoint::endpoint: alloc::string::String
+pub zendriver::BrowserError::ConnectEndpoint::reason: alloc::string::String
 pub zendriver::BrowserError::DevtoolsParse
 pub zendriver::BrowserError::EarlyExit(std::process::ExitStatus)
 pub zendriver::BrowserError::ExecutableNotFound

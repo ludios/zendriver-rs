@@ -3202,8 +3202,73 @@ fn complete_body(buf: &[u8]) -> Option<Vec<u8>> {
     body.get(..len).map(<[u8]>::to_vec)
 }
 
-/// Resolve a `webSocketDebuggerUrl` from a DevTools HTTP base by issuing a
-/// minimal `GET {endpoint}/json/version` over a raw [`tokio::net::TcpStream`].
+/// A [`BrowserError::ConnectEndpoint`] for `endpoint`, saying `reason`.
+fn endpoint_error(endpoint: &str, reason: impl Into<String>) -> ZendriverError {
+    BrowserError::ConnectEndpoint {
+        endpoint: endpoint.to_string(),
+        reason: reason.into(),
+    }
+    .into()
+}
+
+/// At most the first 200 characters of `text`, for an error message.
+fn excerpt(text: &str) -> String {
+    const MAX: usize = 200;
+    let text = text.trim();
+    match text.char_indices().nth(MAX) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
+    }
+}
+
+/// The `webSocketDebuggerUrl` in `raw`, the whole HTTP/1.x reply to
+/// `GET /json/version` (as much of it as arrived before the connection
+/// closed, or until its body was complete).
+///
+/// # Errors
+///
+/// Why there is none, to put in a [`BrowserError::ConnectEndpoint`]: the
+/// headers never ended, the status isn't `200`, or the body isn't JSON with
+/// a string `webSocketDebuggerUrl`.
+fn parse_ws_from_json_version(raw: &[u8]) -> Result<String, String> {
+    let Some(head_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+        let reply = String::from_utf8_lossy(raw);
+        return Err(format!(
+            "the reply to GET /json/version ended before its headers did: {}",
+            excerpt(&reply)
+        ));
+    };
+    let head = String::from_utf8_lossy(&raw[..head_end]);
+    let status = head.lines().next().unwrap_or_default();
+    // Without a `Content-Length` or chunks, the body ended at the close.
+    let body = complete_body(raw).unwrap_or_else(|| raw[head_end + 4..].to_vec());
+    let body = String::from_utf8_lossy(&body);
+    if status.split_whitespace().nth(1) != Some("200") {
+        return Err(format!(
+            "GET /json/version got `{status}`: {}",
+            excerpt(&body)
+        ));
+    }
+    let json: serde_json::Value = serde_json::from_str(body.trim()).map_err(|e| {
+        format!(
+            "the reply to GET /json/version isn't JSON ({e}): {}",
+            excerpt(&body)
+        )
+    })?;
+    json["webSocketDebuggerUrl"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "the reply to GET /json/version has no webSocketDebuggerUrl string: {}",
+                excerpt(&body)
+            )
+        })
+}
+
+/// Resolve a `webSocketDebuggerUrl` from a DevTools HTTP base `url` (the
+/// parsed `endpoint`, whose scheme is `http`) by issuing a minimal
+/// `GET /json/version` over a raw [`tokio::net::TcpStream`].
 ///
 /// Hand-rolled (HTTP/1.1, read headers then the body they delimit, parse the
 /// JSON body) so the always-on dependency set does not grow an HTTP client —
@@ -3214,45 +3279,40 @@ fn complete_body(buf: &[u8]) -> Option<Vec<u8>> {
 /// Chrome's DevTools HTTP server never answers HTTP/1.0, and keeps an
 /// HTTP/1.1 connection open after the response whatever `Connection` says,
 /// so the body is delimited by its `Content-Length` (or, through a proxy,
-/// its chunks), not by the close. It speaks plain HTTP only, so `https://`
-/// is rejected. It refuses a `Host` that isn't an IP address or
-/// `localhost`, so for any other host name the request names the address
-/// dialled instead.
+/// its chunks), not by the close. It refuses a `Host` that isn't an IP
+/// address or `localhost`, so for any other host name the request names the
+/// address dialled instead.
 ///
 /// # Errors
 ///
-/// Returns [`BrowserError::DevtoolsParse`] when the endpoint isn't an
-/// `http://` URL with a host, the response has no body, or the JSON lacks a
-/// string `webSocketDebuggerUrl`; [`BrowserError::SpawnFailed`] when the TCP
-/// round-trip fails; [`BrowserError::WsTimeout`] when it takes longer than
-/// [`JSON_VERSION_TIMEOUT`].
-pub(crate) async fn resolve_ws_from_http(endpoint: &str) -> Result<String, ZendriverError> {
+/// [`BrowserError::ConnectEndpoint`] when `url` has no host, the TCP
+/// round-trip fails, or the reply has no `webSocketDebuggerUrl` (see
+/// [`parse_ws_from_json_version`]); [`BrowserError::WsTimeout`] when it
+/// takes longer than [`JSON_VERSION_TIMEOUT`].
+async fn resolve_ws_from_http(endpoint: &str, url: &url::Url) -> Result<String, ZendriverError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
-    let url = url::Url::parse(endpoint).map_err(|_| BrowserError::DevtoolsParse)?;
-    if url.scheme() != "http" {
-        return Err(BrowserError::DevtoolsParse.into());
-    }
     // The address to dial: an IPv6 host without the brackets the URL has.
     let host = match url.host() {
         Some(url::Host::Domain(domain)) => domain.to_string(),
         Some(url::Host::Ipv4(ip)) => ip.to_string(),
         Some(url::Host::Ipv6(ip)) => ip.to_string(),
-        None => return Err(BrowserError::DevtoolsParse.into()),
+        None => return Err(endpoint_error(endpoint, "it has no host")),
     };
     let port = url.port_or_known_default().unwrap_or(80);
     // The `Host` header as the URL spells it, brackets included.
     let authority = &url[url::Position::BeforeHost..url::Position::AfterPort];
+    let failed = |what: &str, e: std::io::Error| endpoint_error(endpoint, format!("{what}: {e}"));
 
     let response = timeout(JSON_VERSION_TIMEOUT, async {
         let mut stream = TcpStream::connect((host.as_str(), port))
             .await
-            .map_err(BrowserError::SpawnFailed)?;
+            .map_err(|e| failed(&format!("connecting to port {port} of {host} failed"), e))?;
         let host_header = match url.host() {
             Some(url::Host::Domain(domain)) if !domain.eq_ignore_ascii_case("localhost") => stream
                 .peer_addr()
-                .map_err(BrowserError::SpawnFailed)?
+                .map_err(|e| failed("reading the dialled address failed", e))?
                 .to_string(),
             _ => authority.to_string(),
         };
@@ -3262,54 +3322,51 @@ pub(crate) async fn resolve_ws_from_http(endpoint: &str) -> Result<String, Zendr
         stream
             .write_all(req.as_bytes())
             .await
-            .map_err(BrowserError::SpawnFailed)?;
+            .map_err(|e| failed("sending GET /json/version failed", e))?;
         let mut buf = Vec::new();
         let mut chunk = [0u8; 4096];
-        loop {
-            if let Some(body) = complete_body(&buf) {
-                return Ok::<Vec<u8>, ZendriverError>(body);
-            }
+        while complete_body(&buf).is_none() {
             let n = stream
                 .read(&mut chunk)
                 .await
-                .map_err(BrowserError::SpawnFailed)?;
+                .map_err(|e| failed("reading the reply to GET /json/version failed", e))?;
             if n == 0 {
-                return Ok(buf);
+                break;
             }
             buf.extend_from_slice(&chunk[..n]);
         }
+        Ok::<Vec<u8>, ZendriverError>(buf)
     })
     .await
     .map_err(|_| BrowserError::WsTimeout)??;
 
-    parse_ws_from_json_version(&response)
+    parse_ws_from_json_version(&response).map_err(|reason| endpoint_error(endpoint, reason))
 }
 
-/// Split an HTTP/1.x response into its body and parse the
-/// `webSocketDebuggerUrl` field from the JSON.
+/// The browser WebSocket URL that `connect`'s `endpoint` names: a `ws://`
+/// or `wss://` endpoint is one, and an `http://` one is asked for it
+/// ([`resolve_ws_from_http`]). The scheme is matched in any case.
 ///
-/// Factored out of [`resolve_ws_from_http`] so the parse — the part most worth
-/// asserting — is unit-testable without a socket. Splits on the first
-/// `\r\n\r\n` (header/body boundary); if absent, treats the whole buffer as the
-/// JSON body (lenient toward bodies returned without standard headers in
-/// tests).
-pub(crate) fn parse_ws_from_json_version(raw: &[u8]) -> Result<String, ZendriverError> {
-    let text = String::from_utf8_lossy(raw);
-    // Header/body split on the blank line; fall back to the whole buffer.
-    let body = text
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b)
-        .unwrap_or(&text)
-        .trim();
-    if body.is_empty() {
-        return Err(BrowserError::DevtoolsParse.into());
+/// # Errors
+///
+/// [`BrowserError::ConnectEndpoint`] when `endpoint` isn't a URL or has
+/// another scheme (`https` included: Chrome's DevTools HTTP server has no
+/// TLS), and what [`resolve_ws_from_http`] returns.
+pub(crate) async fn resolve_ws_url(endpoint: &str) -> Result<String, ZendriverError> {
+    let url = url::Url::parse(endpoint)
+        .map_err(|e| endpoint_error(endpoint, format!("it isn't a URL ({e})")))?;
+    match url.scheme() {
+        "ws" | "wss" => Ok(url.into()),
+        "http" => resolve_ws_from_http(endpoint, &url).await,
+        "https" => Err(endpoint_error(
+            endpoint,
+            "Chrome's DevTools HTTP server has no TLS, so use http://",
+        )),
+        other => Err(endpoint_error(
+            endpoint,
+            format!("its scheme is {other}; connect takes ws, wss or http"),
+        )),
     }
-    let parsed: serde_json::Value =
-        serde_json::from_str(body).map_err(|_| BrowserError::DevtoolsParse)?;
-    parsed["webSocketDebuggerUrl"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| BrowserError::DevtoolsParse.into())
 }
 
 /// Resolve every entry in `extensions` to an unpacked-extension *directory*,
@@ -3856,8 +3913,12 @@ impl BrowserBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`ZendriverError::Browser`] when an `http://` endpoint
-    /// cannot be resolved to a `webSocketDebuggerUrl`, and
+    /// Returns [`BrowserError::ConnectEndpoint`] (in
+    /// [`ZendriverError::Browser`]) when `endpoint` isn't a `ws://`,
+    /// `wss://` or `http://` URL, or an `http://` endpoint's
+    /// `/json/version` gives no `webSocketDebuggerUrl` (the error says why,
+    /// with the reply's status and the start of its body);
+    /// [`BrowserError::WsTimeout`] when that reply takes too long; and
     /// [`ZendriverError::Transport`] when the WebSocket attach fails.
     ///
     /// # Examples
@@ -3879,14 +3940,7 @@ impl BrowserBuilder {
     pub async fn connect(mut self, endpoint: impl Into<String>) -> Result<Browser, ZendriverError> {
         let endpoint = endpoint.into();
 
-        // Resolve the browser WebSocket URL from the endpoint scheme.
-        let ws_url = if endpoint.starts_with("ws://") || endpoint.starts_with("wss://") {
-            endpoint
-        } else if endpoint.starts_with("http://") {
-            resolve_ws_from_http(&endpoint).await?
-        } else {
-            return Err(BrowserError::DevtoolsParse.into());
-        };
+        let ws_url = resolve_ws_url(&endpoint).await?;
 
         // Resolve the geo-derived locale overlay (same as `launch`) before
         // `resolved_persona()` below reads `persona_overlay`.
@@ -7310,18 +7364,19 @@ mod tests {
     }
 
     /// The HTTP lookup sends HTTP/1.1, reads the body by its length (not to
-    /// the close), and dials an IPv6 host without its brackets.
+    /// the close), and dials an IPv6 host without its brackets. The scheme
+    /// may be in any case.
     #[tokio::test]
-    async fn resolve_ws_from_http_reads_a_kept_open_http_1_1_response() {
+    async fn resolve_ws_url_reads_a_kept_open_http_1_1_response() {
         // Skipped where the host has no IPv6 loopback.
         for (bind, host) in [("127.0.0.1:0", "127.0.0.1"), ("[::1]:0", "[::1]")] {
             let Some((addr, request, server)) = serve_like_chrome(bind).await else {
                 continue;
             };
-            let endpoint = format!("http://{host}:{}", addr.port());
-            let ws = tokio::time::timeout(Duration::from_secs(5), resolve_ws_from_http(&endpoint))
+            let endpoint = format!("HTTP://{host}:{}", addr.port());
+            let ws = tokio::time::timeout(Duration::from_secs(5), resolve_ws_url(&endpoint))
                 .await
-                .expect("resolve_ws_from_http waited for the close")
+                .expect("resolve_ws_url waited for the close")
                 .unwrap();
             assert_eq!(ws, "ws://host/devtools/browser/x");
             let request = request.await.unwrap();
@@ -7334,45 +7389,68 @@ mod tests {
         }
     }
 
-    /// `https://` (Chrome's DevTools server has no TLS) and endpoints that
-    /// aren't URLs are rejected before any dial.
+    /// A `ws://` or `wss://` endpoint, in any case, is the WebSocket URL;
+    /// `https://` (Chrome's DevTools server has no TLS), other schemes and
+    /// endpoints that aren't URLs are rejected before any dial, naming the
+    /// endpoint.
     #[tokio::test]
-    async fn resolve_ws_from_http_rejects_https_and_non_urls() {
-        for endpoint in ["https://127.0.0.1:9222", "http://", "127.0.0.1:9222"] {
-            let res = resolve_ws_from_http(endpoint).await;
-            assert!(
-                matches!(
-                    res,
-                    Err(ZendriverError::Browser(BrowserError::DevtoolsParse))
-                ),
-                "{endpoint}: {res:?}"
-            );
+    async fn resolve_ws_url_takes_ws_and_rejects_other_schemes() {
+        let ws = "ws://127.0.0.1:9222/devtools/browser/abc";
+        assert_eq!(resolve_ws_url(ws).await.unwrap(), ws);
+        let upper = "WSS://127.0.0.1:9222/devtools/browser/abc";
+        let wss = "wss://127.0.0.1:9222/devtools/browser/abc";
+        assert_eq!(resolve_ws_url(upper).await.unwrap(), wss);
+        for given in [
+            "https://127.0.0.1:9222",
+            "ftp://127.0.0.1:9222",
+            "http://",
+            "127.0.0.1:9222",
+        ] {
+            match resolve_ws_url(given).await {
+                Err(ZendriverError::Browser(BrowserError::ConnectEndpoint {
+                    endpoint, ..
+                })) => {
+                    assert_eq!(endpoint, given);
+                }
+                other => panic!("{given}: {other:?}"),
+            }
         }
     }
 
-    /// Unit-test the `/json/version` body parse used by the `http://`
-    /// connect path: a `webSocketDebuggerUrl` string is extracted, with and
-    /// without a leading HTTP/1.x header block.
+    /// The reply to `GET /json/version` gives its `webSocketDebuggerUrl`;
+    /// otherwise the error says why, with the status and the body.
     #[test]
-    fn resolve_ws_from_http_parses_web_socket_debugger_url() {
+    fn parse_ws_from_json_version_reads_the_url_or_says_why_not() {
         let ws = "ws://127.0.0.1:9222/devtools/browser/abc";
-
-        // Bare JSON body (header/body split absent → whole buffer is JSON).
-        let body = format!("{{\"webSocketDebuggerUrl\":\"{ws}\"}}");
-        assert_eq!(parse_ws_from_json_version(body.as_bytes()).unwrap(), ws);
-
-        // Full HTTP/1.1 response — header block must be stripped first.
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"Browser\":\"Chrome/120.0.0.0\",\"webSocketDebuggerUrl\":\"{ws}\"}}"
         );
         assert_eq!(parse_ws_from_json_version(resp.as_bytes()).unwrap(), ws);
 
-        // Missing field → DevtoolsParse.
-        let bad = b"HTTP/1.1 200 OK\r\n\r\n{\"Browser\":\"Chrome/120\"}";
-        assert!(matches!(
-            parse_ws_from_json_version(bad),
-            Err(ZendriverError::Browser(BrowserError::DevtoolsParse))
-        ));
+        let cases: [(&[u8], &[&str]); 4] = [
+            (
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nnot thereEXTRA",
+                &["`HTTP/1.1 404 Not Found`", ": not there"],
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\n\r\n{\"Browser\":\"Chrome/120\"}",
+                &["no webSocketDebuggerUrl", "Chrome/120"],
+            ),
+            (b"HTTP/1.1 200 OK\r\n\r\n<html>", &["isn't JSON", "<html>"]),
+            (
+                b"HTTP/1.1 200 OK\r\nContent-",
+                &["ended before its headers"],
+            ),
+        ];
+        for (reply, wants) in cases {
+            let why = parse_ws_from_json_version(reply).unwrap_err();
+            for want in wants {
+                assert!(why.contains(want), "{why:?} lacks {want:?}");
+            }
+        }
+        let long = format!("HTTP/1.1 500 Oops\r\n\r\n{}", "x".repeat(1000));
+        let why = parse_ws_from_json_version(long.as_bytes()).unwrap_err();
+        assert!(why.ends_with(&format!("{}…", "x".repeat(200))), "{why}");
     }
 
     /// The `connect` post-connect handshake (`finish_connect`) drives the same
