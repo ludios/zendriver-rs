@@ -110,6 +110,16 @@ When there are multiple good ways to implement something, especially involving s
 
 Fork of [TurtIeSocks/zendriver-rs](https://github.com/TurtIeSocks/zendriver-rs): async Chrome automation over the DevTools Protocol, plus stealth / WAF-bypass crates and an MCP server. Upstream's CLAUDE.md has the workspace layout and what upstream expects of a public API change (MCP coverage ledger, schema snapshots, docs sync); read it.
 
+To see how Chrome itself implements a CDP command or event, read the Chromium source checkout at `~/cloned/chromium-src` (its version is in `chrome/VERSION`). The CDP code is in these directories under it:
+
+- `third_party/blink/public/devtools_protocol/domains/*.pdl`: the protocol definitions (the commands, events, and types of each domain, with their doc comments).
+- `content/browser/devtools/protocol/*_handler.cc`: the handlers that run in the browser process, e.g. `page_handler.cc`, `fetch_handler.cc`, `target_handler.cc`.
+- `chrome/browser/devtools/protocol/*_handler.cc`: more browser-process handlers, for behavior that Chrome adds on top of the `content` layer.
+- `third_party/blink/renderer/core/inspector/inspector_*_agent.cc`: the agents that run in the renderer process, e.g. `inspector_dom_agent.cc`, `inspector_page_agent.cc`.
+- `third_party/blink/web_tests/inspector-protocol/`: Chromium's JavaScript tests of CDP behavior.
+
+One domain is often implemented in more than one of these directories, so search all of them. The C++ method names are in PascalCase: for `Page.setDownloadBehavior`, search for `SetDownloadBehavior`. The `v8/` directory of this checkout is empty, so the V8-implemented domains (`Runtime`, `Debugger`, `Profiler`, `HeapProfiler`) are not available there.
+
 # Before committing
 
 At the workspace root:
