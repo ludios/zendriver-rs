@@ -298,17 +298,20 @@ async fn download_tiny() -> Response {
     attachment("tiny.txt", "text/plain", "x")
 }
 
-/// The `Authorization` / `Proxy-Authorization` value for Basic `user`:`pass`.
-fn basic_credentials(user: &str, pass: &str) -> String {
-    format!("Basic {}", BASE64.encode(format!("{user}:{pass}")))
+/// Whether the `name` header of `headers` (`Authorization` or
+/// `Proxy-Authorization`) carries the Basic credentials `user`:`pass`.
+fn carries_basic(headers: &HeaderMap, name: header::HeaderName, user: &str, pass: &str) -> bool {
+    let expected = format!("Basic {}", BASE64.encode(format!("{user}:{pass}")));
+    headers.get(name).and_then(|v| v.to_str().ok()) == Some(expected.as_str())
 }
 
 async fn basic_auth(headers: HeaderMap) -> Response {
-    let expected = basic_credentials(BASIC_AUTH_USER, BASIC_AUTH_PASSWORD);
-    let given = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-    if given == Some(expected.as_str()) {
+    if carries_basic(
+        &headers,
+        header::AUTHORIZATION,
+        BASIC_AUTH_USER,
+        BASIC_AUTH_PASSWORD,
+    ) {
         page("Authorized", "", r#"<h1 id="heading">Authorized</h1>"#).into_response()
     } else {
         (
@@ -469,12 +472,13 @@ async fn proxy_gate(request: Request, next: Next) -> Response {
     if request.uri().scheme().is_none() {
         return next.run(request).await;
     }
-    let expected = basic_credentials(PROXY_USER, PROXY_PASSWORD);
-    let given = request
-        .headers()
-        .get(header::PROXY_AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-    if given == Some(expected.as_str()) {
+    let headers = request.headers();
+    if carries_basic(
+        headers,
+        header::PROXY_AUTHORIZATION,
+        PROXY_USER,
+        PROXY_PASSWORD,
+    ) {
         return next.run(request).await;
     }
     (

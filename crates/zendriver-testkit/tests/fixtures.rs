@@ -4,20 +4,24 @@
 //!
 //! These read Chrome's own state (`performance` timings, `fetch`, the DOM)
 //! rather than going through zendriver's waits, which are what the fixtures
-//! exist to test.
+//! exist to test. The server's proxy mode is checked with raw HTTP requests
+//! instead, which show exactly what a proxy client sends.
 
 #![cfg(feature = "integration-tests")]
 #![allow(clippy::panic)]
 
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zendriver::Browser;
 use zendriver::stealth::StealthProfile;
 use zendriver_testkit::{
-    BASIC_AUTH_PASSWORD, BASIC_AUTH_USER, ChromeTree, DOWNLOAD_BODY, FixtureServer, SITE_A, SITE_B,
-    TestBrowser, assert_eventually, assert_not_before, eval, launch_for_test, load, trickle_body,
-    wait_loaded,
+    BASIC_AUTH_PASSWORD, BASIC_AUTH_USER, ChromeTree, DOWNLOAD_BODY, FixtureServer, PROXY_PASSWORD,
+    PROXY_USER, SITE_A, SITE_B, TestBrowser, assert_eventually, assert_not_before, eval,
+    launch_for_test, load, trickle_body, wait_loaded,
 };
 
 /// Bound on any one wait for the page; the slowest fixture used here takes
@@ -314,6 +318,56 @@ async fn basic_auth_challenges_until_given_the_password() {
     );
 
     browser.close().await;
+}
+
+/// Send `request` (an HTTP/1.1 request with `Connection: close`) to
+/// `server`, and return its whole response.
+async fn raw_http(server: &FixtureServer, request: &str) -> String {
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .expect("connect to the fixture server");
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.expect("read");
+    response
+}
+
+/// A request in absolute form, as sent to a proxy, gets `407` unless it
+/// carries the proxy credentials, and is served from the routes when it
+/// does, whatever its host. A request in origin form needs none.
+#[tokio::test]
+async fn proxy_mode_requires_the_proxy_credentials() {
+    let server = FixtureServer::start().await;
+    let port = server.port();
+    let proxied = |authorization: &str| {
+        let url = server.url(SITE_B, "/plain?title=Proxied");
+        format!(
+            "GET {url} HTTP/1.1\r\nHost: {SITE_B}:{port}\r\n{authorization}Connection: close\r\n\r\n"
+        )
+    };
+    let basic = |user: &str, pass: &str| {
+        let credentials = BASE64.encode(format!("{user}:{pass}"));
+        format!("Proxy-Authorization: Basic {credentials}\r\n")
+    };
+
+    for authorization in ["".to_string(), basic(PROXY_USER, "wrong")] {
+        let response = raw_http(&server, &proxied(&authorization)).await;
+        assert!(response.starts_with("HTTP/1.1 407"), "{response}");
+        assert!(
+            response
+                .to_ascii_lowercase()
+                .contains("proxy-authenticate: basic realm=\"fixture-proxy\""),
+            "{response}"
+        );
+    }
+    let response = raw_http(&server, &proxied(&basic(PROXY_USER, PROXY_PASSWORD))).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("<title>Proxied</title>"), "{response}");
+
+    let direct =
+        format!("GET /plain HTTP/1.1\r\nHost: {SITE_A}:{port}\r\nConnection: close\r\n\r\n");
+    let response = raw_http(&server, &direct).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 }
 
 #[tokio::test]
