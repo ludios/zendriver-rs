@@ -19,6 +19,8 @@
 
 use std::time::{Duration, Instant};
 
+use serde_json::json;
+
 use zendriver::{Browser, Tab};
 use zendriver_testkit::{
     FixtureServer, SITE_A, TestBrowser, assert_eventually, assert_not_before, eval,
@@ -252,6 +254,45 @@ async fn reload_then_wait_for_load_waits_for_the_page() {
     tab.reload().await.expect("reload");
     tab.wait_for_load().await.expect("wait_for_load");
     assert_waited_for(&server, &tab, &url, since, Instant::now(), "reload").await;
+    browser.close().await;
+}
+
+/// A tab whose renderer crashed can be reloaded: `reload` needs only the
+/// browser process. Checked through the browser's connection, because the
+/// tab's own session answers no renderer command after the crash, even once
+/// the reload has loaded the page (see TODO.md).
+#[tokio::test]
+async fn reload_recovers_a_crashed_tab() {
+    let server = FixtureServer::start().await;
+    let browser = launch().await;
+    let tab = browser.main_tab();
+    let url = server.url(SITE_A, "/plain");
+    load(&tab, &url).await;
+    // The renderer crashes before it can answer.
+    let crash = tab.session().call("Page.crash", json!({}));
+    let _ = tokio::time::timeout(Duration::from_secs(2), crash).await;
+    tokio::time::timeout(Duration::from_secs(10), tab.reload())
+        .await
+        .expect("reload of a crashed tab hung")
+        .expect("reload");
+    let target = json!({ "targetId": tab.target_id() });
+    assert_eventually(
+        Duration::from_secs(10),
+        "the reload reaches the page",
+        || {
+            let target = target.clone();
+            let browser = &browser;
+            let url = &url;
+            async move {
+                let info = browser
+                    .cdp()
+                    .call_raw("Target.getTargetInfo", target, None)
+                    .await;
+                info.is_ok_and(|info| info["targetInfo"]["url"] == url.as_str())
+            }
+        },
+    )
+    .await;
     browser.close().await;
 }
 

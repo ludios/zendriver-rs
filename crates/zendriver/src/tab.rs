@@ -33,7 +33,7 @@ use crate::error::{Result, ZendriverError};
 use crate::frame::Frame;
 use crate::input::InputController;
 use crate::isolated_world::IsolatedWorldCache;
-use crate::load_tracker::{Destination, LoadTracker, READY_STATE, main_frame_loader_id};
+use crate::load_tracker::{Destination, LoadTracker, READY_STATE};
 use crate::network_idle::IdleLossPolicy;
 use crate::screenshot::ScreenshotBuilder;
 
@@ -1508,6 +1508,43 @@ impl Tab {
         Ok(())
     }
 
+    /// Navigate `step` entries through the tab's session history (`-1` is
+    /// back, `1` forward), and arm the next [`Tab::wait_for_load`].
+    ///
+    /// # Errors
+    ///
+    /// [`ZendriverError::HistoryNavigation`] with `"no back history"` or
+    /// `"no forward history"` when there is no entry there, or when Chrome's
+    /// history reply lacks a field.
+    async fn step_history(&self, step: i64) -> Result<()> {
+        let history = self.call("Page.getNavigationHistory", json!({})).await?;
+        let current_idx = history["currentIndex"].as_i64().ok_or_else(|| {
+            ZendriverError::HistoryNavigation(
+                "Page.getNavigationHistory missing currentIndex".into(),
+            )
+        })?;
+        let entries = history["entries"].as_array().ok_or_else(|| {
+            ZendriverError::HistoryNavigation("Page.getNavigationHistory missing entries".into())
+        })?;
+        let target = usize::try_from(current_idx + step).ok();
+        let Some(entry) = target.and_then(|i| entries.get(i)) else {
+            let direction = if step < 0 { "back" } else { "forward" };
+            return Err(ZendriverError::HistoryNavigation(format!(
+                "no {direction} history"
+            )));
+        };
+        let entry_id = entry["id"].as_i64().ok_or_else(|| {
+            ZendriverError::HistoryNavigation("Page.getNavigationHistory entry missing id".into())
+        })?;
+        self.navigate_main_frame(
+            "Page.navigateToHistoryEntry",
+            json!({ "entryId": entry_id }),
+            |_| Destination::Unknown,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Navigate one step backward in the tab's session history.
     ///
     /// Fetches the history list via `Page.getNavigationHistory`, then
@@ -1569,63 +1606,6 @@ impl Tab {
         self.step_history(1).await
     }
 
-    /// Navigate `step` entries through the tab's session history (`-1` is
-    /// back, `1` forward), and arm the next [`Tab::wait_for_load`].
-    ///
-    /// # Errors
-    ///
-    /// [`ZendriverError::HistoryNavigation`] with `"no back history"` or
-    /// `"no forward history"` when there is no entry there, or when Chrome's
-    /// history reply lacks a field.
-    async fn step_history(&self, step: i64) -> Result<()> {
-        let history = self.call("Page.getNavigationHistory", json!({})).await?;
-        let current_idx = history["currentIndex"].as_i64().ok_or_else(|| {
-            ZendriverError::HistoryNavigation(
-                "Page.getNavigationHistory missing currentIndex".into(),
-            )
-        })?;
-        let entries = history["entries"].as_array().ok_or_else(|| {
-            ZendriverError::HistoryNavigation("Page.getNavigationHistory missing entries".into())
-        })?;
-        let target = usize::try_from(current_idx + step).ok();
-        let Some(entry) = target.and_then(|i| entries.get(i)) else {
-            let direction = if step < 0 { "back" } else { "forward" };
-            return Err(ZendriverError::HistoryNavigation(format!(
-                "no {direction} history"
-            )));
-        };
-        let entry_id = entry["id"].as_i64().ok_or_else(|| {
-            ZendriverError::HistoryNavigation("Page.getNavigationHistory entry missing id".into())
-        })?;
-        self.navigate_main_frame(
-            "Page.navigateToHistoryEntry",
-            json!({ "entryId": entry_id }),
-            |_| Destination::HistoryEntry(entry_id),
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Reload the tab's current page.
-    ///
-    /// Dispatches `Page.reload` with `ignoreCache: false` — equivalent to a
-    /// soft refresh. Like [`Tab::goto`], does NOT wait for the page: call
-    /// [`Tab::wait_for_load`] afterward to block on the navigation.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # async fn ex() -> zendriver::Result<()> {
-    /// # let browser = zendriver::Browser::builder().launch().await?;
-    /// # let tab = browser.main_tab();
-    /// tab.reload().await?;
-    /// tab.wait_for_load().await?;
-    /// # Ok(()) }
-    /// ```
-    pub async fn reload(&self) -> Result<()> {
-        self.reload_with(ReloadOptions::default()).await
-    }
-
     /// Reload the tab's current page with explicit options.
     ///
     /// Dispatches `Page.reload` with the `ignoreCache` flag from `opts` and,
@@ -1654,14 +1634,29 @@ impl Tab {
         if let Some(script) = opts.script_to_evaluate_on_load {
             params["scriptToEvaluateOnLoad"] = Value::String(script);
         }
-        // `Page.reload` returns no loader id, so the reload's document is
-        // known only as a different one.
-        let reloaded = main_frame_loader_id(&self.inner.session).await?;
-        self.navigate_main_frame("Page.reload", params, |_| {
-            Destination::NotDocument(reloaded)
-        })
-        .await?;
+        self.navigate_main_frame("Page.reload", params, |_| Destination::Unknown)
+            .await?;
         Ok(())
+    }
+
+    /// Reload the tab's current page.
+    ///
+    /// Dispatches `Page.reload` with `ignoreCache: false` — equivalent to a
+    /// soft refresh. Like [`Tab::goto`], does NOT wait for the page: call
+    /// [`Tab::wait_for_load`] afterward to block on the navigation.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn ex() -> zendriver::Result<()> {
+    /// # let browser = zendriver::Browser::builder().launch().await?;
+    /// # let tab = browser.main_tab();
+    /// tab.reload().await?;
+    /// tab.wait_for_load().await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn reload(&self) -> Result<()> {
+        self.reload_with(ReloadOptions::default()).await
     }
 
     /// Full HTML source of the tab's current page.
@@ -3734,9 +3729,6 @@ mod tests {
             async move { t.reload().await }
         });
 
-        let id = mock.expect_cmd("Page.getFrameTree").await;
-        mock.reply(id, json!({ "frameTree": { "frame": { "loaderId": "L" } } }))
-            .await;
         let id = mock.expect_cmd("Page.reload").await;
         assert_eq!(mock.last_sent()["params"]["ignoreCache"], false);
         mock.reply(id, json!({})).await;
@@ -3762,9 +3754,6 @@ mod tests {
             }
         });
 
-        let id = mock.expect_cmd("Page.getFrameTree").await;
-        mock.reply(id, json!({ "frameTree": { "frame": { "loaderId": "L" } } }))
-            .await;
         let id = mock.expect_cmd("Page.reload").await;
         assert_eq!(mock.last_sent()["params"]["ignoreCache"], true);
         assert_eq!(mock.last_sent()["params"]["scriptToEvaluateOnLoad"], "x");
@@ -3791,9 +3780,6 @@ mod tests {
             }
         });
 
-        let id = mock.expect_cmd("Page.getFrameTree").await;
-        mock.reply(id, json!({ "frameTree": { "frame": { "loaderId": "L" } } }))
-            .await;
         let id = mock.expect_cmd("Page.reload").await;
         assert_eq!(mock.last_sent()["params"]["ignoreCache"], false);
         // scriptToEvaluateOnLoad must be omitted entirely when None.

@@ -49,11 +49,11 @@ pub(crate) enum Destination {
     /// The current document: `Page.navigate` returned no loader id, because
     /// the navigation stays in the same document.
     SameDocument,
-    /// Any document other than the one with this loader id: a reload's new
-    /// document, whose loader id Chrome doesn't return.
-    NotDocument(String),
-    /// The session history entry with this id.
-    HistoryEntry(i64),
+    /// Not known: `Page.reload` and `Page.navigateToHistoryEntry` return
+    /// nothing. (Asking the renderer for the loader id before the reload
+    /// would need a working renderer to reload a crashed tab, and the
+    /// browser reports a pending history entry as the current one.)
+    Unknown,
 }
 
 impl Destination {
@@ -72,30 +72,11 @@ impl Destination {
 ///
 /// The call's own error, or [`ZendriverError::Navigation`] when the reply
 /// has no main-frame `loaderId`.
-pub(crate) async fn main_frame_loader_id(session: &SessionHandle) -> Result<String> {
+async fn main_frame_loader_id(session: &SessionHandle) -> Result<String> {
     let reply = session.call("Page.getFrameTree", json!({})).await?;
     let id = reply["frameTree"]["frame"]["loaderId"].as_str();
     id.map(str::to_owned).ok_or_else(|| {
         ZendriverError::Navigation("Page.getFrameTree returned no main-frame loaderId".into())
-    })
-}
-
-/// The id of `session`'s current session history entry.
-///
-/// # Errors
-///
-/// The call's own error, or [`ZendriverError::HistoryNavigation`] when the
-/// reply has no current entry id.
-async fn current_history_entry(session: &SessionHandle) -> Result<i64> {
-    let history = session.call("Page.getNavigationHistory", json!({})).await?;
-    let id = history["currentIndex"]
-        .as_u64()
-        .and_then(|i| history["entries"].get(usize::try_from(i).ok()?))
-        .and_then(|entry| entry["id"].as_i64());
-    id.ok_or_else(|| {
-        ZendriverError::HistoryNavigation(
-            "Page.getNavigationHistory returned no current entry id".into(),
-        )
     })
 }
 
@@ -118,8 +99,7 @@ async fn arrived(
     let shown = match &destination {
         Destination::SameDocument => Ok(true),
         Destination::Document(id) => main_frame_loader_id(session).await.map(|now| now == *id),
-        Destination::NotDocument(id) => main_frame_loader_id(session).await.map(|now| now != *id),
-        Destination::HistoryEntry(id) => current_history_entry(session).await.map(|now| now == *id),
+        Destination::Unknown => Ok(false),
     };
     shown.unwrap_or_else(|e| {
         warn!(
@@ -520,20 +500,11 @@ mod tests {
     /// stop doesn't leave it waiting.
     #[tokio::test]
     async fn lost_events_after_a_navigation_arrives_make_it_probe() {
-        let tree = |loader: &str| json!({ "frameTree": { "frame": { "loaderId": loader } } });
-        let history = json!({ "currentIndex": 1, "entries": [{ "id": 7 }, { "id": 8 }] });
+        let tree = json!({ "frameTree": { "frame": { "loaderId": "new" } } });
         let cases = [
             (
                 Destination::Document("new".into()),
-                Some(("Page.getFrameTree", tree("new"))),
-            ),
-            (
-                Destination::NotDocument("old".into()),
-                Some(("Page.getFrameTree", tree("new"))),
-            ),
-            (
-                Destination::HistoryEntry(8),
-                Some(("Page.getNavigationHistory", history)),
+                Some(("Page.getFrameTree", tree)),
             ),
             (Destination::SameDocument, None),
         ];
