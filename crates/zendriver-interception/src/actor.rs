@@ -442,7 +442,7 @@ async fn handle_paused(
         Some(Rule::ModifyResponse { modify, .. }) => match build_response_info(&ev) {
             Some(info) => {
                 let overrides = modify(&info);
-                continue_response_with_overrides(session, &ev.request_id, overrides).await
+                continue_response_with_overrides(session, &ev.request_id, &info, overrides).await
             }
             None => {
                 // Matched at the Request stage: Chrome has no response yet, so
@@ -700,34 +700,59 @@ async fn fulfill_request(
     Ok(())
 }
 
+/// The `Fetch.continueResponse` parameters that release `request_id`, paused
+/// with the upstream `response`, rewritten by `overrides`.
+///
+/// Chrome takes a status and headers together or neither, so once anything
+/// is overridden, the status and headers that `overrides` leaves `None` are
+/// copied from `response`. The upstream phrase is kept only with the
+/// upstream status: a new status gets Chrome's standard phrase for it.
+/// (Chrome refuses an empty phrase, and HTTP/2 responses have none.)
+pub(crate) fn continue_response_params(
+    request_id: &str,
+    response: &ResponseInfo,
+    overrides: ResponseOverrides,
+) -> Value {
+    let mut params = Map::new();
+    params.insert("requestId".into(), Value::String(request_id.into()));
+    let ResponseOverrides {
+        status,
+        phrase,
+        headers,
+    } = overrides;
+    if status.is_none() && phrase.is_none() && headers.is_none() {
+        return Value::Object(params);
+    }
+    let mut phrase = phrase;
+    if status.is_none() && phrase.is_none() && !response.status_text.is_empty() {
+        phrase = Some(response.status_text.clone());
+    }
+    let headers = headers.unwrap_or_else(|| response.headers.clone());
+    params.insert(
+        "responseCode".into(),
+        Value::from(status.unwrap_or(response.status)),
+    );
+    params.insert(
+        "responseHeaders".into(),
+        Value::Array(headers_to_cdp(&headers)),
+    );
+    if let Some(phrase) = phrase {
+        params.insert("responsePhrase".into(), Value::String(phrase));
+    }
+    Value::Object(params)
+}
+
 /// Dispatch `Fetch.continueResponse` with the closure-produced overrides for a
-/// [`Rule::ModifyResponse`](crate::rule::Rule::ModifyResponse) match. Mirrors
-/// [`PausedRequest::continue_response`](crate::PausedRequest::continue_response):
-/// `None` fields are omitted so Chrome keeps its originals, and
-/// `responseHeaders` is *replacement* per CDP. The caller guarantees the
-/// `Response` stage (we only reach here after `build_response_info` succeeded).
+/// [`Rule::ModifyResponse`](crate::rule::Rule::ModifyResponse) match, per
+/// [`continue_response_params`].
 async fn continue_response_with_overrides(
     session: &SessionHandle,
     request_id: &str,
+    response: &ResponseInfo,
     overrides: ResponseOverrides,
 ) -> Result<(), InterceptionError> {
-    let mut params = Map::new();
-    params.insert("requestId".into(), Value::String(request_id.into()));
-    if let Some(status) = overrides.status {
-        params.insert("responseCode".into(), Value::from(status));
-    }
-    if let Some(phrase) = overrides.phrase {
-        params.insert("responsePhrase".into(), Value::String(phrase));
-    }
-    if let Some(headers) = overrides.headers {
-        params.insert(
-            "responseHeaders".into(),
-            Value::Array(headers_to_cdp(&headers)),
-        );
-    }
-    session
-        .call("Fetch.continueResponse", Value::Object(params))
-        .await?;
+    let params = continue_response_params(request_id, response, overrides);
+    session.call("Fetch.continueResponse", params).await?;
     Ok(())
 }
 
@@ -1103,6 +1128,56 @@ mod tests {
             .expect("oneshot dropped");
         actor.await.unwrap();
         conn.shutdown();
+    }
+
+    /// `continueResponse` gets a status and headers together or neither: an
+    /// override of one is completed from the upstream response, whose
+    /// phrase goes only with its own status.
+    #[test]
+    fn continue_response_params_send_status_and_headers_together() {
+        let response = ResponseInfo {
+            status: 200,
+            status_text: "Fine".into(),
+            headers: vec![("content-type".into(), "text/html".into())],
+        };
+        let params = |overrides| continue_response_params("R1", &response, overrides);
+        let upstream_headers = json!([{ "name": "content-type", "value": "text/html" }]);
+
+        assert_eq!(
+            params(ResponseOverrides::default()),
+            json!({ "requestId": "R1" })
+        );
+        assert_eq!(
+            params(ResponseOverrides {
+                status: Some(203),
+                ..ResponseOverrides::default()
+            }),
+            json!({ "requestId": "R1", "responseCode": 203, "responseHeaders": upstream_headers })
+        );
+        assert_eq!(
+            params(ResponseOverrides {
+                headers: Some(vec![("x".into(), "1".into())]),
+                ..ResponseOverrides::default()
+            }),
+            json!({
+                "requestId": "R1",
+                "responseCode": 200,
+                "responsePhrase": "Fine",
+                "responseHeaders": [{ "name": "x", "value": "1" }],
+            })
+        );
+        assert_eq!(
+            params(ResponseOverrides {
+                phrase: Some("Swell".into()),
+                ..ResponseOverrides::default()
+            }),
+            json!({
+                "requestId": "R1",
+                "responseCode": 200,
+                "responsePhrase": "Swell",
+                "responseHeaders": upstream_headers,
+            })
+        );
     }
 
     /// Decode a `Fetch.requestPaused` payload the way the actor does.

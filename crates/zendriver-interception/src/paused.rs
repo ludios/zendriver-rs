@@ -26,7 +26,7 @@ use serde_json::{Map, Value, json};
 use zendriver_transport::SessionHandle;
 
 use crate::error::InterceptionError;
-use crate::types::{AbortReason, RequestInfo, RequestOverrides, ResponseInfo};
+use crate::types::{AbortReason, RequestInfo, RequestOverrides, ResponseInfo, ResponseOverrides};
 
 /// A request paused by Chrome at the configured [`RequestStage`].
 ///
@@ -221,11 +221,14 @@ impl PausedRequest {
     /// [`respond`](Self::respond) to serve a synthetic response at the
     /// `Request` stage instead.
     ///
-    /// Dispatches `Fetch.continueResponse { requestId, responseCode?,
-    /// responsePhrase?, responseHeaders? }`, omitting any argument left `None`
-    /// so Chrome keeps its original value. Per CDP, `responseHeaders` is the
-    /// name/value array form and is *replacement*, not merge — pass every
-    /// header you want forwarded.
+    /// Dispatches `Fetch.continueResponse`. An argument left `None` keeps the
+    /// upstream value: Chrome takes a status and headers together or
+    /// neither, so once anything is overridden the upstream status and
+    /// headers are sent for the ones left `None`. A new `status` without a
+    /// `phrase` gets Chrome's standard phrase for it (Chrome refuses a
+    /// status code it has no phrase for). `headers` replaces the whole
+    /// header block, it isn't merged in: pass every header you want
+    /// forwarded.
     ///
     /// ```no_run
     /// # use futures::StreamExt;
@@ -254,27 +257,17 @@ impl PausedRequest {
         // we leave `released` clear on the WrongStage path and let Drop fire
         // a best-effort continueRequest — matching the "always release Chrome"
         // contract the other terminals uphold via the happy path.
-        if self.response.is_none() {
+        let Some(response) = self.response.as_ref() else {
             return Err(InterceptionError::WrongStage);
-        }
+        };
         self.released = true;
-        let mut params = Map::new();
-        params.insert("requestId".into(), Value::String(self.request_id.clone()));
-        if let Some(status) = status {
-            params.insert("responseCode".into(), Value::from(status));
-        }
-        if let Some(phrase) = phrase {
-            params.insert("responsePhrase".into(), Value::String(phrase));
-        }
-        if let Some(headers) = headers {
-            params.insert(
-                "responseHeaders".into(),
-                Value::Array(crate::actor::headers_to_cdp(&headers)),
-            );
-        }
-        self.session
-            .call("Fetch.continueResponse", Value::Object(params))
-            .await?;
+        let overrides = ResponseOverrides {
+            status,
+            phrase,
+            headers,
+        };
+        let params = crate::actor::continue_response_params(&self.request_id, response, overrides);
+        self.session.call("Fetch.continueResponse", params).await?;
         Ok(())
     }
 

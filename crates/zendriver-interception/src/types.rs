@@ -206,6 +206,9 @@ pub struct ResponseOverrides {
     /// Replace the HTTP status code (`responseCode`). `None` keeps Chrome's.
     pub status: Option<u16>,
     /// Replace the HTTP status line text (`responsePhrase`, e.g. `"OK"`).
+    /// `None` keeps the upstream phrase if `status` is `None` too; with a new
+    /// `status`, Chrome uses its standard phrase for that code, and refuses
+    /// a code it has no phrase for (e.g. 299).
     pub phrase: Option<String>,
     /// Replace the full response header set (CDP semantics: *replacement*,
     /// not merge). Order is preserved on the wire.
