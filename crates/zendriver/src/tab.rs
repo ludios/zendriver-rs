@@ -33,7 +33,7 @@ use crate::error::{Result, ZendriverError};
 use crate::frame::Frame;
 use crate::input::InputController;
 use crate::isolated_world::IsolatedWorldCache;
-use crate::load_tracker::{Destination, LoadTracker, main_frame_loader_id};
+use crate::load_tracker::{Destination, LoadTracker, READY_STATE, main_frame_loader_id};
 use crate::network_idle::IdleLossPolicy;
 use crate::screenshot::ScreenshotBuilder;
 
@@ -1062,9 +1062,7 @@ impl Tab {
         let pending = self.inner.pending_load.lock().await.take();
         let tracker = match pending {
             Some(tracker) => tracker,
-            None => {
-                LoadTracker::probed(&self.inner.session, self.target_id(), "document.readyState")
-            }
+            None => LoadTracker::probed(&self.inner.session, self.target_id(), READY_STATE),
         };
         tracker.wait(DEFAULT_LOAD_TIMEOUT).await
     }

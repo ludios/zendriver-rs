@@ -12,10 +12,12 @@
 //! sent before subscribing, so a tracker subscribes when it is created:
 //! create it before the action that navigates.
 //!
-//! When events are lost, the page's `document.readyState` says whether the
-//! frame is loading, but only once the navigation has replaced the old
-//! document, which reads as complete. So a navigation's tracker first asks
-//! Chrome whether the frame shows the navigation's [`Destination`].
+//! After lost events, the page's `document.readyState` says whether the
+//! frame is loading, but only once the load in progress has replaced the old
+//! document, which reads as complete. So a tracker whose own navigation
+//! hasn't stopped first asks Chrome whether the frame shows the
+//! navigation's [`Destination`], and a tracker that saw another load start
+//! waits for that load's stop.
 
 use std::time::Duration;
 
@@ -182,10 +184,30 @@ fn changes(
     )
 }
 
+/// What a tracker does after lost events to learn whether the frame is
+/// loading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Recheck {
+    /// The tracker's own navigation hasn't stopped: if the frame shows the
+    /// navigation's destination, ask the page's `document.readyState`;
+    /// otherwise wait for the next stop.
+    Arrival,
+    /// Ask the page this expression: the frame has loaded iff it is
+    /// `"complete"`.
+    Probe(&'static str),
+    /// Wait for the next stop. A load the tracker didn't start has started,
+    /// and until its document commits, the page is the old document, which
+    /// reads as complete.
+    NextStop,
+}
+
+/// The expression that says whether the current document has loaded.
+pub(crate) const READY_STATE: &str = "document.readyState";
+
 /// Whether `expression` evaluates to `"complete"` in `session`'s main
 /// world, after enabling the Page domain (so every event after this call is
-/// delivered). A failed evaluation counts as not complete, and is logged.
-async fn probe_complete(session: &SessionHandle, expression: &str) -> bool {
+/// delivered). `None` if the evaluation failed, which is logged.
+async fn probe_complete(session: &SessionHandle, expression: &str) -> Option<bool> {
     let reply = async {
         session.call("Page.enable", json!({})).await?;
         session
@@ -197,14 +219,14 @@ async fn probe_complete(session: &SessionHandle, expression: &str) -> bool {
     }
     .await;
     match reply {
-        Ok(reply) => reply["result"]["value"] == "complete",
+        Ok(reply) => Some(reply["result"]["value"] == "complete"),
         Err(e) => {
             warn!(
                 error = %e,
                 %expression,
-                "load state probe failed; counting the frame as loading until Chrome says it stopped"
+                "load state probe failed; leaving the load state as it was"
             );
-            false
+            None
         }
     }
 }
@@ -219,15 +241,13 @@ async fn follow(
     loading: watch::Sender<bool>,
 ) {
     let mut awaiting_start = false;
-    // What to ask the page after lost events. `None` while a navigation
-    // hasn't stopped and may not have replaced the old document, which
-    // reads as complete.
-    let mut reprobe = None;
+    let mut recheck = Recheck::Arrival;
     match initial {
         Initial::Navigating => awaiting_start = true,
         Initial::Probe(expression) => {
-            reprobe = Some(expression);
-            loading.send_replace(!probe_complete(&session, expression).await);
+            recheck = Recheck::Probe(expression);
+            let complete = probe_complete(&session, expression).await;
+            loading.send_replace(complete != Some(true));
         }
     }
     while let Some(change) = changes.next().await {
@@ -235,26 +255,28 @@ async fn follow(
             Change::Started => {
                 awaiting_start = false;
                 loading.send_replace(true);
+                if recheck == Recheck::Probe(READY_STATE) {
+                    recheck = Recheck::NextStop;
+                }
             }
             Change::Stopped => {
                 if !awaiting_start {
                     loading.send_replace(false);
-                    reprobe.get_or_insert("document.readyState");
+                    recheck = Recheck::Probe(READY_STATE);
                 }
             }
             Change::Lost => {
                 // Unknown until the page answers, or the next stop arrives.
-                loading.send_replace(true);
-                if reprobe.is_none() {
-                    // The navigation's start, or even its stop, may be
-                    // among the lost events: the next stop counts.
-                    awaiting_start = false;
-                    if arrived(&session, &mut destination).await {
-                        reprobe = Some("document.readyState");
-                    }
+                let was_loading = loading.send_replace(true);
+                // A navigation's start, or even its stop, may be among the
+                // lost events: the next stop counts.
+                awaiting_start = false;
+                if recheck == Recheck::Arrival && arrived(&session, &mut destination).await {
+                    recheck = Recheck::Probe(READY_STATE);
                 }
-                if let Some(expression) = reprobe {
-                    loading.send_replace(!probe_complete(&session, expression).await);
+                if let Recheck::Probe(expression) = recheck {
+                    let complete = probe_complete(&session, expression).await;
+                    loading.send_replace(complete.map_or(was_loading, |complete| !complete));
                 }
             }
         }
@@ -375,6 +397,7 @@ impl Drop for LoadTracker {
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use zendriver_transport::Connection;
     use zendriver_transport::testing::MockConnection;
 
     const SHORT: Duration = Duration::from_millis(200);
@@ -389,6 +412,20 @@ mod tests {
         };
         mock.emit_event_for_session(method, json!({ "frameId": frame }), session)
             .await;
+    }
+
+    /// Emit frame `F`'s starts (`true`) and stops (`false`) on session `S1`,
+    /// and return once they are on the event bus, so a tracker gets them
+    /// before anything that happens later. (A reconnect drops the frames the
+    /// old socket hasn't delivered yet.)
+    async fn emit_delivered(mock: &MockConnection, conn: &Connection, started: &[bool]) {
+        let mut seen = changes(&SessionHandle::new(conn.clone(), "S1"), "F");
+        for &s in started {
+            emit(mock, s, "F", "S1").await;
+        }
+        for _ in started {
+            seen.next().await;
+        }
     }
 
     /// A stop that arrives before the navigation's start belongs to an
@@ -533,27 +570,61 @@ mod tests {
     async fn lost_events_after_the_stop_make_a_navigation_probe() {
         let (mut mock, conn) = MockConnection::pair();
         let tracker = LoadTracker::before_navigating(&SessionHandle::new(conn.clone(), "S1"), "F");
-        let mut seen = changes(&SessionHandle::new(conn.clone(), "S1"), "F");
-        emit(&mock, true, "F", "S1").await;
-        emit(&mock, false, "F", "S1").await;
-        // A reconnect drops frames the old socket hasn't delivered yet.
-        assert_eq!(seen.next().await, Some(Change::Started));
-        assert_eq!(seen.next().await, Some(Change::Stopped));
+        emit_delivered(&mock, &conn, &[true, false]).await;
+        mock.reconnect(&conn);
+        answer(&mut mock, "Page.enable", json!({})).await;
+        let loading = json!({ "result": { "value": "loading" } });
+        answer(&mut mock, "Runtime.evaluate", loading).await;
+        assert_eq!(mock.last_sent()["params"]["expression"], READY_STATE);
+        let res = tracker.wait(SHORT).await;
+        assert!(matches!(res, Err(ZendriverError::Timeout(_))), "{res:?}");
+        conn.shutdown();
+    }
+
+    /// When the probe after lost events fails, the tracker's state stays as
+    /// it was: a navigation that has stopped stays loaded.
+    #[tokio::test]
+    async fn a_failed_probe_leaves_a_stopped_navigation_loaded() {
+        let (mut mock, conn) = MockConnection::pair();
+        let tracker = LoadTracker::before_navigating(&SessionHandle::new(conn.clone(), "S1"), "F");
+        emit_delivered(&mock, &conn, &[true, false]).await;
         mock.reconnect(&conn);
         let id = tokio::time::timeout(LONG, mock.expect_cmd("Page.enable"))
             .await
             .expect("no probe after lost events");
-        mock.reply(id, json!({})).await;
-        let id = mock.expect_cmd("Runtime.evaluate").await;
-        assert_eq!(
-            mock.last_sent()["params"]["expression"],
-            "document.readyState"
-        );
-        mock.reply(id, json!({ "result": { "value": "loading" } }))
-            .await;
-        let res = tracker.wait(SHORT).await;
-        assert!(matches!(res, Err(ZendriverError::Timeout(_))), "{res:?}");
+        mock.reply_err(id, -32000, "No session with given id").await;
+        tracker.wait(LONG).await.expect("still loaded");
         conn.shutdown();
+    }
+
+    /// Once a load that the tracker didn't start has started, the page is
+    /// the old document until the new one commits, so after lost events the
+    /// tracker doesn't ask the page: it waits for the next stop.
+    #[tokio::test]
+    async fn lost_events_during_a_later_load_wait_for_its_stop() {
+        for probed in [false, true] {
+            let (mut mock, conn) = MockConnection::pair();
+            let session = SessionHandle::new(conn.clone(), "S1");
+            let tracker = if probed {
+                let tracker = LoadTracker::probed(&session, "F", READY_STATE);
+                answer(&mut mock, "Page.enable", json!({})).await;
+                let complete = json!({ "result": { "value": "complete" } });
+                answer(&mut mock, "Runtime.evaluate", complete).await;
+                emit_delivered(&mock, &conn, &[true]).await;
+                tracker
+            } else {
+                let tracker = LoadTracker::before_navigating(&session, "F");
+                emit_delivered(&mock, &conn, &[true, false, true]).await;
+                tracker
+            };
+            mock.reconnect(&conn);
+            let waiting = tokio::spawn(tracker.wait(LONG));
+            let probe = mock.recv_cmd_timeout(SHORT).await;
+            assert_eq!(probe, None, "probed: {probed}");
+            emit(&mock, false, "F", "S1").await;
+            waiting.await.unwrap().expect("loaded once it stopped");
+            conn.shutdown();
+        }
     }
 
     /// After lost events, a probed tracker probes again with its own
@@ -579,6 +650,26 @@ mod tests {
             .await
             .unwrap()
             .expect("complete on the second probe");
+        conn.shutdown();
+    }
+
+    /// Once its load has stopped, a probed tracker's expression (which may
+    /// ask about the initial navigation) no longer applies: after lost
+    /// events it asks for the `readyState`.
+    #[tokio::test]
+    async fn a_stop_makes_a_probed_tracker_probe_the_ready_state() {
+        let (mut mock, conn) = MockConnection::pair();
+        let tracker = LoadTracker::probed(&SessionHandle::new(conn.clone(), "S1"), "F", "x");
+        answer(&mut mock, "Page.enable", json!({})).await;
+        let blank = json!({ "result": { "value": "blank" } });
+        answer(&mut mock, "Runtime.evaluate", blank).await;
+        emit_delivered(&mock, &conn, &[true, false]).await;
+        mock.reconnect(&conn);
+        answer(&mut mock, "Page.enable", json!({})).await;
+        let complete = json!({ "result": { "value": "complete" } });
+        answer(&mut mock, "Runtime.evaluate", complete).await;
+        assert_eq!(mock.last_sent()["params"]["expression"], READY_STATE);
+        tracker.wait(LONG).await.expect("loaded");
         conn.shutdown();
     }
 
