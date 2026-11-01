@@ -2931,31 +2931,28 @@ async fn poll_initial_targets(
     }
 }
 
-/// The id of Chrome's default `BrowserContext`, or `None` if it can't be
-/// told.
+/// The id of Chrome's default `BrowserContext`, or `None` if no page shows
+/// it.
 ///
 /// Chrome 145 and later return it from `Target.getBrowserContexts`. Older
 /// Chrome lists there only the contexts that DevTools created, so the
 /// default one is the context of the first page in `targets` (the
-/// `targetInfos` of `Target.getTargets`) that isn't in that list.
+/// `targetInfos` of `Target.getTargets`) that isn't in that list. If the
+/// call fails, it's guessed to be the first page's context.
 async fn find_default_context_id(
     conn: &zendriver_transport::Connection,
     targets: &[serde_json::Value],
 ) -> Option<String> {
-    let contexts = match conn
+    let contexts = conn
         .call_raw("Target.getBrowserContexts", json!({}), None)
-        .await
-    {
-        Ok(contexts) => contexts,
-        Err(e) => {
-            warn!(
-                error = %e,
-                "Target.getBrowserContexts failed; cookie jars of default-context tabs will \
-                 name the default context, which Chrome before ~153 rejects"
-            );
-            return None;
-        }
-    };
+        .await;
+    if let Err(e) = &contexts {
+        warn!(
+            error = %e,
+            "Target.getBrowserContexts failed; taking the first page's context as the default"
+        );
+    }
+    let contexts = contexts.unwrap_or_default();
     if let Some(id) = contexts["defaultBrowserContextId"].as_str() {
         return Some(id.to_string());
     }
@@ -7734,8 +7731,8 @@ mod tests {
     }
 
     /// The default context is the one Chrome names (145 and later), else
-    /// the first page's context that DevTools didn't create; a failed call
-    /// gives none.
+    /// the first page's context that DevTools didn't create; after a failed
+    /// call, the first page's context.
     #[tokio::test]
     async fn find_default_context_id_asks_chrome() {
         use zendriver_transport::testing::MockConnection;
@@ -7761,10 +7758,11 @@ mod tests {
             assert_eq!(fut.await.unwrap().as_deref(), want);
         }
         let (mut mock, conn) = MockConnection::pair();
-        let fut = tokio::spawn(async move { find_default_context_id(&conn, &[]).await });
+        let targets = targets.as_array().unwrap().clone();
+        let fut = tokio::spawn(async move { find_default_context_id(&conn, &targets).await });
         let id = mock.expect_cmd("Target.getBrowserContexts").await;
         mock.reply_err(id, -32000, "Not allowed").await;
-        assert_eq!(fut.await.unwrap(), None);
+        assert_eq!(fut.await.unwrap().as_deref(), Some("ISO"));
     }
 
     /// The regression this exists for. Chrome prints its DevTools banner before creating the
