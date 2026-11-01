@@ -11,11 +11,16 @@
 //! The events come from a broadcast channel, which never replays an event
 //! sent before subscribing, so a tracker subscribes when it is created:
 //! create it before the action that navigates.
+//!
+//! When events are lost, the page's `document.readyState` says whether the
+//! frame is loading, but only once the navigation has replaced the old
+//! document, which reads as complete. So a navigation's tracker first asks
+//! Chrome whether the frame shows the navigation's [`Destination`].
 
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -31,6 +36,97 @@ enum Change {
     /// Events may have been missed: the subscriber lagged, or the
     /// connection was replaced.
     Lost,
+}
+
+/// Where a navigation of the main frame leads, as far as Chrome tells when
+/// the command that starts it replies.
+#[derive(Clone, Debug)]
+pub(crate) enum Destination {
+    /// The document with this loader id, which `Page.navigate` returned.
+    Document(String),
+    /// The current document: `Page.navigate` returned no loader id, because
+    /// the navigation stays in the same document.
+    SameDocument,
+    /// Any document other than the one with this loader id: a reload's new
+    /// document, whose loader id Chrome doesn't return.
+    NotDocument(String),
+    /// The session history entry with this id.
+    HistoryEntry(i64),
+}
+
+impl Destination {
+    /// Where the navigation that `Page.navigate` replied `reply` to leads.
+    pub(crate) fn of_navigate_reply(reply: &Value) -> Self {
+        match reply.get("loaderId").and_then(Value::as_str) {
+            Some(id) => Self::Document(id.to_owned()),
+            None => Self::SameDocument,
+        }
+    }
+}
+
+/// The loader id of the document in `session`'s main frame.
+///
+/// # Errors
+///
+/// The call's own error, or [`ZendriverError::Navigation`] when the reply
+/// has no main-frame `loaderId`.
+pub(crate) async fn main_frame_loader_id(session: &SessionHandle) -> Result<String> {
+    let reply = session.call("Page.getFrameTree", json!({})).await?;
+    let id = reply["frameTree"]["frame"]["loaderId"].as_str();
+    id.map(str::to_owned).ok_or_else(|| {
+        ZendriverError::Navigation("Page.getFrameTree returned no main-frame loaderId".into())
+    })
+}
+
+/// The id of `session`'s current session history entry.
+///
+/// # Errors
+///
+/// The call's own error, or [`ZendriverError::HistoryNavigation`] when the
+/// reply has no current entry id.
+async fn current_history_entry(session: &SessionHandle) -> Result<i64> {
+    let history = session.call("Page.getNavigationHistory", json!({})).await?;
+    let id = history["currentIndex"]
+        .as_u64()
+        .and_then(|i| history["entries"].get(usize::try_from(i).ok()?))
+        .and_then(|entry| entry["id"].as_i64());
+    id.ok_or_else(|| {
+        ZendriverError::HistoryNavigation(
+            "Page.getNavigationHistory returned no current entry id".into(),
+        )
+    })
+}
+
+/// Whether `session`'s main frame shows the navigation's destination now.
+/// Waits for `destination` to be known (until the command that starts the
+/// navigation has replied). A failed call counts as no, and is logged.
+async fn arrived(
+    session: &SessionHandle,
+    destination: &mut watch::Receiver<Option<Destination>>,
+) -> bool {
+    let destination = destination
+        .wait_for(Option::is_some)
+        .await
+        .ok()
+        .and_then(|known| known.clone());
+    let Some(destination) = destination else {
+        // The tracker is gone.
+        return false;
+    };
+    let shown = match &destination {
+        Destination::SameDocument => Ok(true),
+        Destination::Document(id) => main_frame_loader_id(session).await.map(|now| now == *id),
+        Destination::NotDocument(id) => main_frame_loader_id(session).await.map(|now| now != *id),
+        Destination::HistoryEntry(id) => current_history_entry(session).await.map(|now| now == *id),
+    };
+    shown.unwrap_or_else(|e| {
+        warn!(
+            error = %e,
+            ?destination,
+            "can't tell whether the navigation replaced the old document; waiting for its stop"
+        );
+        false
+    })
 }
 
 /// How a [`LoadTracker`] learns the frame's state before its first event.
@@ -113,17 +209,19 @@ async fn probe_complete(session: &SessionHandle, expression: &str) -> bool {
     }
 }
 
-/// Feed `changes` into `loading`, starting from `initial`.
+/// Feed `changes` into `loading`, starting from `initial`. `destination` is
+/// where an `Initial::Navigating` navigation leads, once known.
 async fn follow(
     mut changes: impl Stream<Item = Change> + Unpin,
     session: SessionHandle,
     initial: Initial,
+    mut destination: watch::Receiver<Option<Destination>>,
     loading: watch::Sender<bool>,
 ) {
     let mut awaiting_start = false;
     // What to ask the page after lost events. `None` while a navigation
-    // hasn't stopped: until its document commits, the page is the old
-    // document, which reads as complete.
+    // hasn't stopped and may not have replaced the old document, which
+    // reads as complete.
     let mut reprobe = None;
     match initial {
         Initial::Navigating => awaiting_start = true,
@@ -147,13 +245,16 @@ async fn follow(
             Change::Lost => {
                 // Unknown until the page answers, or the next stop arrives.
                 loading.send_replace(true);
-                match reprobe {
-                    Some(expression) => {
-                        loading.send_replace(!probe_complete(&session, expression).await);
-                    }
+                if reprobe.is_none() {
                     // The navigation's start, or even its stop, may be
-                    // among the lost events: wait for the next stop.
-                    None => awaiting_start = false,
+                    // among the lost events: the next stop counts.
+                    awaiting_start = false;
+                    if arrived(&session, &mut destination).await {
+                        reprobe = Some("document.readyState");
+                    }
+                }
+                if let Some(expression) = reprobe {
+                    loading.send_replace(!probe_complete(&session, expression).await);
                 }
             }
         }
@@ -195,6 +296,9 @@ pub(crate) async fn next_stop(
 #[derive(Debug)]
 pub(crate) struct LoadTracker {
     loading: watch::Receiver<bool>,
+    /// Where the navigation leads, once known; only a tracker made by
+    /// [`LoadTracker::before_navigating`] reads it.
+    destination: watch::Sender<Option<Destination>>,
     task: JoinHandle<()>,
 }
 
@@ -202,15 +306,34 @@ impl LoadTracker {
     /// Follow frame `frame_id` on `session`, starting from `initial`.
     fn start(session: &SessionHandle, frame_id: &str, initial: Initial) -> Self {
         let changes = changes(session, frame_id);
-        let (tx, rx) = watch::channel(true);
-        let task = tokio::spawn(follow(changes, session.clone(), initial, tx));
-        Self { loading: rx, task }
+        let (loading_tx, loading) = watch::channel(true);
+        let (destination, destination_rx) = watch::channel(None);
+        let task = tokio::spawn(follow(
+            changes,
+            session.clone(),
+            initial,
+            destination_rx,
+            loading_tx,
+        ));
+        Self {
+            loading,
+            destination,
+            task,
+        }
     }
 
-    /// For a caller that is about to start a navigation of frame `frame_id`
-    /// on `session`: loading until that navigation has started and stopped.
+    /// For a caller that is about to start a navigation of the main frame,
+    /// whose id is `frame_id`, on `session`: loading until that navigation
+    /// has started and stopped. Call [`LoadTracker::heading_to`] once the
+    /// command that starts it has replied.
     pub(crate) fn before_navigating(session: &SessionHandle, frame_id: &str) -> Self {
         Self::start(session, frame_id, Initial::Navigating)
+    }
+
+    /// Tell the tracker where its navigation leads. Until then, lost events
+    /// leave it waiting for this.
+    pub(crate) fn heading_to(&self, destination: Destination) {
+        self.destination.send_replace(Some(destination));
     }
 
     /// For a frame whose state is unknown: loading until `expression`,
@@ -252,7 +375,6 @@ impl Drop for LoadTracker {
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use serde_json::Value;
     use zendriver_transport::testing::MockConnection;
 
     const SHORT: Duration = Duration::from_millis(200);
@@ -325,15 +447,27 @@ mod tests {
         }
     }
 
-    /// After lost events, a navigation's tracker doesn't ask the page,
-    /// which is the old document until the new one commits, and still
-    /// complete: it waits for the next stop instead.
+    /// Wait for the tracker to send `method`, and reply `reply`.
+    async fn answer(mock: &mut MockConnection, method: &str, reply: Value) {
+        let id = tokio::time::timeout(LONG, mock.expect_cmd(method))
+            .await
+            .unwrap_or_else(|_| panic!("the tracker didn't send {method}"));
+        mock.reply(id, reply).await;
+    }
+
+    /// After lost events, a navigation's tracker asks Chrome whether the
+    /// frame shows the navigation's destination. Until it does, the page is
+    /// the old document, still complete, so the tracker doesn't ask the
+    /// page: it waits for the next stop instead.
     #[tokio::test]
-    async fn lost_events_leave_a_navigation_waiting_for_its_stop() {
+    async fn lost_events_leave_a_navigation_waiting_until_it_arrives() {
         let (mut mock, conn) = MockConnection::pair();
         let tracker = LoadTracker::before_navigating(&SessionHandle::new(conn.clone(), "S1"), "F");
+        tracker.heading_to(Destination::Document("new".into()));
         mock.reconnect(&conn);
         let waiting = tokio::spawn(tracker.wait(LONG));
+        let tree = json!({ "frameTree": { "frame": { "id": "F", "loaderId": "old" } } });
+        answer(&mut mock, "Page.getFrameTree", tree).await;
         let probe = tokio::time::timeout(SHORT, mock.expect_cmd("Page.enable")).await;
         assert!(
             probe.is_err(),
@@ -342,6 +476,55 @@ mod tests {
         emit(&mock, false, "F", "S1").await;
         waiting.await.unwrap().expect("loaded once it stopped");
         conn.shutdown();
+    }
+
+    /// After lost events, a navigation's tracker that finds the frame at the
+    /// navigation's destination trusts the page's `readyState`, so a lost
+    /// stop doesn't leave it waiting.
+    #[tokio::test]
+    async fn lost_events_after_a_navigation_arrives_make_it_probe() {
+        let tree = |loader: &str| json!({ "frameTree": { "frame": { "loaderId": loader } } });
+        let history = json!({ "currentIndex": 1, "entries": [{ "id": 7 }, { "id": 8 }] });
+        let cases = [
+            (
+                Destination::Document("new".into()),
+                Some(("Page.getFrameTree", tree("new"))),
+            ),
+            (
+                Destination::NotDocument("old".into()),
+                Some(("Page.getFrameTree", tree("new"))),
+            ),
+            (
+                Destination::HistoryEntry(8),
+                Some(("Page.getNavigationHistory", history)),
+            ),
+            (Destination::SameDocument, None),
+        ];
+        for (destination, question) in cases {
+            let (mut mock, conn) = MockConnection::pair();
+            let tracker =
+                LoadTracker::before_navigating(&SessionHandle::new(conn.clone(), "S1"), "F");
+            mock.reconnect(&conn);
+            // The tracker waits for the destination before it asks.
+            let early = mock.recv_cmd_timeout(SHORT).await;
+            assert_eq!(early, None, "asked before the destination was known");
+            tracker.heading_to(destination.clone());
+            if let Some((method, reply)) = question {
+                answer(&mut mock, method, reply).await;
+            }
+            answer(&mut mock, "Page.enable", json!({})).await;
+            let complete = json!({ "result": { "value": "complete" } });
+            answer(&mut mock, "Runtime.evaluate", complete).await;
+            assert_eq!(
+                mock.last_sent()["params"]["expression"],
+                "document.readyState"
+            );
+            tracker
+                .wait(LONG)
+                .await
+                .unwrap_or_else(|e| panic!("{destination:?}: {e}"));
+            conn.shutdown();
+        }
     }
 
     /// After lost events, a navigation's tracker that has seen its stop

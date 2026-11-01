@@ -33,7 +33,7 @@ use crate::error::{Result, ZendriverError};
 use crate::frame::Frame;
 use crate::input::InputController;
 use crate::isolated_world::IsolatedWorldCache;
-use crate::load_tracker::LoadTracker;
+use crate::load_tracker::{Destination, LoadTracker, main_frame_loader_id};
 use crate::network_idle::IdleLossPolicy;
 use crate::screenshot::ScreenshotBuilder;
 
@@ -935,13 +935,20 @@ impl Tab {
     /// the next [`Tab::wait_for_load`] to wait for that navigation. Returns
     /// Chrome's reply.
     ///
+    /// `destination` says, from Chrome's reply, where the navigation leads.
+    ///
     /// # Errors
     ///
     /// The call's own error, or [`ZendriverError::Navigation`] when the
     /// reply carries an `errorText` (only `Page.navigate` replies have one).
     /// Nothing is armed then: an invalid URL starts no navigation at all, so
     /// a wait for one would time out.
-    async fn navigate_main_frame(&self, method: &str, params: Value) -> Result<Value> {
+    async fn navigate_main_frame(
+        &self,
+        method: &str,
+        params: Value,
+        destination: impl FnOnce(&Value) -> Destination,
+    ) -> Result<Value> {
         // The main frame's id is the target id. Created before the call, so
         // this navigation's events can't be missed.
         let tracker = LoadTracker::before_navigating(&self.inner.session, self.target_id());
@@ -953,6 +960,7 @@ impl Tab {
                 return Err(ZendriverError::Navigation(err.to_string()));
             }
         }
+        tracker.heading_to(destination(&res));
         *pending = Some(tracker);
         Ok(res)
     }
@@ -982,7 +990,11 @@ impl Tab {
         // Enable Page domain so we get the main frame's loading events.
         self.call("Page.enable", json!({})).await?;
         let res = self
-            .navigate_main_frame("Page.navigate", json!({ "url": url.as_ref() }))
+            .navigate_main_frame(
+                "Page.navigate",
+                json!({ "url": url.as_ref() }),
+                Destination::of_navigate_reply,
+            )
             .await?;
         let frame_id = res.get("frameId").and_then(|v| v.as_str());
         if frame_id.is_some_and(|id| id != self.target_id()) {
@@ -1514,22 +1526,7 @@ impl Tab {
     /// # Ok(()) }
     /// ```
     pub async fn back(&self) -> Result<()> {
-        let history = self.call("Page.getNavigationHistory", json!({})).await?;
-        let current_idx = history["currentIndex"].as_i64().ok_or_else(|| {
-            ZendriverError::HistoryNavigation(
-                "Page.getNavigationHistory missing currentIndex".into(),
-            )
-        })?;
-        if current_idx <= 0 {
-            return Err(ZendriverError::HistoryNavigation("no back history".into()));
-        }
-        let entry_id = history["entries"][(current_idx - 1) as usize]["id"].clone();
-        self.navigate_main_frame(
-            "Page.navigateToHistoryEntry",
-            json!({ "entryId": entry_id }),
-        )
-        .await?;
-        Ok(())
+        self.step_history(-1).await
     }
 
     /// Navigate one step forward in the tab's session history.
@@ -1560,6 +1557,18 @@ impl Tab {
     /// # Ok(()) }
     /// ```
     pub async fn forward(&self) -> Result<()> {
+        self.step_history(1).await
+    }
+
+    /// Navigate `step` entries through the tab's session history (`-1` is
+    /// back, `1` forward), and arm the next [`Tab::wait_for_load`].
+    ///
+    /// # Errors
+    ///
+    /// [`ZendriverError::HistoryNavigation`] with `"no back history"` or
+    /// `"no forward history"` when there is no entry there, or when Chrome's
+    /// history reply lacks a field.
+    async fn step_history(&self, step: i64) -> Result<()> {
         let history = self.call("Page.getNavigationHistory", json!({})).await?;
         let current_idx = history["currentIndex"].as_i64().ok_or_else(|| {
             ZendriverError::HistoryNavigation(
@@ -1569,15 +1578,20 @@ impl Tab {
         let entries = history["entries"].as_array().ok_or_else(|| {
             ZendriverError::HistoryNavigation("Page.getNavigationHistory missing entries".into())
         })?;
-        if (current_idx + 1) as usize >= entries.len() {
-            return Err(ZendriverError::HistoryNavigation(
-                "no forward history".into(),
-            ));
-        }
-        let entry_id = entries[(current_idx + 1) as usize]["id"].clone();
+        let target = usize::try_from(current_idx + step).ok();
+        let Some(entry) = target.and_then(|i| entries.get(i)) else {
+            let direction = if step < 0 { "back" } else { "forward" };
+            return Err(ZendriverError::HistoryNavigation(format!(
+                "no {direction} history"
+            )));
+        };
+        let entry_id = entry["id"].as_i64().ok_or_else(|| {
+            ZendriverError::HistoryNavigation("Page.getNavigationHistory entry missing id".into())
+        })?;
         self.navigate_main_frame(
             "Page.navigateToHistoryEntry",
             json!({ "entryId": entry_id }),
+            |_| Destination::HistoryEntry(entry_id),
         )
         .await?;
         Ok(())
@@ -1600,9 +1614,7 @@ impl Tab {
     /// # Ok(()) }
     /// ```
     pub async fn reload(&self) -> Result<()> {
-        self.navigate_main_frame("Page.reload", json!({ "ignoreCache": false }))
-            .await?;
-        Ok(())
+        self.reload_with(ReloadOptions::default()).await
     }
 
     /// Reload the tab's current page with explicit options.
@@ -1633,7 +1645,13 @@ impl Tab {
         if let Some(script) = opts.script_to_evaluate_on_load {
             params["scriptToEvaluateOnLoad"] = Value::String(script);
         }
-        self.navigate_main_frame("Page.reload", params).await?;
+        // `Page.reload` returns no loader id, so the reload's document is
+        // known only as a different one.
+        let reloaded = main_frame_loader_id(&self.inner.session).await?;
+        self.navigate_main_frame("Page.reload", params, |_| {
+            Destination::NotDocument(reloaded)
+        })
+        .await?;
         Ok(())
     }
 
@@ -3707,6 +3725,9 @@ mod tests {
             async move { t.reload().await }
         });
 
+        let id = mock.expect_cmd("Page.getFrameTree").await;
+        mock.reply(id, json!({ "frameTree": { "frame": { "loaderId": "L" } } }))
+            .await;
         let id = mock.expect_cmd("Page.reload").await;
         assert_eq!(mock.last_sent()["params"]["ignoreCache"], false);
         mock.reply(id, json!({})).await;
@@ -3732,6 +3753,9 @@ mod tests {
             }
         });
 
+        let id = mock.expect_cmd("Page.getFrameTree").await;
+        mock.reply(id, json!({ "frameTree": { "frame": { "loaderId": "L" } } }))
+            .await;
         let id = mock.expect_cmd("Page.reload").await;
         assert_eq!(mock.last_sent()["params"]["ignoreCache"], true);
         assert_eq!(mock.last_sent()["params"]["scriptToEvaluateOnLoad"], "x");
@@ -3758,6 +3782,9 @@ mod tests {
             }
         });
 
+        let id = mock.expect_cmd("Page.getFrameTree").await;
+        mock.reply(id, json!({ "frameTree": { "frame": { "loaderId": "L" } } }))
+            .await;
         let id = mock.expect_cmd("Page.reload").await;
         assert_eq!(mock.last_sent()["params"]["ignoreCache"], false);
         // scriptToEvaluateOnLoad must be omitted entirely when None.
