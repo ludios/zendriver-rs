@@ -19,9 +19,11 @@
 //! navigation's [`Destination`], and a tracker that saw another load start
 //! waits for that load's stop.
 
+use std::pin::Pin;
 use std::time::Duration;
 
-use futures::{Stream, StreamExt};
+use futures::stream::Peekable;
+use futures::{FutureExt, Stream, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -232,15 +234,22 @@ async fn probe_complete(session: &SessionHandle, expression: &str) -> Option<boo
     }
 }
 
+/// Whether a change is already waiting in `changes`, without waiting for
+/// one.
+fn change_queued(changes: &mut Peekable<impl Stream<Item = Change> + Unpin>) -> bool {
+    Pin::new(changes).peek().now_or_never().flatten().is_some()
+}
+
 /// Feed `changes` into `loading`, for the load `initial`. `destination` is
 /// where an `Initial::Navigating` navigation leads, once known.
 async fn follow(
-    mut changes: impl Stream<Item = Change> + Unpin,
+    changes: impl Stream<Item = Change> + Unpin,
     session: SessionHandle,
     initial: Initial,
     mut destination: watch::Receiver<Option<Destination>>,
     loading: watch::Sender<bool>,
 ) {
+    let mut changes = changes.peekable();
     let mut recheck = match initial {
         Initial::Navigating => Recheck::Arrival,
         Initial::NewTab => Recheck::NewTab,
@@ -251,16 +260,23 @@ async fn follow(
     let mut started = false;
     // Take the page's answer `complete` to `recheck`'s expression, given
     // whether the frame was loading before the question (a failed question
-    // leaves that). A complete page counts as a stop.
-    let answer = |complete: Option<bool>, was_loading: bool, recheck: &mut Recheck| {
+    // leaves that). A complete page counts as a stop. A change that arrived
+    // while the page answered is newer than the answer, so the frame stays
+    // loading until that change is taken.
+    let answer = |complete: Option<bool>,
+                  was_loading: bool,
+                  recheck: &mut Recheck,
+                  changes: &mut Peekable<_>| {
         if complete == Some(true) {
             *recheck = Recheck::ReadyState;
         }
-        loading.send_replace(complete.map_or(was_loading, |complete| !complete));
+        if !change_queued(changes) {
+            loading.send_replace(complete.map_or(was_loading, |complete| !complete));
+        }
     };
     if let Some(expression) = recheck.expression() {
         let complete = probe_complete(&session, expression).await;
-        answer(complete, true, &mut recheck);
+        answer(complete, true, &mut recheck, &mut changes);
     }
     while let Some(change) = changes.next().await {
         match change {
@@ -288,7 +304,7 @@ async fn follow(
                 }
                 if let Some(expression) = recheck.expression() {
                     let complete = probe_complete(&session, expression).await;
-                    answer(complete, was_loading, &mut recheck);
+                    answer(complete, was_loading, &mut recheck, &mut changes);
                 }
             }
         }
@@ -593,6 +609,34 @@ mod tests {
         let loading = json!({ "result": { "value": "loading" } });
         answer(&mut mock, "Runtime.evaluate", loading).await;
         assert_eq!(mock.last_sent()["params"]["expression"], READY_STATE);
+        let res = tracker.wait(SHORT).await;
+        assert!(matches!(res, Err(ZendriverError::Timeout(_))), "{res:?}");
+        conn.shutdown();
+    }
+
+    /// A change that arrives while the page answers is newer than the
+    /// answer: a later load's start that comes in while the tracker asks
+    /// whether its navigation arrived keeps it loading, though the page then
+    /// says complete. (Only the outcome is checked: the tracker must not
+    /// publish "loaded" before it takes the start, but on this test's
+    /// current-thread runtime, no waiter could run in between anyway.)
+    #[tokio::test]
+    async fn a_start_during_the_questions_beats_the_answer() {
+        let (mut mock, conn) = MockConnection::pair();
+        let tracker = LoadTracker::before_navigating(&SessionHandle::new(conn.clone(), "S1"), "F");
+        tracker.heading_to(Destination::Document("new".into()));
+        emit_delivered(&mock, &conn, &[true]).await;
+        mock.reconnect(&conn);
+        let id = tokio::time::timeout(LONG, mock.expect_cmd("Page.getFrameTree"))
+            .await
+            .expect("no arrival check after lost events");
+        // Chrome sends the event before the reply.
+        emit(&mock, true, "F", "S1").await;
+        let tree = json!({ "frameTree": { "frame": { "loaderId": "new" } } });
+        mock.reply(id, tree).await;
+        answer(&mut mock, "Page.enable", json!({})).await;
+        let complete = json!({ "result": { "value": "complete" } });
+        answer(&mut mock, "Runtime.evaluate", complete).await;
         let res = tracker.wait(SHORT).await;
         assert!(matches!(res, Err(ZendriverError::Timeout(_))), "{res:?}");
         conn.shutdown();
