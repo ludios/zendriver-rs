@@ -119,7 +119,7 @@ per-session interception actor used for tracker blocking (never two
 actors on one session). The handler gives the credentials only to the
 proxy, never to a site that asks for its own with a 401, and only once for
 each combination of request, proxy and auth scheme: if the proxy rejects
-them, the request fails instead of retrying forever. Without the `interception` feature, `.proxy()`
+them within a minute, the request fails instead of retrying forever. Without the `interception` feature, `.proxy()`
 and `.proxy_bypass()` still work (proxy routing only); embedded or
 explicit credentials are logged as inactive since there is no actor to
 install them into.

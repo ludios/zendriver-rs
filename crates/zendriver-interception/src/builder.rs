@@ -133,10 +133,11 @@ impl<'tab> InterceptBuilder<'tab> {
     /// with `Fetch.continueWithAuth { authChallengeResponse: { response:
     /// "ProvideCredentials", username, password } }`. Each request gets the
     /// credentials once per proxy and auth scheme: if the same proxy
-    /// challenges it again with the same scheme, which means it rejected
-    /// them, the challenge is cancelled and the request fails. (After a PAC
-    /// failover to another proxy, or a fallback to another scheme, the
-    /// request gets them again.) A
+    /// challenges it again with the same scheme within a minute, which means
+    /// it rejected them, the challenge is cancelled and the request fails.
+    /// (After a PAC failover to another proxy, or a fallback to another
+    /// scheme, the request gets them again, and so does a repeat that comes
+    /// over a minute later.) A
     /// challenge from the server (HTTP 401) gets `Default`, never these
     /// credentials, so a site can't collect them. To log into a site's own
     /// HTTP auth, add an `Authorization` header to its requests with

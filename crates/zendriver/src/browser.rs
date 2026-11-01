@@ -901,7 +901,8 @@ impl BrowserBuilder {
     /// that sends `Fetch.enable { handleAuthRequests: true }` and answers a
     /// proxy's `Fetch.authRequired` with `Fetch.continueWithAuth` carrying
     /// these credentials, once for each combination of request, proxy and
-    /// auth scheme (if the proxy rejects them, the request fails).
+    /// auth scheme (if the proxy rejects them within a minute, the request
+    /// fails).
     /// A site's own challenge (HTTP 401) never gets them. Combine with `.arg("--proxy-server=...")`
     /// to drive Chrome through an authenticated upstream proxy without the
     /// extension-based workarounds the upstream Python project requires.
