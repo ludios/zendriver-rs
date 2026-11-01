@@ -1813,11 +1813,11 @@ pub struct Browser {
 pub(crate) struct BrowserInner {
     pub(crate) conn: Connection,
     pub(crate) main_tab: Tab,
-    /// CDP `browserContextId` of the default `BrowserContext`, taken from
-    /// the initial page's `TargetInfo`. Chrome names the default context
-    /// too, but Chrome before ~153 rejects that id in `browserContextId`,
-    /// so a tab in this context records none ([`Tab`]'s cookie jar then
-    /// names no context).
+    /// CDP `browserContextId` of the default `BrowserContext`, as
+    /// `find_default_context_id` finds it at connect. Chrome names the
+    /// default context too, but Chrome before ~153 rejects that id in
+    /// `browserContextId`, so a tab in this context records none ([`Tab`]'s
+    /// cookie jar then names no context).
     pub(crate) default_context_id: Option<String>,
     pub(crate) child: tokio::sync::Mutex<Option<Child>>,
     /// Windows job object confining Chrome's whole process tree; a zero-sized
@@ -2935,6 +2935,44 @@ async fn poll_initial_targets(
     }
 }
 
+/// The id of Chrome's default `BrowserContext`, or `None` if it can't be
+/// told.
+///
+/// Chrome 145 and later return it from `Target.getBrowserContexts`. Older
+/// Chrome lists there only the contexts that DevTools created, so the
+/// default one is the context of the first page in `targets` (the
+/// `targetInfos` of `Target.getTargets`) that isn't in that list.
+async fn find_default_context_id(
+    conn: &zendriver_transport::Connection,
+    targets: &[serde_json::Value],
+) -> Option<String> {
+    let contexts = match conn
+        .call_raw("Target.getBrowserContexts", json!({}), None)
+        .await
+    {
+        Ok(contexts) => contexts,
+        Err(e) => {
+            warn!(
+                error = %e,
+                "Target.getBrowserContexts failed; cookie jars of default-context tabs will \
+                 name the default context, which Chrome before ~153 rejects"
+            );
+            return None;
+        }
+    };
+    if let Some(id) = contexts["defaultBrowserContextId"].as_str() {
+        return Some(id.to_string());
+    }
+    let created = contexts["browserContextIds"].as_array();
+    let created = |id: &str| created.is_some_and(|ids| ids.iter().any(|c| c == id));
+    targets
+        .iter()
+        .filter(|t| t["type"] == "page")
+        .filter_map(|t| t["browserContextId"].as_str())
+        .find(|id| !created(id))
+        .map(str::to_string)
+}
+
 pub(crate) async fn finish_connect(
     args: FinishConnect,
 ) -> Result<Arc<BrowserInner>, ZendriverError> {
@@ -2992,8 +3030,12 @@ pub(crate) async fn finish_connect(
         .and_then(|t| t["targetId"].as_str())
         .ok_or_else(|| ZendriverError::Navigation("no initial target found".into()))?
         .to_string();
-    let default_context_id = main_target
+    let default_context_id = find_default_context_id(&conn, targets).await;
+    // Like every tab, the main tab names its context only when it isn't the
+    // default one (see `BrowserInner::default_context_id`).
+    let main_context_id = main_target
         .and_then(|t| t["browserContextId"].as_str())
+        .filter(|id| default_context_id.as_deref() != Some(*id))
         .map(str::to_string);
 
     // Every *other* page target is a window we are not driving. Chrome opens
@@ -3067,7 +3109,13 @@ pub(crate) async fn finish_connect(
     // `Arc::new_cyclic` self-referential pattern.
     let inner = Arc::new_cyclic(|weak: &std::sync::Weak<BrowserInner>| {
         let main_tab_input = InputController::new(input_profile.clone());
-        let main_tab = Tab::new(main_session, weak.clone(), main_tab_input, target_id, None);
+        let main_tab = Tab::new(
+            main_session,
+            weak.clone(),
+            main_tab_input,
+            target_id,
+            main_context_id,
+        );
         BrowserInner {
             conn,
             main_tab,
@@ -7734,9 +7782,8 @@ mod tests {
         mock.reply(id, json!({})).await;
 
         // 2. Initial-target discovery.
-        let id = mock.expect_cmd("Target.getTargets").await;
-        mock.reply(
-            id,
+        answer_targets(
+            &mut mock,
             json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
         )
         .await;
@@ -7759,6 +7806,19 @@ mod tests {
         assert!(inner.tabs.read().await.contains_key("S1"));
 
         inner.conn.shutdown();
+    }
+
+    /// Answer the handshake's `Target.getTargets` with `reply`, and its
+    /// `Target.getBrowserContexts` with the default context `CTX_DEFAULT`.
+    async fn answer_targets(
+        mock: &mut zendriver_transport::testing::MockConnection,
+        reply: serde_json::Value,
+    ) {
+        let id = mock.expect_cmd("Target.getTargets").await;
+        mock.reply(id, reply).await;
+        let id = mock.expect_cmd("Target.getBrowserContexts").await;
+        let contexts = json!({ "browserContextIds": [], "defaultBrowserContextId": "CTX_DEFAULT" });
+        mock.reply(id, contexts).await;
     }
 
     /// A connected (non-owning) [`Browser`] has `owns_process == false`, and
@@ -7794,9 +7854,8 @@ mod tests {
 
         let id = mock.expect_cmd("Target.setAutoAttach").await;
         mock.reply(id, json!({})).await;
-        let id = mock.expect_cmd("Target.getTargets").await;
-        mock.reply(
-            id,
+        answer_targets(
+            &mut mock,
             json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
         )
         .await;
@@ -7949,6 +8008,40 @@ mod tests {
         );
     }
 
+    /// The default context is the one Chrome names (145 and later), else
+    /// the first page's context that DevTools didn't create; a failed call
+    /// gives none.
+    #[tokio::test]
+    async fn find_default_context_id_asks_chrome() {
+        use zendriver_transport::testing::MockConnection;
+        let targets = json!([
+            { "targetId": "T0", "type": "service_worker", "browserContextId": "W" },
+            { "targetId": "T1", "type": "page", "browserContextId": "ISO" },
+            { "targetId": "T2", "type": "page", "browserContextId": "DEF" },
+        ]);
+        let cases = [
+            (
+                json!({ "browserContextIds": ["ISO"], "defaultBrowserContextId": "NEW" }),
+                Some("NEW"),
+            ),
+            (json!({ "browserContextIds": ["ISO"] }), Some("DEF")),
+            (json!({ "browserContextIds": ["ISO", "DEF"] }), None),
+        ];
+        for (reply, want) in cases {
+            let (mut mock, conn) = MockConnection::pair();
+            let targets = targets.as_array().unwrap().clone();
+            let fut = tokio::spawn(async move { find_default_context_id(&conn, &targets).await });
+            let id = mock.expect_cmd("Target.getBrowserContexts").await;
+            mock.reply(id, reply).await;
+            assert_eq!(fut.await.unwrap().as_deref(), want);
+        }
+        let (mut mock, conn) = MockConnection::pair();
+        let fut = tokio::spawn(async move { find_default_context_id(&conn, &[]).await });
+        let id = mock.expect_cmd("Target.getBrowserContexts").await;
+        mock.reply_err(id, -32000, "Not allowed").await;
+        assert_eq!(fut.await.unwrap(), None);
+    }
+
     /// The regression this exists for. Chrome prints its DevTools banner before creating the
     /// initial target, so an early `getTargets` sees an empty list from a healthy browser.
     /// Measured worst case was ~70 ms on a slow Windows host against a ~15 ms check, which
@@ -8033,9 +8126,8 @@ mod tests {
 
         let id = mock.expect_cmd("Target.setAutoAttach").await;
         mock.reply(id, json!({})).await;
-        let id = mock.expect_cmd("Target.getTargets").await;
-        mock.reply(
-            id,
+        answer_targets(
+            &mut mock,
             json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
         )
         .await;
@@ -8081,9 +8173,8 @@ mod tests {
 
         let id = mock.expect_cmd("Target.setAutoAttach").await;
         mock.reply(id, json!({})).await;
-        let id = mock.expect_cmd("Target.getTargets").await;
-        mock.reply(
-            id,
+        answer_targets(
+            &mut mock,
             json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
         )
         .await;
@@ -8303,9 +8394,8 @@ mod tests {
         }));
         let id = mock.expect_cmd("Target.setAutoAttach").await;
         mock.reply(id, json!({})).await;
-        let id = mock.expect_cmd("Target.getTargets").await;
-        mock.reply(
-            id,
+        answer_targets(
+            &mut mock,
             json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
         )
         .await;
@@ -8358,9 +8448,8 @@ mod tests {
         mock.reply(id, json!({})).await;
 
         // Two page targets — the double-window symptom.
-        let id = mock.expect_cmd("Target.getTargets").await;
-        mock.reply(
-            id,
+        answer_targets(
+            &mut mock,
             json!({ "targetInfos": [
                 { "targetId": "T1", "type": "page", "url": "about:blank" },
                 { "targetId": "T2", "type": "page", "url": "chrome://newtab/" },
@@ -8502,9 +8591,8 @@ mod tests {
 
         let id = mock.expect_cmd("Target.setAutoAttach").await;
         mock.reply(id, json!({})).await;
-        let id = mock.expect_cmd("Target.getTargets").await;
-        mock.reply(
-            id,
+        answer_targets(
+            &mut mock,
             json!({ "targetInfos": [
                 { "targetId": "T1", "type": "page", "url": "about:blank" },
             ] }),
@@ -8555,9 +8643,8 @@ mod tests {
 
         let id = mock.expect_cmd("Target.setAutoAttach").await;
         mock.reply(id, json!({})).await;
-        let id = mock.expect_cmd("Target.getTargets").await;
-        mock.reply(
-            id,
+        answer_targets(
+            &mut mock,
             json!({ "targetInfos": [
                 { "targetId": "T1", "type": "page", "url": "about:blank" },
                 // A non-page target must never be swept — it is not a window.
@@ -8619,9 +8706,8 @@ mod tests {
 
         let id = mock.expect_cmd("Target.setAutoAttach").await;
         mock.reply(id, json!({})).await;
-        let id = mock.expect_cmd("Target.getTargets").await;
-        mock.reply(
-            id,
+        answer_targets(
+            &mut mock,
             json!({ "targetInfos": [
                 { "targetId": "T1", "type": "page", "url": "https://mail.test/" },
                 { "targetId": "T2", "type": "page", "url": "https://docs.test/" },

@@ -307,6 +307,42 @@ async fn tab_cookies_stay_in_an_isolated_context() {
     browser.close().await;
 }
 
+/// `connect` to a Chrome whose only page is in an isolated context: the
+/// main tab's jar reads that context, not the default one.
+#[tokio::test]
+async fn a_connected_main_tab_reads_its_isolated_context() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let context = browser
+        .browser_context()
+        .build()
+        .await
+        .expect("browser context");
+    let tab = context.new_tab().await.expect("new_tab");
+    load(&tab, &server.url("127.0.0.1", "/plain")).await;
+    eval(&tab, &format!("document.cookie = '{NAME}=oat'")).await;
+    let inspector = tab.inspector_url().expect("inspector url");
+    let host_port = inspector
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_else(|| panic!("unexpected inspector url {inspector}"));
+    browser
+        .main_tab()
+        .close()
+        .await
+        .expect("close the main tab");
+
+    let connected = Browser::connect(format!("http://{host_port}"))
+        .await
+        .expect("connect");
+    let all = connected.main_tab().cookies().all().await.expect("all");
+    assert!(has_cookie(&all), "the main tab's jar: {all:?}");
+    let default = connected.cookies().all().await.expect("browser all");
+    assert!(!has_cookie(&default), "the default jar: {default:?}");
+    connected.close().await.expect("close the connection");
+    browser.close().await;
+}
+
 /// A default-context tab's jar names no context: Chrome before ~153 knows
 /// only the contexts DevTools created, and rejects the default one's id.
 /// (Chrome 156 accepts it, so this reads the jar's `Debug`.)
