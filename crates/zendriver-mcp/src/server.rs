@@ -555,7 +555,7 @@ impl ZendriverServer {
     /// Fetch the browser's cookies.
     #[tool(
         name = "browser_cookies_get",
-        description = "Fetch the browser's cookies. With `url` set, returns only cookies that a request to that URL would carry (matching domain, path and `Secure`); otherwise returns every cookie in the store (`Storage.getCookies`). `name` (optional) post-filters by exact-match cookie name. Returns `{ cookies: [...] }`."
+        description = "Fetch the browser's cookies. With `url` set, returns only cookies that a tab showing that URL would send to it (matching domain, path and `Secure`, an http, https, ws or wss scheme, and, for a partitioned cookie, the URL's own site); otherwise returns every cookie in the store (`Storage.getCookies`). `name` (optional) post-filters by exact-match cookie name. Returns `{ cookies: [...] }`."
     )]
     pub async fn browser_cookies_get(
         &self,

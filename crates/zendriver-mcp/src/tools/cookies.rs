@@ -268,9 +268,10 @@ impl From<CookieDto> for zendriver::Cookie {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CookiesGetInput {
-    /// When set, returns only cookies that a request to this URL would
-    /// carry (matching domain, path and `Secure`). When unset, returns
-    /// every cookie in the browser's store.
+    /// When set, returns only cookies that a tab showing this URL would
+    /// send to it (matching domain, path and `Secure`, an http, https, ws
+    /// or wss scheme, and, for a partitioned cookie, the URL's own site).
+    /// When unset, returns every cookie in the browser's store.
     #[serde(default)]
     pub url: Option<String>,
     /// When set, post-filters the result to cookies whose `name` matches

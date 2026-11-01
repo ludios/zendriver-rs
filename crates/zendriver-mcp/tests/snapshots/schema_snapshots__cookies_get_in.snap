@@ -14,7 +14,7 @@ properties:
       - "null"
     default: ~
   url:
-    description: "When set, returns only cookies that a request to this URL would\ncarry (matching domain, path and `Secure`). When unset, returns\nevery cookie in the browser's store."
+    description: "When set, returns only cookies that a tab showing this URL would\nsend to it (matching domain, path and `Secure`, an http, https, ws\nor wss scheme, and, for a partitioned cookie, the URL's own site).\nWhen unset, returns every cookie in the browser's store."
     type:
       - string
       - "null"
