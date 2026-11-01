@@ -567,9 +567,20 @@ impl CookieJar {
                     && domain.is_none_or(|d| c.domain.trim_start_matches('.') == d)
                     && path.is_none_or(|p| c.path == p)
             })
-            .map(|c| CdpCookie {
-                expires: Some(EXPIRED),
-                ..c.into()
+            .map(|c| {
+                let mut expired = CdpCookie {
+                    expires: Some(EXPIRED),
+                    ..c.into()
+                };
+                // Chrome rejects a `Secure` cookie whose source scheme is
+                // `NonSecure`, as one that an `http` loopback page set is.
+                // Unless Chrome binds cookies to their scheme (by default it
+                // doesn't), the scheme isn't part of a cookie's identity, so
+                // the copy without it still replaces the cookie.
+                if expired.secure && expired.source_scheme == Some(CookieSourceScheme::NonSecure) {
+                    expired.source_scheme = None;
+                }
+                expired
             })
             .collect();
         if expired.is_empty() {
@@ -822,15 +833,20 @@ mod tests {
     ) -> Vec<(String, String, String)> {
         let (mut mock, conn) = MockConnection::pair();
         let jar = CookieJar::new(conn.clone());
-        let call = tokio::spawn(async move { jar.delete(name, domain, path).await });
+        let mut call = tokio::spawn(async move { jar.delete(name, domain, path).await });
         let id = mock.expect_cmd("Storage.getCookies").await;
         mock.reply(id, json!({ "cookies": stored })).await;
         let mut deleted = Vec::new();
-        if let Some((method, id)) = mock
-            .recv_cmd_timeout(std::time::Duration::from_millis(200))
-            .await
-        {
-            assert_eq!(method, "Storage.setCookies");
+        // `delete` either returns without sending anything, or sends
+        // `Storage.setCookies` and waits for the reply.
+        let set = tokio::select! {
+            done = &mut call => {
+                done.unwrap().unwrap();
+                None
+            }
+            id = mock.expect_cmd("Storage.setCookies") => Some(id),
+        };
+        if let Some(id) = set {
             for c in mock.last_sent()["params"]["cookies"].as_array().unwrap() {
                 assert_eq!(c["expires"], EXPIRED, "not expired: {c}");
                 deleted.push((
@@ -840,8 +856,8 @@ mod tests {
                 ));
             }
             mock.reply(id, json!({})).await;
+            call.await.unwrap().unwrap();
         }
-        call.await.unwrap().unwrap();
         conn.shutdown();
         deleted
     }

@@ -239,6 +239,39 @@ async fn delete_by_name_alone_deletes_it_on_every_domain() {
     browser.close().await;
 }
 
+/// `delete` removes cookies that Chrome can't simply re-set as they are: a
+/// `Secure` cookie that a loopback page set over http (its source scheme is
+/// `NonSecure`), next to a `Secure` and a non-`Secure` one on another site.
+#[tokio::test]
+async fn delete_removes_secure_cookies_from_loopback_pages() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    for (host, cookie) in [
+        ("a.test", "dup=1"),
+        ("127.0.0.1", "dup=2; secure"),
+        ("localhost", "dup=3; secure"),
+    ] {
+        load(&tab, &server.url(host, "/plain")).await;
+        eval(&tab, &format!("document.cookie = '{cookie}'")).await;
+    }
+    let jar = browser.cookies();
+    let secure = Cookie {
+        name: "dup".into(),
+        value: "4".into(),
+        domain: ".a.test".into(),
+        path: "/".into(),
+        secure: true,
+        ..Default::default()
+    };
+    jar.set(secure).await.expect("set");
+    assert_eq!(jar.all().await.expect("all").len(), 4);
+    jar.delete("dup", None, None).await.expect("delete");
+    let left = jar.all().await.expect("all");
+    assert!(left.is_empty(), "left: {left:?}");
+    browser.close().await;
+}
+
 /// A tab in an isolated browser context: its jar reads, finds and deletes
 /// that context's cookies, and the browser's jar doesn't see them.
 #[tokio::test]
