@@ -409,7 +409,8 @@ pub enum BrowserError {
     /// its JSON body.
     #[error("could not get a DevTools WebSocket URL from {endpoint}: {reason}")]
     ConnectEndpoint {
-        /// The endpoint given to `connect`.
+        /// The endpoint given to `connect`; a URL without its user info,
+        /// query and fragment, which may hold secrets.
         endpoint: String,
         /// What went wrong, with the reply's status line and the start of
         /// its body when there was a reply.

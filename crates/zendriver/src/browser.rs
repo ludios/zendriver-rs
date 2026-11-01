@@ -3199,10 +3199,31 @@ fn complete_body(buf: &[u8]) -> Option<Vec<u8>> {
     body.get(..len).map(<[u8]>::to_vec)
 }
 
+/// `endpoint` as an error shows it: a URL without its user info, query and
+/// fragment, which may hold secrets (a password, a token).
+fn shown_endpoint(endpoint: &str) -> String {
+    let Ok(mut url) = url::Url::parse(endpoint) else {
+        return endpoint.to_string();
+    };
+    let secret = !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some();
+    if !secret {
+        return endpoint.to_string();
+    }
+    // Both fail only for a URL that can't have user info.
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.into()
+}
+
 /// A [`BrowserError::ConnectEndpoint`] for `endpoint`, saying `reason`.
 fn endpoint_error(endpoint: &str, reason: impl Into<String>) -> ZendriverError {
     BrowserError::ConnectEndpoint {
-        endpoint: endpoint.to_string(),
+        endpoint: shown_endpoint(endpoint),
         reason: reason.into(),
     }
     .into()
@@ -7397,17 +7418,21 @@ mod tests {
         let upper = "WSS://127.0.0.1:9222/devtools/browser/abc";
         let wss = "wss://127.0.0.1:9222/devtools/browser/abc";
         assert_eq!(resolve_ws_url(upper).await.unwrap(), wss);
-        for given in [
-            "https://127.0.0.1:9222",
-            "ftp://127.0.0.1:9222",
-            "http://",
-            "127.0.0.1:9222",
+        // The error names the endpoint, without what may be secret in it.
+        for (given, shown) in [
+            (
+                "https://user:pw@127.0.0.1:9222/x?token=t#f",
+                "https://127.0.0.1:9222/x",
+            ),
+            ("ftp://127.0.0.1:9222", "ftp://127.0.0.1:9222"),
+            ("http://", "http://"),
+            ("127.0.0.1:9222", "127.0.0.1:9222"),
         ] {
             match resolve_ws_url(given).await {
                 Err(ZendriverError::Browser(BrowserError::ConnectEndpoint {
                     endpoint, ..
                 })) => {
-                    assert_eq!(endpoint, given);
+                    assert_eq!(endpoint, shown);
                 }
                 other => panic!("{given}: {other:?}"),
             }
