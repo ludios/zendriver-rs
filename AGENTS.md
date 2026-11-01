@@ -110,15 +110,18 @@ When there are multiple good ways to implement something, especially involving s
 
 Fork of [TurtIeSocks/zendriver-rs](https://github.com/TurtIeSocks/zendriver-rs): async Chrome automation over the DevTools Protocol, plus stealth / WAF-bypass crates and an MCP server. Upstream's CLAUDE.md has the workspace layout and what upstream expects of a public API change (MCP coverage ledger, schema snapshots, docs sync); read it.
 
-To see how Chrome itself implements a CDP command or event, read the Chromium source checkout at `~/cloned/chromium-src` (its version is in `chrome/VERSION`). The CDP code is in these directories under it:
+To see how Chrome itself implements a CDP command or event, read the Chromium source checkout at `~/cloned/chromium-src`. Start with its `third_party/blink/public/devtools_protocol/README.md`: the "Agents, targets, and sessions" section explains how one command can pass through the code of several layers, and the "Testing" section says where each kind of test is. The main places, all under `~/cloned/chromium-src`, are:
 
 - `third_party/blink/public/devtools_protocol/domains/*.pdl`: the protocol definitions (the commands, events, and types of each domain, with their doc comments).
-- `content/browser/devtools/protocol/*_handler.cc`: the handlers that run in the browser process, e.g. `page_handler.cc`, `fetch_handler.cc`, `target_handler.cc`.
-- `chrome/browser/devtools/protocol/*_handler.cc`: more browser-process handlers, for behavior that Chrome adds on top of the `content` layer.
-- `third_party/blink/renderer/core/inspector/inspector_*_agent.cc`: the agents that run in the renderer process, e.g. `inspector_dom_agent.cc`, `inspector_page_agent.cc`.
-- `third_party/blink/web_tests/inspector-protocol/`: Chromium's JavaScript tests of CDP behavior.
+- `content/browser/devtools/` and `chrome/browser/devtools/`, including their `protocol/` subdirectories: the code that runs in the browser process. Each domain there is implemented by a class named `<Domain>Handler`, e.g. `PageHandler` in `content/browser/devtools/protocol/page_handler.cc`.
+- `third_party/blink/renderer/core/inspector/` and the `third_party/blink/renderer/modules/*/` subdirectories: the code that runs in the renderer process. Each domain there is usually implemented by a class named `Inspector<Domain>Agent`, e.g. `InspectorDOMAgent` in `third_party/blink/renderer/core/inspector/inspector_dom_agent.cc`.
+- `third_party/blink/web_tests/inspector-protocol/` and `third_party/blink/web_tests/http/tests/inspector-protocol/`: Chromium's JavaScript tests of CDP behavior. These run in content_shell, which lacks the `chrome/` layer; the JavaScript tests that run in Chrome itself are in `chrome/browser/headless/test/data/protocol/`.
 
-One domain is often implemented in more than one of these directories, so search all of them. The C++ method names are in PascalCase: for `Page.setDownloadBehavior`, search for `SetDownloadBehavior`. The `v8/` directory of this checkout is empty, so the V8-implemented domains (`Runtime`, `Debugger`, `Profiler`, `HeapProfiler`) are not available there.
+The method names differ in case between the two processes: the browser-process handlers use PascalCase, and the renderer-process agents keep the camelCase name of the CDP command. For example, to find the code for `Page.reload`, search for both `Handler::Reload` and `Agent::reload`.
+
+The checkout follows Chromium's `main` branch, so it may be newer than the installed Chrome: compare its `chrome/VERSION` with `google-chrome --version`. The checkout has a git tag for each Chrome release, so `git -C ~/cloned/chromium-src show <version>:<path>` shows a file as it was in that release.
+
+The `v8/` directory of this checkout is empty. So V8's half of the `Runtime`, `Debugger`, `Profiler`, and `HeapProfiler` domains (their definitions in `js_protocol.pdl`, and V8's implementation of them) is missing. Present are the JavaScript tests of those domains (e.g. under `third_party/blink/web_tests/inspector-protocol/runtime/`) and Blink's code that connects Blink to V8's implementation (e.g. `third_party/blink/renderer/core/inspector/main_thread_debugger.cc`).
 
 # Before committing
 
