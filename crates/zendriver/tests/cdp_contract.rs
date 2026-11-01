@@ -130,6 +130,7 @@ const COMMANDS: &[(&str, Scope)] = &[
     ("Target.createTarget", B),
     ("Target.detachFromTarget", B),
     ("Target.disposeBrowserContext", B),
+    ("Target.getBrowserContexts", B),
     ("Target.getTargetInfo", P),
     ("Target.getTargets", B),
     ("Target.setAutoAttach", B),
