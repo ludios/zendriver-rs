@@ -111,15 +111,18 @@ async fn arrived(
     })
 }
 
-/// How a [`LoadTracker`] learns the frame's state before its first event.
+/// The load a [`LoadTracker`] waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Initial {
-    /// The caller is about to start a navigation: loading until it starts
+    /// A navigation the caller is about to start: loading until it starts
     /// and then stops. A stop before the start belongs to an earlier load.
     Navigating,
-    /// Evaluate this expression in the frame's main world; the frame has
-    /// loaded iff it is `"complete"`.
-    Probe(&'static str),
+    /// A new tab's first navigation, which may not have started: loading
+    /// until the page has left `about:blank` and loaded, or a stop arrives.
+    NewTab,
+    /// The current document's: loading until it has loaded, or a stop
+    /// arrives.
+    Current,
 }
 
 /// The changes of frame `frame_id` that `session` receives from now on, in
@@ -168,21 +171,39 @@ fn changes(
 /// loading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Recheck {
-    /// The tracker's own navigation hasn't stopped: if the frame shows the
-    /// navigation's destination, ask the page's `document.readyState`;
-    /// otherwise wait for the next stop.
+    /// The tracker's own navigation hasn't stopped, and no other load has
+    /// started: if the frame shows the navigation's destination, ask the
+    /// page's `document.readyState`; otherwise wait for the next stop.
     Arrival,
-    /// Ask the page this expression: the frame has loaded iff it is
-    /// `"complete"`.
-    Probe(&'static str),
+    /// A new tab's first navigation hasn't stopped, and no other load has
+    /// started: ask the page [`LEFT_BLANK`].
+    NewTab,
+    /// No load has started since the frame last stopped, or since the
+    /// tracker began: ask the page [`READY_STATE`].
+    ReadyState,
     /// Wait for the next stop. A load the tracker didn't start has started,
     /// and until its document commits, the page is the old document, which
     /// reads as complete.
     NextStop,
 }
 
-/// The expression that says whether the current document has loaded.
-pub(crate) const READY_STATE: &str = "document.readyState";
+/// Whether the current document has loaded: `"complete"` if so.
+const READY_STATE: &str = "document.readyState";
+
+/// Whether a new tab has left `about:blank` and loaded: `"complete"` if so.
+const LEFT_BLANK: &str = "location.href === 'about:blank' ? 'blank' : document.readyState";
+
+impl Recheck {
+    /// What to ask the page, if the page can tell whether the load has
+    /// finished.
+    fn expression(self) -> Option<&'static str> {
+        match self {
+            Self::NewTab => Some(LEFT_BLANK),
+            Self::ReadyState => Some(READY_STATE),
+            Self::Arrival | Self::NextStop => None,
+        }
+    }
+}
 
 /// Whether `expression` evaluates to `"complete"` in `session`'s main
 /// world, after enabling the Page domain (so every event after this call is
@@ -211,7 +232,7 @@ async fn probe_complete(session: &SessionHandle, expression: &str) -> Option<boo
     }
 }
 
-/// Feed `changes` into `loading`, starting from `initial`. `destination` is
+/// Feed `changes` into `loading`, for the load `initial`. `destination` is
 /// where an `Initial::Navigating` navigation leads, once known.
 async fn follow(
     mut changes: impl Stream<Item = Change> + Unpin,
@@ -220,43 +241,54 @@ async fn follow(
     mut destination: watch::Receiver<Option<Destination>>,
     loading: watch::Sender<bool>,
 ) {
-    let mut awaiting_start = false;
-    let mut recheck = Recheck::Arrival;
-    match initial {
-        Initial::Navigating => awaiting_start = true,
-        Initial::Probe(expression) => {
-            recheck = Recheck::Probe(expression);
-            let complete = probe_complete(&session, expression).await;
-            loading.send_replace(complete != Some(true));
+    let mut recheck = match initial {
+        Initial::Navigating => Recheck::Arrival,
+        Initial::NewTab => Recheck::NewTab,
+        Initial::Current => Recheck::ReadyState,
+    };
+    // Whether a load has started since the tracker began, or may have
+    // among lost events.
+    let mut started = false;
+    // Take the page's answer `complete` to `recheck`'s expression, given
+    // whether the frame was loading before the question (a failed question
+    // leaves that). A complete page counts as a stop.
+    let answer = |complete: Option<bool>, was_loading: bool, recheck: &mut Recheck| {
+        if complete == Some(true) {
+            *recheck = Recheck::ReadyState;
         }
+        loading.send_replace(complete.map_or(was_loading, |complete| !complete));
+    };
+    if let Some(expression) = recheck.expression() {
+        let complete = probe_complete(&session, expression).await;
+        answer(complete, true, &mut recheck);
     }
     while let Some(change) = changes.next().await {
         match change {
             Change::Started => {
-                awaiting_start = false;
-                loading.send_replace(true);
-                if recheck == Recheck::Probe(READY_STATE) {
+                // After the frame stopped, or a second time: another load.
+                if started || recheck == Recheck::ReadyState {
                     recheck = Recheck::NextStop;
                 }
+                started = true;
+                loading.send_replace(true);
             }
             Change::Stopped => {
-                if !awaiting_start {
+                // A stop before the navigation's start ends an earlier load.
+                if started || recheck != Recheck::Arrival {
                     loading.send_replace(false);
-                    recheck = Recheck::Probe(READY_STATE);
+                    recheck = Recheck::ReadyState;
                 }
             }
             Change::Lost => {
                 // Unknown until the page answers, or the next stop arrives.
                 let was_loading = loading.send_replace(true);
-                // A navigation's start, or even its stop, may be among the
-                // lost events: the next stop counts.
-                awaiting_start = false;
+                started = true;
                 if recheck == Recheck::Arrival && arrived(&session, &mut destination).await {
-                    recheck = Recheck::Probe(READY_STATE);
+                    recheck = Recheck::ReadyState;
                 }
-                if let Recheck::Probe(expression) = recheck {
+                if let Some(expression) = recheck.expression() {
                     let complete = probe_complete(&session, expression).await;
-                    loading.send_replace(complete.map_or(was_loading, |complete| !complete));
+                    answer(complete, was_loading, &mut recheck);
                 }
             }
         }
@@ -338,16 +370,19 @@ impl LoadTracker {
         self.destination.send_replace(Some(destination));
     }
 
-    /// For a frame whose state is unknown: loading until `expression`,
-    /// evaluated in `session`'s main world in the tracker's task, says
-    /// `"complete"` or a later stop arrives. The caller doesn't wait for
-    /// the evaluation.
-    pub(crate) fn probed(
-        session: &SessionHandle,
-        frame_id: &str,
-        expression: &'static str,
-    ) -> Self {
-        Self::start(session, frame_id, Initial::Probe(expression))
+    /// For a new tab, whose main frame's id is `frame_id`, on `session`:
+    /// loading until its first navigation, which may not have started, has
+    /// left `about:blank` and loaded. Asks the page in the tracker's task;
+    /// the caller doesn't wait for the answer.
+    pub(crate) fn for_new_tab(session: &SessionHandle, frame_id: &str) -> Self {
+        Self::start(session, frame_id, Initial::NewTab)
+    }
+
+    /// For the current document of frame `frame_id` on `session`: loading
+    /// until it has loaded. Asks the page in the tracker's task; the caller
+    /// doesn't wait for the answer.
+    pub(crate) fn current(session: &SessionHandle, frame_id: &str) -> Self {
+        Self::start(session, frame_id, Initial::Current)
     }
 
     /// Wait until the frame isn't loading.
@@ -439,18 +474,29 @@ mod tests {
         conn.shutdown();
     }
 
-    /// A probed tracker enables Page, evaluates the expression, and starts
-    /// from what it says: `"complete"` is loaded, anything else loading
-    /// until a stop arrives.
+    /// The tracker for the current document, or a new tab's, enables Page,
+    /// asks the page, and starts from what it says: `"complete"` is loaded,
+    /// anything else loading until a stop arrives.
     #[tokio::test]
-    async fn probed_starts_from_the_probe() {
-        for (value, loaded) in [("complete", true), ("blank", false)] {
+    async fn current_and_new_tab_start_from_the_page() {
+        let cases = [
+            (false, READY_STATE, "complete", true),
+            (false, READY_STATE, "loading", false),
+            (true, LEFT_BLANK, "complete", true),
+            (true, LEFT_BLANK, "blank", false),
+        ];
+        for (new_tab, expression, value, loaded) in cases {
             let (mut mock, conn) = MockConnection::pair();
-            let tracker = LoadTracker::probed(&SessionHandle::new(conn.clone(), "S1"), "F", "x");
+            let session = SessionHandle::new(conn.clone(), "S1");
+            let tracker = if new_tab {
+                LoadTracker::for_new_tab(&session, "F")
+            } else {
+                LoadTracker::current(&session, "F")
+            };
             let id = mock.expect_cmd("Page.enable").await;
             mock.reply(id, json!({})).await;
             let id = mock.expect_cmd("Runtime.evaluate").await;
-            assert_eq!(mock.last_sent()["params"]["expression"], "x");
+            assert_eq!(mock.last_sent()["params"]["expression"], expression);
             mock.reply(id, json!({ "result": { "value": Value::from(value) } }))
                 .await;
             if loaded {
@@ -570,40 +616,65 @@ mod tests {
 
     /// Once a load that the tracker didn't start has started, the page is
     /// the old document until the new one commits, so after lost events the
-    /// tracker doesn't ask the page: it waits for the next stop.
+    /// tracker doesn't ask the page: it waits for the next stop. Such a load
+    /// starts after the tracker's own load stopped (or was found loaded), or
+    /// replaces it before its stop (a second start).
     #[tokio::test]
     async fn lost_events_during_a_later_load_wait_for_its_stop() {
-        for probed in [false, true] {
+        let cases = [
+            (
+                "navigation, start, stop, start",
+                None,
+                vec![true, false, true],
+            ),
+            ("navigation, start, start", None, vec![true, true]),
+            ("current document, loaded, start", Some(false), vec![true]),
+            ("new tab, loaded, start", Some(true), vec![true]),
+            ("new tab, blank, start, start", Some(true), vec![true, true]),
+        ];
+        for (case, probed, starts_and_stops) in cases {
             let (mut mock, conn) = MockConnection::pair();
             let session = SessionHandle::new(conn.clone(), "S1");
-            let tracker = if probed {
-                let tracker = LoadTracker::probed(&session, "F", READY_STATE);
-                answer(&mut mock, "Page.enable", json!({})).await;
-                let complete = json!({ "result": { "value": "complete" } });
-                answer(&mut mock, "Runtime.evaluate", complete).await;
-                emit_delivered(&mock, &conn, &[true]).await;
-                tracker
-            } else {
-                let tracker = LoadTracker::before_navigating(&session, "F");
-                emit_delivered(&mock, &conn, &[true, false, true]).await;
-                tracker
+            let tracker = match probed {
+                None => {
+                    let tracker = LoadTracker::before_navigating(&session, "F");
+                    tracker.heading_to(Destination::Document("new".into()));
+                    tracker
+                }
+                Some(new_tab) => {
+                    let tracker = if new_tab {
+                        LoadTracker::for_new_tab(&session, "F")
+                    } else {
+                        LoadTracker::current(&session, "F")
+                    };
+                    answer(&mut mock, "Page.enable", json!({})).await;
+                    let value = if case.contains("blank") {
+                        "blank"
+                    } else {
+                        "complete"
+                    };
+                    let reply = json!({ "result": { "value": value } });
+                    answer(&mut mock, "Runtime.evaluate", reply).await;
+                    tracker
+                }
             };
+            emit_delivered(&mock, &conn, &starts_and_stops).await;
             mock.reconnect(&conn);
             let waiting = tokio::spawn(tracker.wait(LONG));
             let probe = mock.recv_cmd_timeout(SHORT).await;
-            assert_eq!(probe, None, "probed: {probed}");
+            assert_eq!(probe, None, "{case}");
             emit(&mock, false, "F", "S1").await;
             waiting.await.unwrap().expect("loaded once it stopped");
             conn.shutdown();
         }
     }
 
-    /// After lost events, a probed tracker probes again with its own
-    /// expression.
+    /// After lost events, a new tab's tracker asks the page again whether
+    /// it has left about:blank and loaded.
     #[tokio::test]
-    async fn lost_events_make_a_probed_tracker_probe_again() {
+    async fn lost_events_make_a_new_tabs_tracker_ask_again() {
         let (mut mock, conn) = MockConnection::pair();
-        let tracker = LoadTracker::probed(&SessionHandle::new(conn.clone(), "S1"), "F", "x");
+        let tracker = LoadTracker::for_new_tab(&SessionHandle::new(conn.clone(), "S1"), "F");
         let id = mock.expect_cmd("Page.enable").await;
         mock.reply(id, json!({})).await;
         let id = mock.expect_cmd("Runtime.evaluate").await;
@@ -614,7 +685,7 @@ mod tests {
         let id = mock.expect_cmd("Page.enable").await;
         mock.reply(id, json!({})).await;
         let id = mock.expect_cmd("Runtime.evaluate").await;
-        assert_eq!(mock.last_sent()["params"]["expression"], "x");
+        assert_eq!(mock.last_sent()["params"]["expression"], LEFT_BLANK);
         mock.reply(id, json!({ "result": { "value": "complete" } }))
             .await;
         waiting
@@ -624,13 +695,13 @@ mod tests {
         conn.shutdown();
     }
 
-    /// Once its load has stopped, a probed tracker's expression (which may
-    /// ask about the initial navigation) no longer applies: after lost
-    /// events it asks for the `readyState`.
+    /// Once its first navigation has stopped, a new tab's question (has the
+    /// page left about:blank?) no longer applies: after lost events its
+    /// tracker asks for the `readyState`.
     #[tokio::test]
-    async fn a_stop_makes_a_probed_tracker_probe_the_ready_state() {
+    async fn a_stop_makes_a_new_tabs_tracker_ask_the_ready_state() {
         let (mut mock, conn) = MockConnection::pair();
-        let tracker = LoadTracker::probed(&SessionHandle::new(conn.clone(), "S1"), "F", "x");
+        let tracker = LoadTracker::for_new_tab(&SessionHandle::new(conn.clone(), "S1"), "F");
         answer(&mut mock, "Page.enable", json!({})).await;
         let blank = json!({ "result": { "value": "blank" } });
         answer(&mut mock, "Runtime.evaluate", blank).await;

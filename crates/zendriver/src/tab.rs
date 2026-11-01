@@ -33,7 +33,7 @@ use crate::error::{Result, ZendriverError};
 use crate::frame::Frame;
 use crate::input::InputController;
 use crate::isolated_world::IsolatedWorldCache;
-use crate::load_tracker::{Destination, LoadTracker, READY_STATE};
+use crate::load_tracker::{Destination, LoadTracker};
 use crate::network_idle::IdleLossPolicy;
 use crate::screenshot::ScreenshotBuilder;
 
@@ -1026,11 +1026,7 @@ impl Tab {
     /// new tab was created with, which may not have started yet: until the
     /// tab has left `about:blank` and finished loading.
     pub(crate) async fn arm_initial_navigation(&self) {
-        let tracker = LoadTracker::probed(
-            &self.inner.session,
-            self.target_id(),
-            "location.href === 'about:blank' ? 'blank' : document.readyState",
-        );
+        let tracker = LoadTracker::for_new_tab(&self.inner.session, self.target_id());
         *self.inner.pending_load.lock().await = Some(tracker);
     }
 
@@ -1073,7 +1069,7 @@ impl Tab {
         let pending = self.inner.pending_load.lock().await.take();
         let tracker = match pending {
             Some(tracker) => tracker,
-            None => LoadTracker::probed(&self.inner.session, self.target_id(), READY_STATE),
+            None => LoadTracker::current(&self.inner.session, self.target_id()),
         };
         tracker.wait(DEFAULT_LOAD_TIMEOUT).await
     }
