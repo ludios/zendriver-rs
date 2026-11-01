@@ -2062,29 +2062,22 @@ pub(crate) fn test_only_browser_from_conn(conn: Connection) -> Browser {
 /// (per-context proxy support) reuse the same helper.
 #[cfg(test)]
 pub(crate) fn test_only_inner_from_conn(conn: Connection) -> Arc<BrowserInner> {
-    test_only_inner_with_host_port(conn, None)
+    test_only_inner_with(conn, |_| {})
 }
 
-/// [`test_only_inner_from_conn`] with a DevTools `host:port` for per-tab dials.
+/// [`test_only_inner_from_conn`], with its fields then changed by
+/// `customize` (for example, a DevTools `host:port` for per-tab dials).
 #[cfg(test)]
-pub(crate) fn test_only_inner_with_host_port(
+pub(crate) fn test_only_inner_with(
     conn: Connection,
-    debug_host_port: Option<String>,
+    customize: impl FnOnce(&mut BrowserInner),
 ) -> Arc<BrowserInner> {
-    let input_profile = zendriver_stealth::InputProfile::native();
     Arc::new_cyclic(|weak: &std::sync::Weak<BrowserInner>| {
         let main_session = SessionHandle::new(conn.clone(), "S1");
-        let main_input = InputController::new(input_profile.clone());
-        let main_tab = Tab::new(
-            main_session,
-            weak.clone(),
-            main_input,
-            "T1".to_string(),
-            None,
-        );
+        let main_tab = Tab::new_for_test_in(main_session, weak.clone(), "T1", None);
         let mut map = HashMap::new();
         map.insert("S1".to_string(), main_tab.clone());
-        BrowserInner {
+        let mut inner = BrowserInner {
             conn,
             main_tab,
             default_context_id: None,
@@ -2094,7 +2087,7 @@ pub(crate) fn test_only_inner_with_host_port(
             _extension_dirs: Vec::new(),
             owns_process: false,
             tabs: tokio::sync::RwLock::new(map),
-            debug_host_port,
+            debug_host_port: None,
             ws_url: None,
             tabs_changed: tokio::sync::Notify::new(),
             #[cfg(feature = "interception")]
@@ -2105,7 +2098,9 @@ pub(crate) fn test_only_inner_with_host_port(
             tracker_matcher: None,
             #[cfg(feature = "interception")]
             session_intercept_handles: tokio::sync::Mutex::new(HashMap::new()),
-        }
+        };
+        customize(&mut inner);
+        inner
     })
 }
 
@@ -6336,41 +6331,7 @@ mod tests {
         // shape `launch` produces after step 12 (the main tab is inserted
         // under its real `sessionId`; here we use "S1" for the simulated
         // initial target).
-        let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
-            let main_session = SessionHandle::new(conn.clone(), "S1");
-            let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(
-                main_session,
-                weak.clone(),
-                main_input,
-                "T1".to_string(),
-                None,
-            );
-            let mut map = HashMap::new();
-            map.insert("S1".to_string(), main_tab.clone());
-            BrowserInner {
-                conn: conn.clone(),
-                main_tab,
-                default_context_id: None,
-                child: tokio::sync::Mutex::new(None),
-                job: ProcessJob::none(),
-                _user_data: None,
-                _extension_dirs: Vec::new(),
-                owns_process: false,
-                tabs: tokio::sync::RwLock::new(map),
-                debug_host_port: None,
-                ws_url: None,
-                tabs_changed: tokio::sync::Notify::new(),
-                #[cfg(feature = "interception")]
-                proxy_auth_handle: std::sync::OnceLock::new(),
-                #[cfg(feature = "interception")]
-                context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
-                #[cfg(feature = "tracker-blocking")]
-                tracker_matcher: None,
-                #[cfg(feature = "interception")]
-                session_intercept_handles: tokio::sync::Mutex::new(HashMap::new()),
-            }
-        });
+        let inner = test_only_inner_from_conn(conn.clone());
         registrar.set_browser(Arc::downgrade(&inner));
 
         // Sanity: one entry to start.
@@ -6438,46 +6399,12 @@ mod tests {
         let (mut mock, conn) =
             MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
 
-        let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
-            let main_session = SessionHandle::new(conn.clone(), "S1");
-            let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(
-                main_session,
-                weak.clone(),
-                main_input,
-                "T1".to_string(),
-                None,
-            );
-            let mut map = HashMap::new();
-            map.insert("S1".to_string(), main_tab.clone());
-            // Seed credentials for context CTX1.
-            let mut auth = HashMap::new();
-            auth.insert(
-                "CTX1".to_string(),
-                ("bob".to_string(), "s3cret".to_string()),
-            );
-            BrowserInner {
-                conn: conn.clone(),
-                main_tab,
-                default_context_id: None,
-                child: tokio::sync::Mutex::new(None),
-                job: ProcessJob::none(),
-                _user_data: None,
-                _extension_dirs: Vec::new(),
-                owns_process: false,
-                tabs: tokio::sync::RwLock::new(map),
-                debug_host_port: None,
-                ws_url: None,
-                tabs_changed: tokio::sync::Notify::new(),
-                #[cfg(feature = "interception")]
-                proxy_auth_handle: std::sync::OnceLock::new(),
-                #[cfg(feature = "interception")]
-                context_proxy_auth: tokio::sync::Mutex::new(auth),
-                #[cfg(feature = "tracker-blocking")]
-                tracker_matcher: None,
-                #[cfg(feature = "interception")]
-                session_intercept_handles: tokio::sync::Mutex::new(HashMap::new()),
-            }
+        // Seed credentials for context CTX1.
+        let inner = test_only_inner_with(conn.clone(), |inner| {
+            inner
+                .context_proxy_auth
+                .get_mut()
+                .insert("CTX1".into(), ("bob".into(), "s3cret".into()));
         });
         registrar.set_browser(Arc::downgrade(&inner));
 
@@ -6560,48 +6487,15 @@ mod tests {
         let (mut mock, conn) =
             MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
 
-        let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
-            let main_session = SessionHandle::new(conn.clone(), "S1");
-            let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(
-                main_session,
-                weak.clone(),
-                main_input,
-                "T1".to_string(),
-                None,
-            );
-            let mut map = HashMap::new();
-            map.insert("S1".to_string(), main_tab.clone());
-            // Seed BOTH a tracker matcher and proxy credentials for CTX1.
-            let mut auth = HashMap::new();
-            auth.insert(
-                "CTX1".to_string(),
-                ("bob".to_string(), "s3cret".to_string()),
-            );
-            BrowserInner {
-                conn: conn.clone(),
-                main_tab,
-                default_context_id: None,
-                child: tokio::sync::Mutex::new(None),
-                job: ProcessJob::none(),
-                _user_data: None,
-                _extension_dirs: Vec::new(),
-                owns_process: false,
-                tabs: tokio::sync::RwLock::new(map),
-                debug_host_port: None,
-                ws_url: None,
-                tabs_changed: tokio::sync::Notify::new(),
-                #[cfg(feature = "interception")]
-                proxy_auth_handle: std::sync::OnceLock::new(),
-                #[cfg(feature = "interception")]
-                context_proxy_auth: tokio::sync::Mutex::new(auth),
-                #[cfg(feature = "tracker-blocking")]
-                tracker_matcher: Some(std::sync::Arc::new(crate::HostMatcher::new([
-                    "evil.example".to_string(),
-                ]))),
-                #[cfg(feature = "interception")]
-                session_intercept_handles: tokio::sync::Mutex::new(HashMap::new()),
-            }
+        // Seed both a tracker matcher and proxy credentials for CTX1.
+        let inner = test_only_inner_with(conn.clone(), |inner| {
+            inner
+                .context_proxy_auth
+                .get_mut()
+                .insert("CTX1".into(), ("bob".into(), "s3cret".into()));
+            inner.tracker_matcher = Some(Arc::new(crate::HostMatcher::new([
+                "evil.example".to_string()
+            ])));
         });
         registrar.set_browser(Arc::downgrade(&inner));
 
@@ -6660,41 +6554,7 @@ mod tests {
 
         // Same launch-step-12 shape as the T2 test: synthetic main tab seeded
         // under S1/T1 so the registry starts at len=1.
-        let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
-            let main_session = SessionHandle::new(conn.clone(), "S1");
-            let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(
-                main_session,
-                weak.clone(),
-                main_input,
-                "T1".to_string(),
-                None,
-            );
-            let mut map = HashMap::new();
-            map.insert("S1".to_string(), main_tab.clone());
-            BrowserInner {
-                conn: conn.clone(),
-                main_tab,
-                default_context_id: None,
-                child: tokio::sync::Mutex::new(None),
-                job: ProcessJob::none(),
-                _user_data: None,
-                _extension_dirs: Vec::new(),
-                owns_process: false,
-                tabs: tokio::sync::RwLock::new(map),
-                debug_host_port: None,
-                ws_url: None,
-                tabs_changed: tokio::sync::Notify::new(),
-                #[cfg(feature = "interception")]
-                proxy_auth_handle: std::sync::OnceLock::new(),
-                #[cfg(feature = "interception")]
-                context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
-                #[cfg(feature = "tracker-blocking")]
-                tracker_matcher: None,
-                #[cfg(feature = "interception")]
-                session_intercept_handles: tokio::sync::Mutex::new(HashMap::new()),
-            }
-        });
+        let inner = test_only_inner_from_conn(conn.clone());
         registrar.set_browser(Arc::downgrade(&inner));
         let browser = Browser {
             inner: inner.clone(),
@@ -6778,41 +6638,7 @@ mod tests {
         let (mut mock, conn) =
             MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
 
-        let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
-            let main_session = SessionHandle::new(conn.clone(), "S1");
-            let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(
-                main_session,
-                weak.clone(),
-                main_input,
-                "T1".to_string(),
-                None,
-            );
-            let mut map = HashMap::new();
-            map.insert("S1".to_string(), main_tab.clone());
-            BrowserInner {
-                conn: conn.clone(),
-                main_tab,
-                default_context_id: None,
-                child: tokio::sync::Mutex::new(None),
-                job: ProcessJob::none(),
-                _user_data: None,
-                _extension_dirs: Vec::new(),
-                owns_process: false,
-                tabs: tokio::sync::RwLock::new(map),
-                debug_host_port: None,
-                ws_url: None,
-                tabs_changed: tokio::sync::Notify::new(),
-                #[cfg(feature = "interception")]
-                proxy_auth_handle: std::sync::OnceLock::new(),
-                #[cfg(feature = "interception")]
-                context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
-                #[cfg(feature = "tracker-blocking")]
-                tracker_matcher: None,
-                #[cfg(feature = "interception")]
-                session_intercept_handles: tokio::sync::Mutex::new(HashMap::new()),
-            }
-        });
+        let inner = test_only_inner_from_conn(conn.clone());
         registrar.set_browser(Arc::downgrade(&inner));
         let browser = Browser {
             inner: inner.clone(),
@@ -6885,51 +6711,10 @@ mod tests {
             MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
 
         // Seed `BrowserInner` with two tabs (S1/T1 = main, S2/T2 = extra).
-        let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
-            let main_session = SessionHandle::new(conn.clone(), "S1");
-            let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(
-                main_session,
-                weak.clone(),
-                main_input,
-                "T1".to_string(),
-                None,
-            );
-            let extra_session = SessionHandle::new(conn.clone(), "S2");
-            let extra_input = InputController::new(input_profile.clone());
-            let extra_tab = Tab::new(
-                extra_session,
-                weak.clone(),
-                extra_input,
-                "T2".to_string(),
-                None,
-            );
-            let mut map = HashMap::new();
-            map.insert("S1".to_string(), main_tab.clone());
-            map.insert("S2".to_string(), extra_tab);
-            BrowserInner {
-                conn: conn.clone(),
-                main_tab,
-                default_context_id: None,
-                child: tokio::sync::Mutex::new(None),
-                job: ProcessJob::none(),
-                _user_data: None,
-                _extension_dirs: Vec::new(),
-                owns_process: false,
-                tabs: tokio::sync::RwLock::new(map),
-                debug_host_port: None,
-                ws_url: None,
-                tabs_changed: tokio::sync::Notify::new(),
-                #[cfg(feature = "interception")]
-                proxy_auth_handle: std::sync::OnceLock::new(),
-                #[cfg(feature = "interception")]
-                context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
-                #[cfg(feature = "tracker-blocking")]
-                tracker_matcher: None,
-                #[cfg(feature = "interception")]
-                session_intercept_handles: tokio::sync::Mutex::new(HashMap::new()),
-            }
-        });
+        let inner = test_only_inner_from_conn(conn.clone());
+        let session = SessionHandle::new(conn.clone(), "S2");
+        let extra_tab = Tab::new_for_test_in(session, Arc::downgrade(&inner), "T2", None);
+        inner.tabs.write().await.insert("S2".to_string(), extra_tab);
         registrar.set_browser(Arc::downgrade(&inner));
 
         assert_eq!(inner.tabs.read().await.len(), 2);
@@ -6970,45 +6755,8 @@ mod tests {
         use crate::cookies::Cookie;
         use zendriver_transport::testing::MockConnection;
 
-        let input_profile = zendriver_stealth::InputProfile::native();
         let (mut mock, conn) = MockConnection::pair();
-
-        let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
-            let main_session = SessionHandle::new(conn.clone(), "S1");
-            let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(
-                main_session,
-                weak.clone(),
-                main_input,
-                "T1".to_string(),
-                None,
-            );
-            let mut map = HashMap::new();
-            map.insert("S1".to_string(), main_tab.clone());
-            BrowserInner {
-                conn: conn.clone(),
-                main_tab,
-                default_context_id: None,
-                child: tokio::sync::Mutex::new(None),
-                job: ProcessJob::none(),
-                _user_data: None,
-                _extension_dirs: Vec::new(),
-                owns_process: false,
-                tabs: tokio::sync::RwLock::new(map),
-                debug_host_port: None,
-                ws_url: None,
-                tabs_changed: tokio::sync::Notify::new(),
-                #[cfg(feature = "interception")]
-                proxy_auth_handle: std::sync::OnceLock::new(),
-                #[cfg(feature = "interception")]
-                context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
-                #[cfg(feature = "tracker-blocking")]
-                tracker_matcher: None,
-                #[cfg(feature = "interception")]
-                session_intercept_handles: tokio::sync::Mutex::new(HashMap::new()),
-            }
-        });
-        let browser = Browser { inner };
+        let browser = test_only_browser_from_conn(conn.clone());
         let jar = browser.cookies();
 
         let fut = tokio::spawn(async move {
@@ -7053,41 +6801,7 @@ mod tests {
         let (_mock, conn) =
             MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
 
-        let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
-            let main_session = SessionHandle::new(conn.clone(), "S1");
-            let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(
-                main_session,
-                weak.clone(),
-                main_input,
-                "T1".to_string(),
-                None,
-            );
-            let mut map = HashMap::new();
-            map.insert("S1".to_string(), main_tab.clone());
-            BrowserInner {
-                conn: conn.clone(),
-                main_tab,
-                default_context_id: None,
-                child: tokio::sync::Mutex::new(None),
-                job: ProcessJob::none(),
-                _user_data: None,
-                _extension_dirs: Vec::new(),
-                owns_process: false,
-                tabs: tokio::sync::RwLock::new(map),
-                debug_host_port: None,
-                ws_url: None,
-                tabs_changed: tokio::sync::Notify::new(),
-                #[cfg(feature = "interception")]
-                proxy_auth_handle: std::sync::OnceLock::new(),
-                #[cfg(feature = "interception")]
-                context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
-                #[cfg(feature = "tracker-blocking")]
-                tracker_matcher: None,
-                #[cfg(feature = "interception")]
-                session_intercept_handles: tokio::sync::Mutex::new(HashMap::new()),
-            }
-        });
+        let inner = test_only_inner_from_conn(conn.clone());
         let browser = Browser { inner };
 
         assert_eq!(browser.tab_count().await, 1);
@@ -7123,41 +6837,7 @@ mod tests {
             MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
 
         // Seed BrowserInner with one parent tab.
-        let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
-            let main_session = SessionHandle::new(conn.clone(), "S1");
-            let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(
-                main_session,
-                weak.clone(),
-                main_input,
-                "T1".to_string(),
-                None,
-            );
-            let mut map = HashMap::new();
-            map.insert("S1".to_string(), main_tab.clone());
-            BrowserInner {
-                conn: conn.clone(),
-                main_tab,
-                default_context_id: None,
-                child: tokio::sync::Mutex::new(None),
-                job: ProcessJob::none(),
-                _user_data: None,
-                _extension_dirs: Vec::new(),
-                owns_process: false,
-                tabs: tokio::sync::RwLock::new(map),
-                debug_host_port: None,
-                ws_url: None,
-                tabs_changed: tokio::sync::Notify::new(),
-                #[cfg(feature = "interception")]
-                proxy_auth_handle: std::sync::OnceLock::new(),
-                #[cfg(feature = "interception")]
-                context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
-                #[cfg(feature = "tracker-blocking")]
-                tracker_matcher: None,
-                #[cfg(feature = "interception")]
-                session_intercept_handles: tokio::sync::Mutex::new(HashMap::new()),
-            }
-        });
+        let inner = test_only_inner_from_conn(conn.clone());
         registrar.set_browser(Arc::downgrade(&inner));
 
         // Pre-seed the parent tab's frames map after `Arc::new_cyclic`
@@ -7270,41 +6950,7 @@ mod tests {
         let (mut mock, conn) =
             MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
 
-        let inner = Arc::new_cyclic(|weak: &Weak<BrowserInner>| {
-            let main_session = SessionHandle::new(conn.clone(), "S1");
-            let main_input = InputController::new(input_profile.clone());
-            let main_tab = Tab::new(
-                main_session,
-                weak.clone(),
-                main_input,
-                "T1".to_string(),
-                None,
-            );
-            let mut map = HashMap::new();
-            map.insert("S1".to_string(), main_tab.clone());
-            BrowserInner {
-                conn: conn.clone(),
-                main_tab,
-                default_context_id: None,
-                child: tokio::sync::Mutex::new(None),
-                job: ProcessJob::none(),
-                _user_data: None,
-                _extension_dirs: Vec::new(),
-                owns_process: false,
-                tabs: tokio::sync::RwLock::new(map),
-                debug_host_port: None,
-                ws_url: None,
-                tabs_changed: tokio::sync::Notify::new(),
-                #[cfg(feature = "interception")]
-                proxy_auth_handle: std::sync::OnceLock::new(),
-                #[cfg(feature = "interception")]
-                context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
-                #[cfg(feature = "tracker-blocking")]
-                tracker_matcher: None,
-                #[cfg(feature = "interception")]
-                session_intercept_handles: tokio::sync::Mutex::new(HashMap::new()),
-            }
-        });
+        let inner = test_only_inner_from_conn(conn.clone());
         registrar.set_browser(Arc::downgrade(&inner));
 
         mock.emit_event(
@@ -8504,7 +8150,9 @@ mod tests {
         let registrar = Arc::new(TabRegistrar::new(zendriver_stealth::InputProfile::native()));
         let (mut mock, conn) =
             MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
-        let inner = test_only_inner_with_host_port(conn.clone(), Some(host_port));
+        let inner = test_only_inner_with(conn.clone(), |inner| {
+            inner.debug_host_port = Some(host_port);
+        });
         registrar.set_browser(Arc::downgrade(&inner));
 
         mock.emit_event(

@@ -525,27 +525,34 @@ impl Tab {
         Self { inner }
     }
 
-    /// Test-only constructor: builds a `Tab` with a deterministic seeded
-    /// [`InputController`] (native input profile, seed `42`) and an empty
-    /// `Weak` browser ref. Replaces the P3 `Tab::new(sess, Weak::new())`
-    /// pattern that paired with `Tab::input() -> Option<_>`; now that
-    /// `Tab::input()` returns `&Arc<InputController>` unconditionally, tests
-    /// must seed a controller at construction time.
-    ///
-    /// The synthetic `target_id` is derived from the session_id — tests that
-    /// need a specific `targetId` should use [`Tab::new_for_test_with_target`].
+    /// Test-only constructor: [`Tab::new_for_test_in`] with no owning
+    /// browser, a `targetId` derived from the session id, and the default
+    /// context.
     #[cfg(test)]
     pub(crate) fn new_for_test(session: SessionHandle) -> Self {
         let target_id = format!("test-target-{}", session.session_id().unwrap_or("root"));
+        Self::new_for_test_in(session, std::sync::Weak::new(), &target_id, None)
+    }
+
+    /// Test-only constructor: [`Tab::new`] with a deterministic seeded
+    /// [`InputController`] (native input profile, seed `42`).
+    #[cfg(test)]
+    pub(crate) fn new_for_test_in(
+        session: SessionHandle,
+        browser: std::sync::Weak<crate::browser::BrowserInner>,
+        target_id: &str,
+        browser_context_id: Option<&str>,
+    ) -> Self {
+        let input = crate::input::InputController::new_with_seed(
+            zendriver_stealth::InputProfile::native(),
+            42,
+        );
         Self::new(
             session,
-            std::sync::Weak::new(),
-            crate::input::InputController::new_with_seed(
-                zendriver_stealth::InputProfile::native(),
-                42,
-            ),
-            target_id,
-            None,
+            browser,
+            input,
+            target_id.to_string(),
+            browser_context_id.map(str::to_string),
         )
     }
 
@@ -3954,17 +3961,8 @@ mod tests {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
         for browser in [Arc::downgrade(&inner), std::sync::Weak::new()] {
-            let input = crate::input::InputController::new_with_seed(
-                zendriver_stealth::InputProfile::native(),
-                42,
-            );
-            let tab = Tab::new(
-                SessionHandle::new(conn.clone(), "S2"),
-                browser,
-                input,
-                "T2".to_string(),
-                Some("CTX1".to_string()),
-            );
+            let session = SessionHandle::new(conn.clone(), "S2");
+            let tab = Tab::new_for_test_in(session, browser, "T2", Some("CTX1"));
             let jar = tab.cookies();
             let fut = tokio::spawn(async move {
                 jar.set(Cookie {
@@ -5248,44 +5246,13 @@ mod tests {
         let (_mock, conn) = MockConnection::pair();
         // Construct a BrowserInner with a known debug endpoint + main tab
         // target id so we can assert the exact composed URL.
-        let inner =
-            std::sync::Arc::new_cyclic(|weak: &std::sync::Weak<crate::browser::BrowserInner>| {
-                let session = SessionHandle::new(conn.clone(), "S1");
-                let input =
-                    crate::input::InputController::new(zendriver_stealth::InputProfile::native());
-                let main_tab =
-                    Tab::new(session, weak.clone(), input, "TARGET-XYZ".to_string(), None);
-                let mut map = std::collections::HashMap::new();
-                map.insert("S1".to_string(), main_tab.clone());
-                crate::browser::BrowserInner {
-                    conn: conn.clone(),
-                    main_tab,
-                    default_context_id: None,
-                    child: tokio::sync::Mutex::new(None),
-                    job: crate::browser::ProcessJob::none(),
-                    _user_data: None,
-                    _extension_dirs: Vec::new(),
-                    owns_process: false,
-                    tabs: tokio::sync::RwLock::new(map),
-                    debug_host_port: Some("127.0.0.1:9222".to_string()),
-                    ws_url: None,
-                    tabs_changed: tokio::sync::Notify::new(),
-                    #[cfg(feature = "interception")]
-                    proxy_auth_handle: std::sync::OnceLock::new(),
-                    #[cfg(feature = "interception")]
-                    context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
-                    #[cfg(feature = "tracker-blocking")]
-                    tracker_matcher: None,
-                    #[cfg(feature = "interception")]
-                    session_intercept_handles: tokio::sync::Mutex::new(
-                        std::collections::HashMap::new(),
-                    ),
-                }
-            });
+        let inner = crate::browser::test_only_inner_with(conn.clone(), |inner| {
+            inner.debug_host_port = Some("127.0.0.1:9222".to_string());
+        });
         let url = inner.main_tab.inspector_url().unwrap();
         assert_eq!(
             url,
-            "http://127.0.0.1:9222/devtools/inspector.html?ws=127.0.0.1:9222/devtools/page/TARGET-XYZ"
+            "http://127.0.0.1:9222/devtools/inspector.html?ws=127.0.0.1:9222/devtools/page/T1"
         );
         conn.shutdown();
     }
