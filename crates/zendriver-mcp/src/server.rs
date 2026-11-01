@@ -1204,7 +1204,7 @@ pub async fn run_stdio(state: Arc<Mutex<SessionState>>) -> Result<(), Box<dyn st
             tracing::info!("shutdown signal received; closing owned browser before exit");
         }
     }
-    close_owned_browser(&state).await;
+    shut_down_session(&state).await;
     Ok(())
 }
 
@@ -1227,12 +1227,17 @@ pub(crate) async fn shutdown_signal() {
     }
 }
 
-/// Take the browser out of the session (if any) and gracefully close it.
+/// Mark the session as shutting down, so `browser_open` refuses from then
+/// on, then take its browser out (if any) and gracefully close it.
 /// Idempotent and panic-free when no browser was ever opened — it runs on
 /// every shutdown path. [`Browser::close`] leaves an attached/`connect`ed
 /// Chrome running (the `owns_process` guard), only the transport is torn down.
-pub(crate) async fn close_owned_browser(state: &Arc<Mutex<SessionState>>) {
-    let browser = { state.lock().await.browser.take() };
+pub(crate) async fn shut_down_session(state: &Arc<Mutex<SessionState>>) {
+    let browser = {
+        let mut s = state.lock().await;
+        s.shutting_down = true;
+        s.browser.take()
+    };
     if let Some(browser) = browser {
         if let Err(e) = browser.close().await {
             tracing::warn!("error closing browser during shutdown: {e}");
@@ -1256,13 +1261,27 @@ mod tests {
     use crate::state::StealthProfileChoice;
 
     #[tokio::test]
-    async fn close_owned_browser_is_a_noop_when_no_browser_open() {
+    async fn shut_down_session_is_a_noop_when_no_browser_open() {
         // Shutdown teardown runs on every exit path, including the common case
         // where no browser was ever opened. It must be panic-free and
         // idempotent (callable twice without error).
         let state = Arc::new(Mutex::new(SessionState::new()));
-        close_owned_browser(&state).await;
-        close_owned_browser(&state).await;
+        shut_down_session(&state).await;
+        shut_down_session(&state).await;
+        assert!(state.lock().await.browser.is_none());
+    }
+
+    /// Once the session is shut down, `browser_open` refuses rather than
+    /// open a browser that nothing would close.
+    #[tokio::test]
+    async fn browser_open_refuses_after_the_shutdown() {
+        let state = Arc::new(Mutex::new(SessionState::new()));
+        shut_down_session(&state).await;
+        let input = serde_json::from_value(serde_json::json!({})).unwrap();
+        let err = crate::tools::lifecycle::open(state.clone(), input)
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("shutting down"), "{err:?}");
         assert!(state.lock().await.browser.is_none());
     }
 

@@ -15,8 +15,17 @@ use rmcp::transport::streamable_http_server::{
 };
 use tokio::sync::Mutex;
 
-use crate::server::{ZendriverServer, close_owned_browser, shutdown_signal};
+use crate::server::{ZendriverServer, shut_down_session, shutdown_signal};
 use crate::state::{SessionState, StealthProfileChoice};
+
+/// Every session's state, and whether a shutdown signal has arrived.
+#[derive(Default)]
+struct Sessions {
+    /// Weak, so a session that ends drops its state (and browser) as before.
+    states: Vec<Weak<Mutex<SessionState>>>,
+    /// A session created after the signal starts shut down.
+    shutting_down: bool,
+}
 
 /// How long the browsers of all sessions get to close after a shutdown
 /// signal. A session's browser can only be taken while no tool call holds
@@ -32,9 +41,8 @@ pub async fn serve(
     addr: SocketAddr,
     default_profile: StealthProfileChoice,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Every session's state, to close its browser on a shutdown signal. Weak,
-    // so a session that ends drops its state (and browser) as before.
-    let sessions: Arc<std::sync::Mutex<Vec<Weak<Mutex<SessionState>>>>> = Arc::default();
+    // To shut every session down on a shutdown signal.
+    let sessions: Arc<std::sync::Mutex<Sessions>> = Arc::default();
     let registry = sessions.clone();
     let service = StreamableHttpService::new(
         move || {
@@ -42,15 +50,16 @@ pub async fn serve(
             // / tabs isolated. The factory must be infallible — any
             // failure here would surface as an `io::Error` to the client
             // mid-handshake.
-            let state = Arc::new(Mutex::new(SessionState {
-                stealth_profile_choice: default_profile,
-                ..SessionState::new()
-            }));
             let mut registry = registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            registry.retain(|session| session.strong_count() > 0);
-            registry.push(Arc::downgrade(&state));
+            let state = Arc::new(Mutex::new(SessionState {
+                stealth_profile_choice: default_profile,
+                shutting_down: registry.shutting_down,
+                ..SessionState::new()
+            }));
+            registry.states.retain(|session| session.strong_count() > 0);
+            registry.states.push(Arc::downgrade(&state));
             Ok(ZendriverServer { state })
         },
         LocalSessionManager::default().into(),
@@ -74,16 +83,18 @@ pub async fn serve(
         std::process::exit(1);
     });
     // The sessions run in tasks of their own, which outlive the server
-    // future, so their states are still there to clean up.
-    let states: Vec<_> = sessions
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-        .filter_map(Weak::upgrade)
-        .collect();
+    // future, so their states are still there to clean up, and they can
+    // still take tool calls: a shut-down session opens no browser.
+    let states: Vec<_> = {
+        let mut sessions = sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sessions.shutting_down = true;
+        sessions.states.iter().filter_map(Weak::upgrade).collect()
+    };
     let mut cleanup = tokio::task::JoinSet::new();
     for state in states {
-        cleanup.spawn(async move { close_owned_browser(&state).await });
+        cleanup.spawn(async move { shut_down_session(&state).await });
     }
     if tokio::time::timeout(CLEANUP_WITHIN, cleanup.join_all())
         .await

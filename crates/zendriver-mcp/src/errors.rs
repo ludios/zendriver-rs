@@ -39,6 +39,11 @@ pub enum McpServerError {
     #[error("Intercept rule `{0}` not found.")]
     RuleNotFound(String),
 
+    /// `browser_open` was called after a shutdown signal, which has closed
+    /// (or will close) the session's browser.
+    #[error("The server is shutting down, so it opens no browser.")]
+    ShuttingDown,
+
     /// Wrapped lib failure.
     #[error(transparent)]
     Zendriver(#[from] ZendriverError),
@@ -58,6 +63,7 @@ pub fn map_error(err: impl Into<McpServerError>) -> ErrorData {
             (err.to_string(), Some("browser_expect_register"))
         }
         McpServerError::RuleNotFound(_) => (err.to_string(), Some("browser_intercept_add_rule")),
+        McpServerError::ShuttingDown => (err.to_string(), None),
         McpServerError::Zendriver(ze) => map_zendriver(ze),
     };
     let data = suggested_next.map(|hint| json!({ "suggested_next": hint }));

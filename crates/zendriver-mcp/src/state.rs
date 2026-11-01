@@ -159,6 +159,9 @@ pub enum InputProfileChoice {
 /// tracks the focused tab (matches `zendriver::Tab::target_id`).
 pub struct SessionState {
     pub browser: Option<Browser>,
+    /// The server is shutting down: `browser_open` refuses, so that no
+    /// browser is opened after the shutdown has closed the session's.
+    pub shutting_down: bool,
     pub current_tab_id: Option<String>,
     pub stealth_profile_choice: StealthProfileChoice,
     pub stealth_overrides: StealthOverrides,
@@ -410,6 +413,7 @@ impl SessionState {
     pub fn new() -> Self {
         Self {
             browser: None,
+            shutting_down: false,
             current_tab_id: None,
             stealth_profile_choice: StealthProfileChoice::default(),
             stealth_overrides: StealthOverrides::default(),

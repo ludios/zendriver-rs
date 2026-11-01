@@ -207,6 +207,9 @@ pub async fn open(
     input: OpenInput,
 ) -> Result<OpenOutput, ErrorData> {
     let mut s = state.lock().await;
+    if s.shutting_down {
+        return Err(map_error(McpServerError::ShuttingDown));
+    }
     if s.browser.is_some() {
         return Err(map_error(McpServerError::BrowserAlreadyOpen));
     }
