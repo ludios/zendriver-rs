@@ -32,7 +32,7 @@
 //!
 //! [`stop`]: InterceptHandle::stop
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -238,13 +238,22 @@ const AUTH_MEMORY: Duration = Duration::from_secs(60);
 /// auth scheme.
 type Challenge = (String, String, String);
 
+/// The proxy challenges answered with the credentials in the last
+/// [`AUTH_MEMORY`].
+#[derive(Debug, Default)]
+struct Answered {
+    /// Each challenge with when it was answered, oldest first.
+    order: VecDeque<(Instant, Challenge)>,
+    /// The same challenges, to look one up without a scan.
+    keys: HashSet<Challenge>,
+}
+
 /// The `authChallengeResponse` to send for the `Fetch.authRequired` event
 /// `event`.
 ///
 /// - `proxy_auth`: the `(user, password)` to give a proxy, if any.
 /// - `answered`: the challenges answered with them in the last
-///   [`AUTH_MEMORY`] before `now`, each with when, oldest first; updated
-///   here.
+///   [`AUTH_MEMORY`] before `now`; updated here.
 /// - `now`: the time of this event.
 ///
 /// Credentials go only to a proxy (`authChallenge.source == "Proxy"`), and
@@ -256,7 +265,7 @@ type Challenge = (String, String, String);
 fn auth_response(
     proxy_auth: Option<&(String, String)>,
     event: &Value,
-    answered: &mut VecDeque<(Instant, Challenge)>,
+    answered: &mut Answered,
     now: Instant,
 ) -> Value {
     let challenge = &event["authChallenge"];
@@ -264,10 +273,13 @@ fn auth_response(
         return json!({ "response": "Default" });
     };
     while answered
+        .order
         .front()
         .is_some_and(|(at, _)| now.saturating_duration_since(*at) > AUTH_MEMORY)
     {
-        answered.pop_front();
+        if let Some((_, key)) = answered.order.pop_front() {
+            answered.keys.remove(&key);
+        }
     }
     let field = |v: &Value| v.as_str().unwrap_or_default().to_string();
     let key = (
@@ -275,11 +287,12 @@ fn auth_response(
         field(&challenge["origin"]),
         field(&challenge["scheme"]),
     );
-    if answered.iter().any(|(_, k)| *k == key) {
+    if answered.keys.contains(&key) {
         warn!(?key, "interception: the proxy rejected the credentials");
         return json!({ "response": "CancelAuth" });
     }
-    answered.push_back((now, key));
+    answered.keys.insert(key.clone());
+    answered.order.push_back((now, key));
     json!({
         "response": "ProvideCredentials",
         "username": user,
@@ -323,7 +336,7 @@ pub(crate) async fn run_actor(
     let enable_patterns: Vec<Value> = patterns.iter().map(serialize_pattern).collect();
     let handle_auth_requests = proxy_auth.is_some();
     // See `auth_response`.
-    let mut answered = VecDeque::new();
+    let mut answered = Answered::default();
     tokio::spawn(async move {
         if let Err(e) = enable_session
             .call(
@@ -924,7 +937,7 @@ mod tests {
     #[test]
     fn auth_response_gives_credentials_to_each_proxy_challenge_once() {
         let creds = ("u".to_string(), "p".to_string());
-        let mut answered = VecDeque::new();
+        let mut answered = Answered::default();
         let now = Instant::now();
         let event = |source: &str, origin: &str| {
             json!({
@@ -946,7 +959,7 @@ mod tests {
         );
         assert_eq!(respond(Some(&creds), event("Server", "c")), "Default");
         assert_eq!(respond(None, event("Proxy", "d")), "Default");
-        assert_eq!(answered.len(), 2);
+        assert_eq!(answered.order.len(), 2);
     }
 
     /// The actor remembers every challenge it answered in the last
@@ -955,7 +968,7 @@ mod tests {
     #[test]
     fn auth_response_remembers_challenges_for_a_while() {
         let creds = ("u".to_string(), "p".to_string());
-        let mut answered = VecDeque::new();
+        let mut answered = Answered::default();
         let event = |request: usize| {
             json!({
                 "requestId": format!("R{request}"),
@@ -972,7 +985,8 @@ mod tests {
         assert_eq!(respond(0, start + AUTH_MEMORY), "CancelAuth");
         let later = start + AUTH_MEMORY + Duration::from_secs(1);
         assert_eq!(respond(0, later), "ProvideCredentials");
-        assert_eq!(answered.len(), 1);
+        assert_eq!(answered.order.len(), 1);
+        assert_eq!(answered.keys.len(), 1);
     }
 
     #[tokio::test]
