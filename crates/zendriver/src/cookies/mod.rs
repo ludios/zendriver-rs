@@ -244,14 +244,21 @@ impl Cookie {
             || request_path
                 .strip_prefix(self.path.as_str())
                 .is_some_and(|rest| self.path.ends_with('/') || rest.starts_with('/'));
-        // A partition's top-level site is a scheme and a registrable domain,
-        // so the URL is on that site iff its host is at or under the domain.
+        // A partition's top-level site is a scheme and a registrable domain
+        // (Chrome takes an unknown top-level domain, such as `test`, as a
+        // registry), so the URL is on that site iff its host is at or under
+        // the domain. A dotless host, such as `localhost`, is a registry
+        // itself, and so a site of its own. (So is a page at a public suffix
+        // with a dot, such as `github.io`; telling those apart would need the
+        // public suffix list.)
         let partition_matches = self.partition_key.as_ref().is_none_or(|key| {
             let site = url::Url::parse(&key.top_level_site).ok();
+            let on_site = |site_host: &str| {
+                host == site_host || (site_host.contains('.') && is_at_or_under(host, site_host))
+            };
             !key.has_cross_site_ancestor
                 && site.as_ref().is_some_and(|site| {
-                    site.scheme() == site_scheme
-                        && site.host_str().is_some_and(|d| is_at_or_under(host, d))
+                    site.scheme() == site_scheme && site.host_str().is_some_and(on_site)
                 })
         });
         domain_matches && path_matches && partition_matches && (!self.secure || is_secure(url))
@@ -444,9 +451,12 @@ impl CookieJar {
     ///   `127.0.0.0/8`, `[::1]`), which Chrome treats as secure.
     /// - Partition: an unpartitioned cookie, or one partitioned under the
     ///   URL's own site (its scheme, with `ws` as `http` and `wss` as
-    ///   `https`, and its registrable domain) and set with no cross-site
-    ///   ancestor. Cookies that an embedded page on another site would send
-    ///   aren't returned.
+    ///   `https`, and its registrable domain, or its whole host if that has
+    ///   no dot, like `localhost`) and set with no cross-site ancestor.
+    ///   Cookies that an embedded page on another site would send aren't
+    ///   returned. Without the public suffix list, a cookie partitioned
+    ///   under a public suffix with a dot (a page at `github.io` itself) is
+    ///   wrongly returned for that suffix's subdomains.
     ///
     /// `SameSite` is ignored: it depends on the page making the request.
     /// Chrome's own `Network.getCookies` isn't used because the browser
@@ -1003,6 +1013,13 @@ mod tests {
             &partitioned("http://example.com", false),
             "https://example.com/"
         ));
+        // A dotless host is a site of its own.
+        let localhost = Cookie {
+            partition_key: Some(CookiePartitionKey::new("http://localhost")),
+            ..cookie(".localhost", "/", true)
+        };
+        assert!(matches(&localhost, "http://localhost/"));
+        assert!(!matches(&localhost, "http://a.localhost/"));
     }
 
     /// A [`Cookie`] carrying the CHIPS / priority extension fields must

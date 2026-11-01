@@ -165,49 +165,82 @@ async fn for_url_agrees_with_chrome() {
 
 /// Of the partitioned cookies, `for_url` returns those that a page at the
 /// URL sends: the ones partitioned under the URL's own site, set with no
-/// cross-site ancestor. `Network.getCookies` answers for the page the tab
-/// shows, so the tab shows the URL.
+/// cross-site ancestor. A subdomain is on its parent's site, except on
+/// that of a dotless host such as `localhost`, which is a site of its own.
+/// `Network.getCookies` answers for the page the tab shows, so the tab
+/// shows the URL.
 #[tokio::test]
 async fn for_url_returns_only_the_urls_own_partition() {
     let server = FixtureServer::start().await;
     let browser = launch_for_test(Browser::builder()).await;
     let tab = browser.main_tab();
     let jar = browser.cookies();
-    let partitions = [
-        ("unpartitioned", None),
-        ("own", Some(("http://127.0.0.1", false))),
-        ("own_embedded", Some(("http://127.0.0.1", true))),
-        ("other_site", Some(("http://a.test", true))),
+    // (page host, cookie domain, [(name, partition)], the names it sends)
+    let cases = [
+        (
+            "127.0.0.1",
+            "127.0.0.1",
+            vec![
+                ("unpartitioned", None),
+                ("own", Some(("http://127.0.0.1", false))),
+                ("own_embedded", Some(("http://127.0.0.1", true))),
+                ("other_site", Some(("http://a.test", true))),
+            ],
+            ["own", "unpartitioned"],
+        ),
+        // Secure cookies go to http pages only on loopback hosts.
+        (
+            "sub.a.localhost",
+            ".a.localhost",
+            vec![
+                ("parent_site", Some(("http://a.localhost", false))),
+                ("https_site", Some(("https://a.localhost", false))),
+                ("bare_localhost", Some(("http://localhost", false))),
+            ],
+            ["parent_site", "unpartitioned"],
+        ),
+        (
+            "a.localhost",
+            "a.localhost",
+            vec![
+                ("own_localhost", Some(("http://a.localhost", false))),
+                ("bare_localhost", Some(("http://localhost", false))),
+            ],
+            ["own_localhost", "unpartitioned"],
+        ),
     ];
-    for (name, partition) in partitions {
-        let partition_key = partition.map(|(site, cross)| CookiePartitionKey {
-            top_level_site: site.into(),
-            has_cross_site_ancestor: cross,
-        });
-        let cookie = Cookie {
-            name: name.into(),
-            value: "1".into(),
-            domain: "127.0.0.1".into(),
-            path: "/".into(),
-            secure: true,
-            partition_key,
-            ..Default::default()
-        };
-        jar.set(cookie).await.expect("set");
-    }
-    assert_eq!(jar.all().await.expect("all").len(), partitions.len());
+    for (host, domain, partitions, sent) in cases {
+        jar.clear().await.expect("clear");
+        let unpartitioned = [("unpartitioned", None)];
+        for (name, partition) in partitions.iter().chain(&unpartitioned) {
+            let partition_key = partition.map(|(site, cross)| CookiePartitionKey {
+                top_level_site: site.into(),
+                has_cross_site_ancestor: cross,
+            });
+            let cookie = Cookie {
+                name: (*name).into(),
+                value: "1".into(),
+                domain: domain.into(),
+                path: "/".into(),
+                secure: true,
+                partition_key,
+                ..Default::default()
+            };
+            jar.set(cookie).await.expect("set");
+        }
 
-    let url = server.url("127.0.0.1", "/plain");
-    load(&tab, &url).await;
-    let ours = jar.for_url(&Url::parse(&url).expect("URL")).await;
-    let ours = names(ours.expect("for_url").into_iter().map(|c| c.name));
-    let chromes = tab
-        .session()
-        .call("Network.getCookies", json!({ "urls": [url] }))
-        .await
-        .expect("Network.getCookies");
-    assert_eq!(reply_names(&chromes), ["own", "unpartitioned"], "Chrome's");
-    assert_eq!(ours, ["own", "unpartitioned"], "ours");
+        let url = server.url(host, "/plain");
+        load(&tab, &url).await;
+        let ours = jar.for_url(&Url::parse(&url).expect("URL")).await;
+        let ours = names(ours.expect("for_url").into_iter().map(|c| c.name));
+        let chromes = tab
+            .session()
+            .call("Network.getCookies", json!({ "urls": [url] }))
+            .await
+            .expect("Network.getCookies");
+        assert_eq!(reply_names(&chromes), sent, "Chrome's, at {host}");
+        assert_eq!(ours, sent, "ours, at {host}");
+    }
     browser.close().await;
 }
 
