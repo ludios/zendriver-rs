@@ -836,6 +836,11 @@ impl Tab {
     /// that context's cookies, which are separate from the default
     /// context's; otherwise the same store as [`crate::Browser::cookies`].
     ///
+    /// Chrome takes a context id only on the browser target, so once the
+    /// [`crate::Browser`] is gone, the jar of a tab in an isolated context
+    /// that has its own page connection fails every call rather than reach
+    /// another context's cookies.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -850,17 +855,16 @@ impl Tab {
     /// ```
     #[must_use]
     pub fn cookies(&self) -> crate::CookieJar {
-        // Chrome takes a context id only on the browser target. If the
-        // Browser is gone, so is every isolated context (a BrowserContext
-        // keeps the Browser alive, and disposes its context when dropped),
-        // so a live tab is in the default context, which its own connection
-        // reads.
-        let Some(browser) = self.inner.browser.upgrade() else {
-            return crate::CookieJar::new(self.inner.session.connection().clone());
+        // Without the Browser, the tab's own connection. A per-tab socket
+        // reaches the page, where Chrome reads the default context and
+        // rejects a context id; a flat session's reaches the browser target.
+        let conn = match self.inner.browser.upgrade() {
+            Some(browser) => browser.conn.clone(),
+            None => self.inner.session.connection().clone(),
         };
         match &self.inner.browser_context_id {
-            Some(id) => crate::CookieJar::for_context(browser.conn.clone(), id),
-            None => crate::CookieJar::new(browser.conn.clone()),
+            Some(id) => crate::CookieJar::for_context(conn, id),
+            None => crate::CookieJar::new(conn),
         }
     }
 
@@ -3939,19 +3943,17 @@ mod tests {
 
     /// [`Tab::cookies`] writes into the tab's own `BrowserContext`: the
     /// command goes to the browser target (no `sessionId`, which would make
-    /// Chrome use the default context) and names the tab's context. Once
-    /// the Browser is gone, the tab can only be in the default context, so
-    /// the jar names none.
+    /// Chrome use the default context) and names the tab's context, also
+    /// once the Browser is gone: the tab's context may outlive it (one that
+    /// zendriver didn't create), and naming it makes a page connection fail
+    /// rather than reach the default context.
     #[tokio::test]
     async fn tab_cookies_write_into_the_tabs_context() {
         use crate::cookies::Cookie;
 
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        for (browser, want) in [
-            (Arc::downgrade(&inner), json!("CTX1")),
-            (std::sync::Weak::new(), Value::Null),
-        ] {
+        for browser in [Arc::downgrade(&inner), std::sync::Weak::new()] {
             let input = crate::input::InputController::new_with_seed(
                 zendriver_stealth::InputProfile::native(),
                 42,
@@ -3978,12 +3980,7 @@ mod tests {
             let id = mock.expect_cmd("Storage.setCookies").await;
             let sent = mock.last_sent();
             assert_eq!(sent["params"]["cookies"][0]["name"], "sid");
-            assert_eq!(
-                sent["params"]
-                    .get("browserContextId")
-                    .unwrap_or(&Value::Null),
-                &want
-            );
+            assert_eq!(sent["params"]["browserContextId"], "CTX1", "{sent}");
             assert!(sent.get("sessionId").is_none(), "{sent}");
             mock.reply(id, json!({})).await;
             fut.await.unwrap().unwrap();

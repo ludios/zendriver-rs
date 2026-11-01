@@ -349,7 +349,7 @@ impl From<CdpCookie> for Cookie {
 /// - [`CookieJar::new`]: no `browserContextId`, so the **default** context.
 ///   This is what [`crate::Browser::cookies`] returns.
 /// - [`CookieJar::for_context`]: the named context. [`crate::Tab::cookies`]
-///   returns one for the tab's own context.
+///   returns one for a tab in an isolated context.
 ///
 /// Chrome accepts `browserContextId` only on the browser target, and a
 /// `Storage.*Cookies` command sent on a page's session reads the default
