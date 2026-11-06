@@ -80,6 +80,42 @@ async fn the_default_screen_is_1920x1080_with_a_taskbar() {
     }
 }
 
+/// Each window's tab still fills the work area once other windows have
+/// opened, which is why `Browser::new_tab` tells callers to give each page
+/// that they work in at the same time its own window.
+#[tokio::test]
+async fn a_window_keeps_its_geometry_while_others_open() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let mut tabs = vec![browser.main_tab()];
+    for _ in 0..2 {
+        tabs.push(browser.new_window().await.expect("new window"));
+    }
+    let mut seen = Vec::new();
+    for tab in &tabs {
+        seen.push(geometry(&server, tab).await);
+    }
+    browser.close().await;
+    for seen in seen {
+        assert_fills_work_area(&seen, [1920, 1080], [1920, 1032], 1.0);
+    }
+}
+
+#[tokio::test]
+#[ignore = "known bug: a background tab's page sees its viewport as its window \
+            (at (0, 87), with outerHeight equal to innerHeight), because focus \
+            emulation keeps the tab visible after Chrome detaches its view from \
+            the window"]
+async fn known_bug_a_background_tab_sees_its_viewport_as_its_window() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let background = browser.main_tab();
+    browser.new_tab().await.expect("new tab");
+    let seen = geometry(&server, &background).await;
+    browser.close().await;
+    assert_fills_work_area(&seen, [1920, 1080], [1920, 1032], 1.0);
+}
+
 /// A builder whose persona has the screen `screen` (the members of a
 /// `ScreenSpec`, as JSON).
 fn with_screen(screen: &str) -> BrowserBuilder {

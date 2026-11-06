@@ -4703,6 +4703,22 @@ impl Browser {
     ///    `Target.attachedToTarget` event arrives.
     /// 3. Returns the matching [`Tab`] on success.
     ///
+    /// # Background tabs under `native` stealth
+    ///
+    /// The new tab comes to the front of its window, and the tab that was in
+    /// front becomes a background tab. In a headless launch under
+    /// [`StealthProfile::native`] (the default), a background tab's page
+    /// sees its viewport as its window: `screenY` is the height of the
+    /// browser's toolbars (87 CSS pixels), and `outerHeight` equals
+    /// `innerHeight`. That is because zendriver's stealth keeps every tab
+    /// visible (with `Emulation.setFocusEmulationEnabled`), and Chrome
+    /// detaches a background tab's view from its window, so a background tab
+    /// that is visible gets its view's own bounds as its window's. Real
+    /// Chrome hides a background tab, so its page keeps the values from when
+    /// the tab was last in front. So to work in several pages at the same
+    /// time, open each with [`Browser::new_window`], which puts it in a
+    /// window of its own.
+    ///
     /// # Errors
     ///
     /// Returns [`ZendriverError::TabNotFound`] if the registrar fails to
@@ -4750,6 +4766,10 @@ impl Browser {
     /// than a tab in the existing one. The returned [`Tab`] is registered via
     /// the same observer path as `new_tab`. Mirrors nodriver's
     /// `get(new_window=True)`.
+    ///
+    /// Under [`StealthProfile::native`], open each page that you work in at
+    /// the same time as others this way: [`Browser::new_tab`] says why a
+    /// background tab's page sees the wrong window.
     ///
     /// # Errors
     ///

@@ -89,7 +89,15 @@ in the page:
   that screen's work area. Chrome itself then reports a screen, window
   and viewport that agree: by default a 1920x1080 screen, a 1920x1032 window at (0, 0),
   and a 1920x945 viewport (the window minus the browser's toolbars,
-  which headless Chrome emulates). A `--screen-info` or `--window-size`
+  which headless Chrome emulates). That holds for the tab in front of
+  each window. A background tab's page sees its viewport as its window
+  (at (0, 87), with `outerHeight` equal to `innerHeight`), because
+  zendriver keeps every tab visible (with focus emulation), and Chrome
+  detaches a background tab's view from its window. (Real Chrome hides a
+  background tab, so its page keeps the values from when the tab was
+  last in front.) So open each page that you work in at the same time as
+  others with `Browser::new_window`, which puts it in a window of its
+  own, not with `Browser::new_tab`. A `--screen-info` or `--window-size`
   that you pass with `BrowserBuilder::arg` wins. A headed launch gets
   none of these switches, since Chrome then reports the real display and
   window.
