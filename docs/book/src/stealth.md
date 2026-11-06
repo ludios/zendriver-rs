@@ -92,7 +92,11 @@ in the page:
   which headless Chrome emulates). A `--screen-info` or `--window-size`
   that you pass with `BrowserBuilder::arg` wins. A headed launch gets
   neither switch, since Chrome then reports the real display and window.
-  `--screen-info` needs Chrome 133 or later.
+  `--screen-info` needs Chrome 133 or later. Chrome takes the screen in
+  physical pixels, so a configured screen's sizes (`width`, `height`,
+  `avail_width`, `avail_height`) times its `device_pixel_ratio` must be
+  whole numbers (1536x864 at 1.25 is 1920x1080); otherwise the launch
+  fails, since Chrome would round them and report other sizes.
 
 Since it runs no JS in the page, there's no patched function for a
 `Function.prototype.toString` check to catch.

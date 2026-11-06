@@ -28,30 +28,31 @@ async fn geometry(server: &FixtureServer, tab: &Tab) -> Value {
 }
 
 /// Assert that `seen` (from [`geometry`]) describes a screen of
-/// `screen_size` (CSS pixels) at a whole `device_pixel_ratio`, with a work
-/// area of `work_area` at its top left, and a window maximized to that work
-/// area whose viewport is as wide as the window and shorter (by the
-/// browser's toolbars, which headless Chrome emulates).
+/// `screen_size` (CSS pixels) at `device_pixel_ratio`, with a work area of
+/// `work_area` at its top left, and a window maximized to that work area
+/// whose viewport is as wide as the window and shorter (by the browser's
+/// toolbars, which headless Chrome emulates).
 fn assert_maximized_on(
     seen: &Value,
     screen_size: [u64; 2],
     work_area: [u64; 2],
-    device_pixel_ratio: u64,
+    device_pixel_ratio: f64,
 ) {
     let [avail_width, avail_height] = work_area;
     let expected = json!({
         "screen": screen_size,
         "workArea": [0, 0, avail_width, avail_height],
         "window": [0, 0, avail_width, avail_height],
-        "devicePixelRatio": device_pixel_ratio,
         "ownScreenProperties": [],
     });
-    let mut without_viewport = seen.clone();
-    let viewport = without_viewport
-        .as_object_mut()
-        .and_then(|o| o.remove("viewport"))
-        .expect("a viewport");
-    assert_eq!(without_viewport, expected, "all of it: {seen}");
+    let mut rest = seen.clone();
+    let object = rest.as_object_mut().expect("an object");
+    let viewport = object.remove("viewport").expect("a viewport");
+    let ratio = object
+        .remove("devicePixelRatio")
+        .expect("a devicePixelRatio");
+    assert_eq!(rest, expected, "all of it: {seen}");
+    assert_eq!(ratio.as_f64(), Some(device_pixel_ratio), "{seen}");
     assert_eq!(viewport[0], avail_width, "viewport width: {seen}");
     let viewport_height = viewport[1].as_u64().expect("a viewport height");
     assert!(
@@ -75,21 +76,40 @@ async fn geometry_of_first_tab_and_new_window(builder: BrowserBuilder) -> [Value
 #[tokio::test]
 async fn the_default_screen_is_1920x1080_with_a_taskbar() {
     for seen in geometry_of_first_tab_and_new_window(Browser::builder()).await {
-        assert_maximized_on(&seen, [1920, 1080], [1920, 1032], 1);
+        assert_maximized_on(&seen, [1920, 1080], [1920, 1032], 1.0);
     }
+}
+
+/// A builder whose persona has the screen `screen` (the members of a
+/// `ScreenSpec`, as JSON).
+fn with_screen(screen: &str) -> BrowserBuilder {
+    let persona: Persona = format!(r#"{{"screen": {{{screen}}}}}"#)
+        .parse()
+        .expect("persona JSON");
+    Browser::builder().persona_overlay(persona)
 }
 
 #[tokio::test]
 async fn a_configured_screen_reaches_chrome() {
-    let persona: Persona = r#"{"screen": {
-        "width": 1440, "height": 900, "device_pixel_ratio": 2.0,
-        "avail_width": 1400, "avail_height": 860
-    }}"#
-    .parse()
-    .expect("persona JSON");
-    let builder = Browser::builder().persona_overlay(persona);
+    let builder = with_screen(
+        r#""width": 1440, "height": 900, "device_pixel_ratio": 2.0,
+           "avail_width": 1400, "avail_height": 860"#,
+    );
     for seen in geometry_of_first_tab_and_new_window(builder).await {
-        assert_maximized_on(&seen, [1440, 900], [1400, 860], 2);
+        assert_maximized_on(&seen, [1440, 900], [1400, 860], 2.0);
+    }
+}
+
+/// At a fractional ratio, the sizes are exact as long as they are whole
+/// physical pixels (1536x864 at 1.25 is 1920x1080).
+#[tokio::test]
+async fn a_screen_at_a_fractional_ratio_reaches_chrome_exactly() {
+    let builder = with_screen(
+        r#""width": 1536, "height": 864, "device_pixel_ratio": 1.25,
+           "avail_width": 1536, "avail_height": 824"#,
+    );
+    for seen in geometry_of_first_tab_and_new_window(builder).await {
+        assert_maximized_on(&seen, [1536, 864], [1536, 824], 1.25);
     }
 }
 
@@ -99,6 +119,6 @@ async fn a_configured_screen_reaches_chrome() {
 async fn the_callers_screen_info_wins() {
     let builder = Browser::builder().arg("--screen-info={1366x768 workAreaBottom=40}");
     for seen in geometry_of_first_tab_and_new_window(builder).await {
-        assert_maximized_on(&seen, [1366, 768], [1366, 728], 1);
+        assert_maximized_on(&seen, [1366, 768], [1366, 728], 1.0);
     }
 }

@@ -30,7 +30,11 @@ const DEFAULT_TASKBAR_HEIGHT: u32 = 48;
 /// # Errors
 /// Returns [`StealthError::InvalidOverride`] for a screen that Chrome would
 /// crash on: a device pixel ratio below 0.5 (Chrome's minimum) or not
-/// finite, or a work area larger than the screen.
+/// finite, or a work area larger than the screen. Also for a screen whose
+/// width, height, or work-area width or height isn't a whole number of
+/// physical pixels: Chrome would round it to one, report a different size
+/// in CSS pixels, and maximize windows to 1 CSS pixel more than the work
+/// area (measured with Chrome 157 at a ratio of 1.75).
 fn screen_info_switch(screen: &ScreenSpec) -> Result<String, StealthError> {
     let dpr = screen.device_pixel_ratio;
     if !(dpr.is_finite() && dpr >= 0.5) {
@@ -48,13 +52,28 @@ fn screen_info_switch(screen: &ScreenSpec) -> Result<String, StealthError> {
             screen.width, screen.height
         )));
     }
+    let sizes = [
+        ("width", screen.width),
+        ("height", screen.height),
+        ("work-area width", avail_width),
+        ("work-area height", avail_height),
+    ];
+    for (name, css) in sizes {
+        let physical = f64::from(css) * dpr;
+        if (physical - physical.round()).abs() > 1e-6 {
+            return Err(StealthError::InvalidOverride(format!(
+                "the screen's {name} of {css} at a device_pixel_ratio of {dpr} is {physical} \
+                 physical pixels, not a whole number"
+            )));
+        }
+    }
     let physical = |css: u32| (f64::from(css) * dpr).round() as u32;
     Ok(format!(
         "--screen-info={{{}x{} devicePixelRatio={dpr} workAreaRight={} workAreaBottom={}}}",
         physical(screen.width),
         physical(screen.height),
-        physical(screen.width - avail_width),
-        physical(screen.height - avail_height),
+        physical(screen.width) - physical(avail_width),
+        physical(screen.height) - physical(avail_height),
     ))
 }
 
@@ -164,8 +183,10 @@ impl StealthObserver {
     ///
     /// # Errors
     /// Returns [`StealthError::InvalidOverride`] for a screen that Chrome
-    /// would crash on: a `device_pixel_ratio` below 0.5, or an `avail_width`
-    /// or `avail_height` larger than the screen.
+    /// would crash on (a `device_pixel_ratio` below 0.5, or an `avail_width`
+    /// or `avail_height` larger than the screen), or would misreport (a
+    /// size that, times `device_pixel_ratio`, isn't a whole number of
+    /// physical pixels).
     pub fn headless_flags(&self) -> Result<Vec<String>, StealthError> {
         if self.profile.kind() != ProfileKind::Native {
             return Ok(Vec::new());
@@ -1633,12 +1654,17 @@ mod persona_reaches_cdp_tests {
         );
     }
 
-    /// Chrome dumps core on these instead of starting.
+    /// Chrome dumps core on the first two instead of starting, and misreports
+    /// the others.
     #[test]
-    fn native_headless_flags_reject_a_screen_chrome_would_crash_on() {
+    fn native_headless_flags_reject_a_screen_chrome_would_crash_on_or_misreport() {
         let tiny_ratio = ScreenSpec::new(1920, 1080, 0.25);
         let tall_work_area = ScreenSpec::new(1920, 1080, 1.0).with_avail(1920, 1081);
-        for screen in [tiny_ratio, tall_work_area] {
+        // 2194 x 1.75 = 3839.5 physical pixels; at 1.75, Chrome reports
+        // 3840 as 2195 and maximizes a window to 2196.
+        let inexact_size = ScreenSpec::new(2194, 1232, 1.75);
+        let inexact_work_area = ScreenSpec::new(2192, 1232, 1.75).with_avail(2192, 1186);
+        for screen in [tiny_ratio, tall_work_area, inexact_size, inexact_work_area] {
             assert!(
                 matches!(
                     native_headless_flags(Some(screen), None),
@@ -1647,6 +1673,19 @@ mod persona_reaches_cdp_tests {
                 "{screen:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn native_headless_flags_take_a_fractional_ratio_with_whole_physical_pixels() {
+        let flags = native_headless_flags(
+            Some(ScreenSpec::new(1536, 864, 1.25).with_avail(1536, 824)),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            flags[0],
+            "--screen-info={1920x1080 devicePixelRatio=1.25 workAreaRight=0 workAreaBottom=50}"
+        );
     }
 
     #[test]

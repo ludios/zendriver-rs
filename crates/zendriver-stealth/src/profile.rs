@@ -149,10 +149,11 @@ impl StealthProfile {
     /// Chrome itself reports a screen, window and viewport that agree, with
     /// no `Emulation.setDeviceMetricsOverride` and nothing patched in the
     /// page. The viewport is the window minus the browser's toolbars, which
-    /// headless Chrome emulates: 1920x945 by default. A headed Chrome
-    /// reports the real display and window. (Chrome takes `--screen-info`
-    /// from version 133 on; an older one ignores it, and so reports headless
-    /// Chrome's default screen of 800x600.)
+    /// headless Chrome emulates: 1920x945 by default. A `--screen-info` or
+    /// `--window-size` switch that the caller passes wins over these. A
+    /// headed Chrome reports the real display and window. (Chrome takes
+    /// `--screen-info` from version 133 on; an older one ignores it, and so
+    /// reports headless Chrome's default screen of 800x600.)
     ///
     /// ```
     /// use zendriver_stealth::StealthProfile;
