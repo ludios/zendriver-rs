@@ -99,7 +99,7 @@ Gated `interception`. Sub-error returned wrapped in
 | `MismatchedPause { action, pause }` | `Rule::new` got an action that can't act on the match's kind of pause (e.g. `ModifyResponse` on a `Request` pause). | `RewriteUrl` / `ModifyRequest` need `Request`, `ModifyResponse` needs `ResponseHeaders`. |
 | `InvalidPattern(String)` | URL pattern didn't parse as CDP wildcard syntax. | Patterns use `*` / `?` (not regex). Escape a literal `*`, `?` or `\` with `\`. |
 | `SubscriptionClosed` | The tab's interception task is gone (it panicked, or the runtime shut down), so a change couldn't be made, or a `PausedRequest`'s answer couldn't be sent. | Should not happen; file a bug. |
-| `WrongStage` | `PausedRequest::continue_response` on a request paused at the Request stage (the request, dropped unanswered, is then failed). | Subscribe with a `Match` at `PauseKind::ResponseHeaders` (`Match::url(..)?.at(PauseKind::ResponseHeaders)`). |
+| `WrongStage` | `PausedRequest::continue_response` on a request paused other than at a `ResponseHeaders` pause (a `Request` or `ResponseError` pause; the request, dropped unanswered, is then failed). | Subscribe with a `Match` at `PauseKind::ResponseHeaders` (`Match::url(..)?.at(PauseKind::ResponseHeaders)`). |
 | `InvalidResponse(String)` | A CDP response didn't carry the expected field (e.g. `Fetch.getResponseBody` returned no `body`). | Should not happen with stable Chrome; file a bug. |
 
 ## `CloudflareError` variants

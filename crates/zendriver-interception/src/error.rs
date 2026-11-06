@@ -17,14 +17,17 @@ pub enum InterceptionError {
     InvalidPattern(String),
 
     /// The session's interception task is gone (it panicked, or its
-    /// runtime shut down), so a layer couldn't be added.
+    /// runtime shut down), so a change couldn't be made, or a
+    /// `PausedRequest`'s answer couldn't be sent.
     #[error("the session's interception task is gone")]
     SubscriptionClosed,
 
     #[error("invalid response from CDP: {0}")]
     InvalidResponse(String),
 
-    #[error("wrong interception stage: this action is only valid at the Response stage")]
+    /// `PausedRequest::continue_response` on a request paused other than at
+    /// a `ResponseHeaders` pause.
+    #[error("wrong kind of pause: this action is only valid at a ResponseHeaders pause")]
     WrongStage,
 
     /// No interception entry has this id (it was never inserted, or it

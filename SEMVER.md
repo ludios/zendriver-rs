@@ -21,7 +21,7 @@ types. As of 0.1.0, this set is: all `*Error` types, `AriaRole`,
 `ResourceType`, `AbortReason`.
 
 Other enums (Platform, Channel, ProfileKind, MouseButton, SpecialKey,
-DialogType, DownloadProgressState, FetcherPhase, RequestStage, Format,
+DialogType, DownloadProgressState, FetcherPhase, PauseKind, Format,
 ClearanceOutcome) are committed-stable; adding variants is a SemVer
 break.
 

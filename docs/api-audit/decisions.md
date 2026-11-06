@@ -2,7 +2,8 @@
 
 The founder's-review rounds routed 14 judgement calls to a human rather than deciding them.
 Rin answered all 14 on 2026-08-08. This file is the record PRs 2–7 build against; where an
-answer changed the shape of the fix, that is noted.
+answer changed the shape of the fix, that is noted. Later decisions came from other processes,
+each named in its section (#15: an Astra–Fable design, settled by the user on 2026-11-06).
 
 Sources: [round 1 §5](founders-review-round1.md), [round 2 §7](founders-review-round2.md).
 

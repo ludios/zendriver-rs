@@ -114,6 +114,23 @@ Changelog](https://keepachangelog.com/en/1.1.0/). Adheres to [SEMVER.md].
 
 ### Changed
 
+- **Interception: one ordered list per tab** (decision #15 in
+  `docs/api-audit/decisions.md`). A tab's `Interceptor` (`Tab::interceptor`)
+  owns its `Fetch` domain; its entries (rules and streams) form one list,
+  every `insert` / `subscribe` / `InterceptBuilder::start` names its
+  `Position`, and the first entry that fits a paused request decides it.
+  Tracker blocking is the tab's first entry, `browser.trackers`
+  (`Tab::tracker_blocking`); proxy credentials are one per-tab setting
+  (`set_proxy_auth`), sent only to a proxy's challenge, on every tab.
+  `start` / `subscribe` return once Chrome has applied the patterns.
+  `RequestStage` became `PauseKind` (`Request`, `ResponseHeaders`,
+  `ResponseError`); a `Rule` is a `Match` and an `Action`. A pause that its
+  deciding entry leaves unanswered (a panicking closure, an answer Chrome
+  refused, a dropped `PausedRequest` or stream) now fails the request
+  instead of hanging it. MCP: `browser_intercept_add_rule` requires a
+  `position` and gains host sets, resource types, pauses, labels and the
+  `continue` action; the new `browser_intercept_move_rule`; `list_rules`
+  shows the tab's list in order; `rule_id`s are the core ids.
 - **Parity (P-A…P-D) behavior/API changes:** `zendriver::Channel` now names the
   browser-brand enum (Chrome/Chromium/Brave/Edge/Auto); the fetcher
   release-channel enum is re-exported as `FetcherChannel`. `Element::press_with`

@@ -28,8 +28,8 @@ use crate::types::{
 /// fail with [`InterceptionError::InvalidPattern`] for a `glob` that
 /// doesn't compile.
 //
-// `Debug` works because `Rule` has a hand-written `Debug` impl that renders
-// the closure variant's body as `<closure>`.
+// `Debug` works because `Action` has a hand-written `Debug` impl, which
+// writes a closure action as its variant's name.
 #[derive(Debug)]
 pub struct InterceptBuilder {
     interceptor: Interceptor,
@@ -82,8 +82,8 @@ impl InterceptBuilder {
     }
 
     /// Add a rule that fails, with `BlockedByClient`, the requests whose host
-    /// is in `hosts` or is a subdomain of one in it: one set lookup per
-    /// request however many hosts. `BrowserBuilder::block_trackers` in the
+    /// is in `hosts` or is a subdomain of one in it: a set lookup per label
+    /// of the request's host, however many hosts. `BrowserBuilder::block_trackers` in the
     /// `zendriver` crate installs such a rule for you.
     #[must_use]
     pub fn block_hosts(self, hosts: Arc<HostMatcher>) -> Self {

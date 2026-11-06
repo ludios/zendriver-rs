@@ -152,7 +152,8 @@ pub enum AuthPause {
     EveryRequest,
     /// Only document requests (the page's and its frames' navigations),
     /// for fewer round trips: a 407 on another request's connection is
-    /// missed, unless an entry pauses that request.
+    /// missed, unless an entry pauses that request at the Request stage
+    /// (Chrome surfaces the challenges of the requests it paused there).
     DocumentsOnly,
 }
 
@@ -231,7 +232,7 @@ pub enum ActionKind {
 /// session's interceptor (`Tab::interceptor`).
 ///
 /// Clones share one interceptor. Nothing is sent to Chrome, and no task is
-/// spawned, until the first change.
+/// spawned, until the first call of a method.
 #[derive(Clone, Debug)]
 pub struct Interceptor {
     inner: Arc<Shared>,
@@ -331,7 +332,9 @@ impl Interceptor {
         })
     }
 
-    /// Move entry `id` to `at` (a stream keeps the pauses it holds).
+    /// Move entry `id` to `at` (a stream keeps the pauses it holds). A
+    /// `Before(id)` / `After(id)` naming the entry itself leaves it where it
+    /// is.
     ///
     /// # Errors
     ///

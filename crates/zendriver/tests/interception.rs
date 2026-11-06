@@ -117,10 +117,9 @@ async fn a_rule_and_the_proxy_credentials_compose() {
     browser.close().await;
 }
 
-/// A response rule needs no pattern of its own: the layer pauses at the
-/// Response stage for `modify_response` (and at the Request stage for the
-/// others), so `modify_response` alone changes the response, and a block
-/// rule after it still blocks.
+/// Each rule pauses at its own kind of pause: `modify_response` at the
+/// Response stage (it changes the response), `block` at the Request stage
+/// (it still blocks behind it).
 #[tokio::test]
 async fn rules_pause_at_their_own_stage() {
     let server = FixtureServer::start().await;

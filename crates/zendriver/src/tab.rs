@@ -3314,6 +3314,8 @@ impl Tab {
     /// tracker blocking is on (`BrowserBuilder::block_trackers` /
     /// `tracker_blocklist_*`): for a `Position` relative to it,
     /// `move_rule` or `remove`. (The entry may have been removed since.)
+    /// `None` without tracker blocking, or if the entry couldn't be inserted
+    /// when the tab started (that is logged).
     ///
     /// Gated by the `interception` cargo feature.
     #[must_use]

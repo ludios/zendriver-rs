@@ -96,8 +96,8 @@ intents:
   no race with fast responses.
 - **Modification** → [`Tab::intercept`] from the `interception`
   feature. A declarative rule builder (`block` / `redirect` /
-  `respond` / `modify_request` / `modify_response`) or a `subscribe()` stream for
-  callback-style control.
+  `respond` / `modify_request` / `modify_response`), or a stream from
+  `Tab::interceptor().subscribe(..)` for callback-style control.
 
 Direct CDP-event handlers are still available via
 [`Tab::session().subscribe::<E>()`](https://docs.rs/zendriver-transport/latest/zendriver_transport/struct.SessionHandle.html)
@@ -161,7 +161,7 @@ features so binary size and compile time scale with what you use.
 
 | Python capability | Rust Cargo feature | What it gates |
 |-------------------|--------------------|---------------|
-| `tab.add_handler(zd.cdp.fetch.RequestPaused, ...)` | `interception` | `Tab::intercept()`, the `Fetch.*`-based rule builder, and the `subscribe()` stream. |
+| `tab.add_handler(zd.cdp.fetch.RequestPaused, ...)` | `interception` | `Tab::intercept()`, the `Fetch.*`-based rule builder, and `Tab::interceptor().subscribe(..)` for a stream. |
 | `tab.expect_request(...)`, dialogs, downloads | `expect` | All four `expect_*` methods on `Tab`. |
 | `tab.verify_cf()` | `cloudflare` | `Tab::cloudflare()` and the `CloudflareBypass` driver. Pulls in `interception`. |
 | Chrome auto-download | `fetcher` | `zendriver_fetcher` re-exports; downloads Chrome for Testing on demand. |

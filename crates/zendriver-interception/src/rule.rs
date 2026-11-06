@@ -68,6 +68,9 @@ impl Match {
 
     /// The same requests, of `resource_type` only. `XHR`, `Fetch` and
     /// `EventSource` are one type to Chrome, so each of them fits all three.
+    /// Chrome refuses a pattern for `TextTrack`, `WebSocket`, `Manifest`,
+    /// `SignedExchange` or `Preflight`, so inserting an entry of one of
+    /// those fails with [`InterceptionError::Call`].
     #[must_use]
     pub fn resource(mut self, resource_type: ResourceType) -> Self {
         self.resource_type = Some(resource_type);
@@ -239,7 +242,7 @@ impl Rule {
         })
     }
 
-    /// The same rule, named `label` in snapshots and logs.
+    /// The same rule, named `label` in snapshots.
     #[must_use]
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
