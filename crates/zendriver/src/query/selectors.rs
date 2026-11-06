@@ -112,11 +112,8 @@ impl QueryScope<'_> {
     }
 }
 
-/// The set of supported selector kinds. T9 lands `Css` and `Xpath`;
-/// T10 lands `Text` and `TextRegex`; `Role` is filled in by T11. Until
-/// then the Role stub returns a clearly-attributed error so an
-/// accidental dispatch surfaces immediately instead of returning an
-/// empty match set (which would silently pass tests).
+/// The kind of selector that a `FindBuilder` / `FindAllBuilder` query
+/// resolves.
 ///
 /// `TextRegex` holds the JavaScript source and flags that the page passes
 /// to `new RegExp(pattern, flags)`.
@@ -621,12 +618,11 @@ async fn resolve_text_many(
 //   descendant is the match otherwise has an identical `innerText` and
 //   also passes the filter, ranking first in document order.
 //
-// The regex is *re-parsed* on the JS side via `new RegExp`, so the
-// pattern must use JS regex syntax, which differs from Rust's `regex`
-// crate beyond the common subset (JS rejects `(?i)`, and reads `\z` as a
-// literal `z`). Flags are passed verbatim — caller is responsible for
-// valid JS flag chars (e.g. "i", "im", "gi", etc.). Empty flags string is
-// fine.
+// The page parses the pattern with `new RegExp`, so the pattern must use
+// JS regex syntax, which differs from Rust's `regex` crate beyond the
+// common subset (JS rejects `(?i)`, and reads `\z` as a literal `z`).
+// Flags are passed verbatim — caller is responsible for valid JS flag
+// chars (e.g. "i", "im", "gi", etc.). Empty flags string is fine.
 //
 // We construct the RegExp *once outside* the filter callback so the
 // pattern is only compiled per query rather than per element. A `g` or `y`

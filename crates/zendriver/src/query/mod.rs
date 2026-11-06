@@ -635,7 +635,10 @@ impl<'scope> FindBuilder<'scope> {
         self
     }
 
-    /// Text regex match: match elements whose text matches `pattern`.
+    /// Text regex match: match each element whose text matches `pattern`,
+    /// unless a descendant's text matches too (so for the pattern `OK`,
+    /// `<div><b>OK</b></div>` gives only the `<b>`). An element's text is
+    /// its `innerText` (or `textContent` for hidden nodes).
     ///
     /// `pattern` is in JavaScript `RegExp` syntax, not Rust `regex` syntax,
     /// because the page runs it as `new RegExp(pattern, "")`. So lookbehind
@@ -659,7 +662,9 @@ impl<'scope> FindBuilder<'scope> {
         self.text_regex_with_flags(pattern, "")
     }
 
-    /// Text regex match with explicit JS-flavored flags.
+    /// Text regex match with explicit JS-flavored flags. Matches the same
+    /// elements as [`Self::text_regex`] would, given a `RegExp` with these
+    /// flags.
     ///
     /// Flags follow JS RegExp syntax (e.g. `"i"` for case-insensitive,
     /// `"im"` for case-insensitive + multiline). The pattern is interpreted
