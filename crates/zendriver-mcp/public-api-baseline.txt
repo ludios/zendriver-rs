@@ -4201,6 +4201,7 @@ pub use zendriver::stealth::Persona
 pub use zendriver::stealth::PersonaBuilder
 pub use zendriver::stealth::Platform
 pub use zendriver::stealth::Provenance
+pub use zendriver::stealth::ScreenSpec
 pub use zendriver::stealth::Seed
 pub use zendriver::stealth::ShaderPrecision
 pub use zendriver::stealth::StealthProfile
