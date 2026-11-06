@@ -14,10 +14,15 @@ const __zdFnToString = Function.prototype.toString;
 const __zdMarks = new WeakMap(); // fn -> native display string
 const __zdNativeStr = (name) => "function " + name + "() { [native code] }";
 
-const __zdFakeToString = function toString() {
-  const s = __zdMarks.get(this);
-  return s !== undefined ? s : __zdFnToString.call(this);
-};
+// Written as a method, not a `function`, so that like the built-in it has no
+// own `prototype` property and isn't a constructor: pages check both (for
+// example, rebrowser's bot-detector checks for an own `prototype`).
+const __zdFakeToString = {
+  toString() {
+    const s = __zdMarks.get(this);
+    return s !== undefined ? s : __zdFnToString.call(this);
+  },
+}.toString;
 __zdMarks.set(__zdFakeToString, __zdNativeStr("toString"));
 __zdMarks.set(__zdFnToString, __zdNativeStr("toString"));
 Object.defineProperty(Function.prototype, "toString", {

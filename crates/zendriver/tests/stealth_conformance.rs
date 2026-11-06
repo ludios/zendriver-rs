@@ -220,8 +220,8 @@ const KNOWN_BUGS: &[(&str, &[&str], &str)] = &[
     ),
     (
         "patched_functions_are_not_constructors",
-        PATCHED,
-        "P1 Stealth: masked functions are constructible, and native() injects JS (ST #12)",
+        SPOOFED,
+        "P1 Stealth: masked functions are constructible (ST #12)",
     ),
     (
         "properties_live_on_prototypes",
