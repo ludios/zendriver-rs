@@ -2339,6 +2339,28 @@ impl TargetObserver for TabRegistrar {
                     );
                     return Ok(());
                 }
+
+                // A target that already has a tab keeps it, when Chrome
+                // attaches it again under another sessionId (`finish_connect`
+                // attaches the main target itself, and auto-attach then
+                // attaches it too): a second `Tab` would be a second owner of
+                // the target's `Fetch`, trackers and socket. Only the
+                // registry's key moves to the new sessionId.
+                {
+                    let target_id = &session.target_info.target_id;
+                    let mut tabs = browser.tabs.write().await;
+                    let old_key = tabs
+                        .iter()
+                        .find(|(_, t)| t.target_id() == target_id)
+                        .map(|(key, _)| key.clone());
+                    if let Some(old_key) = old_key {
+                        if let Some(tab) = tabs.remove(&old_key) {
+                            tabs.insert(session.session_id.to_string(), tab);
+                        }
+                        return Ok(());
+                    }
+                }
+
                 let conn = session.connection().clone();
                 let new_session = SessionHandle::new(conn, session.session_id.to_string());
                 let input = InputController::new(self.input_profile.clone());
@@ -2391,10 +2413,9 @@ impl TargetObserver for TabRegistrar {
                     }
                 }
 
-                // Dedupe by `target_id`: if `flatten: true` re-fires
-                // `attachedToTarget` for the same target under a different
-                // sessionId (observed on `--headless=new`), the old entry
-                // would otherwise linger and inflate `tab_count`.
+                // Dedupe by `target_id` once more: another attach of the same
+                // target may have registered a tab while this one was being
+                // built.
                 let target_id_str = session.target_info.target_id.clone();
                 let mut tabs = browser.tabs.write().await;
                 tabs.retain(|_, t| t.target_id() != target_id_str);
