@@ -718,38 +718,42 @@ async fn fulfill_request(
 ///
 /// Chrome takes a status and headers together or neither, so once anything
 /// is overridden, the status and headers that `overrides` leaves `None` are
-/// copied from `response`. The upstream phrase is kept only with the
-/// upstream status: a new status gets Chrome's standard phrase for it.
-/// (Chrome refuses an empty phrase, and HTTP/2 responses have none.)
+/// copied from `response`. With the upstream status, a phrase left `None` is
+/// the upstream phrase; with a new status, it is left to Chrome, which sends
+/// its standard phrase for that code. An empty phrase (every HTTP/2
+/// response's) is sent as `" "`: Chrome refuses `""`, and trims the spaces
+/// off the status line, so the page sees an empty phrase.
 pub(crate) fn continue_response_params(
     request_id: &str,
     response: &ResponseInfo,
     overrides: ResponseOverrides,
 ) -> Value {
-    let mut params = Map::new();
-    params.insert("requestId".into(), Value::String(request_id.into()));
     let ResponseOverrides {
         status,
-        phrase,
+        mut phrase,
         headers,
     } = overrides;
+    let mut params = Map::new();
+    params.insert("requestId".into(), Value::String(request_id.into()));
     if status.is_none() && phrase.is_none() && headers.is_none() {
         return Value::Object(params);
     }
-    let mut phrase = phrase;
-    if status.is_none() && phrase.is_none() && !response.status_text.is_empty() {
+    let status = status.unwrap_or(response.status);
+    if phrase.is_none() && status == response.status {
         phrase = Some(response.status_text.clone());
     }
-    let headers = headers.unwrap_or_else(|| response.headers.clone());
-    params.insert(
-        "responseCode".into(),
-        Value::from(status.unwrap_or(response.status)),
-    );
+    let headers = headers.as_deref().unwrap_or(&response.headers);
+    params.insert("responseCode".into(), Value::from(status));
     params.insert(
         "responseHeaders".into(),
-        Value::Array(headers_to_cdp(&headers)),
+        Value::Array(headers_to_cdp(headers)),
     );
     if let Some(phrase) = phrase {
+        let phrase = if phrase.is_empty() {
+            " ".into()
+        } else {
+            phrase
+        };
         params.insert("responsePhrase".into(), Value::String(phrase));
     }
     Value::Object(params)
@@ -758,6 +762,9 @@ pub(crate) fn continue_response_params(
 /// Dispatch `Fetch.continueResponse` with the closure-produced overrides for a
 /// [`Rule::ModifyResponse`](crate::rule::Rule::ModifyResponse) match, per
 /// [`continue_response_params`].
+///
+/// - `response`: the response Chrome paused, which supplies what
+///   `overrides` leaves `None`.
 async fn continue_response_with_overrides(
     session: &SessionHandle,
     request_id: &str,
@@ -1192,6 +1199,32 @@ mod tests {
                 "responseHeaders": upstream_headers,
             })
         );
+        // The upstream status, named again, keeps the upstream phrase.
+        assert_eq!(
+            params(ResponseOverrides {
+                status: Some(200),
+                ..ResponseOverrides::default()
+            })["responsePhrase"],
+            "Fine"
+        );
+
+        // An empty phrase, upstream (as on HTTP/2) or asked for, goes as " ".
+        let h2 = ResponseInfo {
+            status: 520,
+            status_text: String::new(),
+            headers: Vec::new(),
+        };
+        let headers_only = ResponseOverrides {
+            headers: Some(Vec::new()),
+            ..ResponseOverrides::default()
+        };
+        let sent = continue_response_params("R1", &h2, headers_only);
+        assert_eq!(sent["responsePhrase"], " ");
+        let empty = params(ResponseOverrides {
+            phrase: Some(String::new()),
+            ..ResponseOverrides::default()
+        });
+        assert_eq!(empty["responsePhrase"], " ");
     }
 
     /// Decode a `Fetch.requestPaused` payload the way the actor does.

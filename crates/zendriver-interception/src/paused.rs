@@ -222,13 +222,13 @@ impl PausedRequest {
     /// `Request` stage instead.
     ///
     /// Dispatches `Fetch.continueResponse`. An argument left `None` keeps the
-    /// upstream value: Chrome takes a status and headers together or
-    /// neither, so once anything is overridden the upstream status and
-    /// headers are sent for the ones left `None`. A new `status` without a
-    /// `phrase` gets Chrome's standard phrase for it (Chrome refuses a
-    /// status code it has no phrase for). `headers` replaces the whole
-    /// header block, it isn't merged in: pass every header you want
-    /// forwarded.
+    /// value in [`response`](Self::response): Chrome takes a status and
+    /// headers together or neither, so once anything is overridden, those
+    /// are sent for the ones left `None`. A new `status` without a `phrase`
+    /// gets Chrome's standard phrase for it, and Chrome refuses a status
+    /// code it has no phrase for (e.g. 299): give such a code a phrase
+    /// (`""` for none). `headers` replaces the whole header block, it isn't
+    /// merged in: pass every header you want forwarded.
     ///
     /// ```no_run
     /// # use futures::StreamExt;
@@ -251,12 +251,9 @@ impl PausedRequest {
         phrase: Option<String>,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<(), InterceptionError> {
-        // Mark released before the stage check: Chrome rejects
-        // continueResponse at the Request stage, but the pause is still ours
-        // to release. Suppressing the Drop fallback here would strand it, so
-        // we leave `released` clear on the WrongStage path and let Drop fire
-        // a best-effort continueRequest — matching the "always release Chrome"
-        // contract the other terminals uphold via the happy path.
+        // At the Request stage, `released` stays clear: Chrome refuses
+        // continueResponse there, but the pause is still ours to release, so
+        // Drop sends its best-effort continueRequest.
         let Some(response) = self.response.as_ref() else {
             return Err(InterceptionError::WrongStage);
         };
