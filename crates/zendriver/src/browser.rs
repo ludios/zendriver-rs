@@ -507,34 +507,46 @@ pub(crate) fn merge_launch_flags(
     base_flags
 }
 
-/// Combine every `--blink-settings=` switch in `flags` into one switch, at
-/// the position of the first.
+/// The value of `flag` if it is a `blink-settings` switch, parsed as Chrome
+/// parses a POSIX command line: the name follows `--` or `-`, and a switch
+/// without `=` has the empty value.
+fn blink_settings_value(flag: &str) -> Option<&str> {
+    let switch = flag.strip_prefix("--").or_else(|| flag.strip_prefix('-'))?;
+    let rest = switch.strip_prefix("blink-settings")?;
+    if rest.is_empty() {
+        return Some("");
+    }
+    rest.strip_prefix('=')
+}
+
+/// Give Chrome the Blink settings `ours` (`name=value` items) on top of the
+/// caller's `--blink-settings`, if any, in the argv `flags`.
 ///
-/// Chrome keeps only the last value of a repeated switch, so a second
-/// `--blink-settings` (from [`BrowserBuilder::arg`], or from a stealth
-/// profile's own `arg`) would silently drop the settings of the first, such
-/// as those that [`BrowserBuilder::build_flags`] emits. The combined switch
-/// lists the settings in the order of their switches, and Blink applies them
-/// in that order, so where two switches name the same setting, the value of
-/// the later switch still wins.
-pub(crate) fn merge_blink_settings(flags: Vec<String>) -> Vec<String> {
-    let mut merged = Vec::with_capacity(flags.len());
-    let mut settings: Vec<String> = Vec::new();
-    let mut first_at = None;
-    for flag in flags {
-        let Some(value) = flag.strip_prefix("--blink-settings=") else {
-            merged.push(flag);
-            continue;
-        };
-        first_at.get_or_insert(merged.len());
-        if !value.is_empty() {
-            settings.push(value.to_string());
+/// Chrome reads only the last `--blink-settings` switch, so a separate
+/// switch for `ours` would either be dropped or drop the caller's. So `ours`
+/// go in front of the value of the caller's last switch, replacing it; Blink
+/// applies the settings in order, so where both name a setting, the caller's
+/// value still wins. Without such a switch, `ours` go in a new switch, before
+/// any `--`, after which Chrome reads no switches. Empty `ours` leave `flags`
+/// unchanged.
+pub(crate) fn add_blink_settings(mut flags: Vec<String>, ours: &[&str]) -> Vec<String> {
+    if ours.is_empty() {
+        return flags;
+    }
+    let switches_end = flags.iter().position(|f| f == "--").unwrap_or(flags.len());
+    let mut last = None;
+    for (i, flag) in flags[..switches_end].iter().enumerate() {
+        if let Some(theirs) = blink_settings_value(flag) {
+            last = Some((i, theirs.to_string()));
         }
     }
-    if let Some(at) = first_at {
-        merged.insert(at, format!("--blink-settings={}", settings.join(",")));
+    let ours = ours.join(",");
+    match last {
+        Some((i, theirs)) if theirs.is_empty() => flags[i] = format!("--blink-settings={ours}"),
+        Some((i, theirs)) => flags[i] = format!("--blink-settings={ours},{theirs}"),
+        None => flags.insert(switches_end, format!("--blink-settings={ours}")),
     }
-    merged
+    flags
 }
 
 /// Load (or first-time generate + persist) the fingerprint [`Seed`] bound to a
@@ -1314,10 +1326,12 @@ impl BrowserBuilder {
     ///
     /// Flags accumulate; later calls do NOT replace earlier ones.
     ///
-    /// Chrome keeps only the last of several `--blink-settings` switches, so
-    /// zendriver combines them all into one switch, including the one it
-    /// emits for [`headless`](Self::headless). If a `--blink-settings` passed
-    /// here names a setting that zendriver also sets, your value wins.
+    /// For a headless launch, zendriver also gives Chrome Blink settings (see
+    /// [`headless`](Self::headless)). Chrome reads only the last of several
+    /// `--blink-settings` switches, so zendriver puts its settings in front
+    /// of the settings of the last one that you pass (here, or with a stealth
+    /// profile's `arg`, whose flags come after these). Where that switch and
+    /// zendriver name the same setting, your value wins.
     ///
     /// # Examples
     ///
@@ -1799,8 +1813,9 @@ impl BrowserBuilder {
         self
     }
 
-    /// Compute the full argv that would be passed to Chrome. Exposed to
-    /// tests + snapshots; called internally by `launch`.
+    /// Compute the builder's own part of the argv that `launch` passes to
+    /// Chrome; [`launch_flags`](Self::launch_flags) completes it. Exposed to
+    /// tests + snapshots.
     pub(crate) fn build_flags(&self, user_data_dir: &Path) -> Vec<String> {
         let mut v = Vec::with_capacity(10 + self.extra_args.len());
         v.push("--remote-debugging-port=0".to_string());
@@ -1838,15 +1853,6 @@ impl BrowserBuilder {
             // `GpuBackend::Native` exists to select.
             if gpu_backend.allows_disable_gpu() {
                 v.push("--disable-gpu".to_string());
-            }
-            // Headless Chrome has no input devices, so its pages would see no
-            // pointer. A headed launch reports the host's real devices.
-            let pointer = self
-                .stealth
-                .as_ref()
-                .map_or(&[][..], StealthProfile::headless_blink_settings);
-            if !pointer.is_empty() {
-                v.push(format!("--blink-settings={}", pointer.join(",")));
             }
         }
         // ANGLE backend selection is independent of headless — a headful
@@ -1926,6 +1932,32 @@ impl BrowserBuilder {
             v.push("about:blank".to_string());
         }
         v
+    }
+
+    /// The argv that `launch` passes to Chrome (before its CI-only
+    /// additions): [`build_flags`](Self::build_flags), then `profile_flags`
+    /// (the stealth profile's own flags, empty without a profile), then the
+    /// Blink settings of a mouse for a headless launch.
+    ///
+    /// Headless Chrome has no input devices, so its pages would see no
+    /// pointer; a headed launch reports the host's real devices.
+    pub(crate) fn launch_flags(
+        &self,
+        user_data_dir: &Path,
+        profile_flags: Vec<String>,
+    ) -> Vec<String> {
+        let flags = merge_launch_flags(
+            self.build_flags(user_data_dir),
+            profile_flags,
+            self.effective_gpu_backend(),
+        );
+        let mut pointer: &[&str] = &[];
+        if self.headless.unwrap_or(true) {
+            if let Some(profile) = &self.stealth {
+                pointer = profile.headless_blink_settings();
+            }
+        }
+        add_blink_settings(flags, pointer)
     }
 
     /// Build the combined [`HostMatcher`] from all configured sources, or
@@ -3885,14 +3917,8 @@ impl BrowserBuilder {
         // in the argv are a debugging trap — `merge_launch_flags` dedups only
         // that pair, leaving everything else (including the flags every
         // stealth profile shares with `build_flags`, like `--no-first-run`)
-        // appended unconditionally, matching today's behavior. Then
-        // `merge_blink_settings` combines the `--blink-settings` switches,
-        // since Chrome would keep only the last.
-        let mut flags = merge_blink_settings(merge_launch_flags(
-            self.build_flags(&user_data_path),
-            extra_flags,
-            self.effective_gpu_backend(),
-        ));
+        // appended unconditionally, matching today's behavior.
+        let mut flags = self.launch_flags(&user_data_path, extra_flags);
         // CI-friendly defaults: when running under CI (the runner sets
         // `CI=true`), Chrome's user-namespace sandbox refuses to start
         // because the GitHub-Actions / Docker container runs as root,
@@ -6152,79 +6178,111 @@ mod tests {
         }
     }
 
-    /// The `--blink-settings` switches in `flags`.
-    fn blink_settings_switches(flags: &[String]) -> Vec<&String> {
+    /// The `blink-settings` switches in `flags`.
+    fn blink_settings_switches(flags: &[String]) -> Vec<&str> {
         flags
             .iter()
-            .filter(|f| f.starts_with("--blink-settings"))
+            .map(String::as_str)
+            .filter(|f| super::blink_settings_value(f).is_some())
             .collect()
     }
 
+    /// The argv that `launch` passes to Chrome for `builder`.
+    fn launch_flags_of(builder: &BrowserBuilder) -> Vec<String> {
+        let profile_flags = builder
+            .stealth
+            .as_ref()
+            .map(StealthProfile::build_flags)
+            .unwrap_or_default();
+        builder.launch_flags(Path::new("/tmp/zd-test"), profile_flags)
+    }
+
     #[test]
-    fn build_flags_gives_headless_pages_a_mouse_unless_stealth_is_off() {
+    fn launch_flags_give_headless_pages_a_mouse_unless_stealth_is_off() {
         let mouse = format!(
             "--blink-settings={}",
             StealthProfile::native().headless_blink_settings().join(",")
         );
         for profile in [StealthProfile::native(), StealthProfile::spoofed()] {
-            let flags = Browser::builder()
-                .stealth(profile)
-                .build_flags(Path::new("/tmp/zd-test"));
+            let flags = launch_flags_of(&Browser::builder().stealth(profile));
             assert_eq!(blink_settings_switches(&flags), [&mouse], "{flags:?}");
         }
-        let off = Browser::builder()
-            .stealth(StealthProfile::off())
-            .build_flags(Path::new("/tmp/zd-test"));
+        let off = launch_flags_of(&Browser::builder().stealth(StealthProfile::off()));
         assert!(blink_settings_switches(&off).is_empty(), "{off:?}");
-        let headed = Browser::builder()
-            .headless(false)
-            .build_flags(Path::new("/tmp/zd-test"));
+        let headed = launch_flags_of(&Browser::builder().headless(false));
         assert!(blink_settings_switches(&headed).is_empty(), "{headed:?}");
     }
 
+    /// The mouse goes in front of the settings of the caller's last
+    /// `--blink-settings`, the one Chrome reads: here the stealth profile's,
+    /// whose flags come after the builder's.
     #[test]
-    fn merge_blink_settings_joins_every_switch_in_order_at_the_first() {
-        let flags = [
-            "--a",
-            "--blink-settings=x=1,y=2",
-            "--b",
-            "--blink-settings=",
-            "--blink-settings=y=3",
-            "about:blank",
-        ]
-        .map(String::from)
-        .to_vec();
+    fn launch_flags_put_the_mouse_in_front_of_the_callers_last_switch() {
+        let profile = StealthProfile::native().arg("--blink-settings=from=profile");
+        let builder = Browser::builder()
+            .stealth(profile.clone())
+            .arg("--blink-settings=from=builder");
+        let flags = launch_flags_of(&builder);
+        let mouse = profile.headless_blink_settings().join(",");
+        let last = format!("--blink-settings={mouse},from=profile");
         assert_eq!(
-            super::merge_blink_settings(flags),
-            ["--a", "--blink-settings=x=1,y=2,y=3", "--b", "about:blank"]
+            blink_settings_switches(&flags),
+            ["--blink-settings=from=builder", &last]
+        );
+    }
+
+    /// `add_blink_settings` of `flags` and the settings `a=1,b=2`.
+    fn add_ab(flags: &[&str]) -> Vec<String> {
+        let flags = flags.iter().map(|f| f.to_string()).collect();
+        super::add_blink_settings(flags, &["a=1", "b=2"])
+    }
+
+    #[test]
+    fn add_blink_settings_prefixes_the_last_switch_in_any_spelling() {
+        assert_eq!(
+            add_ab(&["--blink-settings=x=1", "--c", "-blink-settings=b=3"]),
+            [
+                "--blink-settings=x=1",
+                "--c",
+                "--blink-settings=a=1,b=2,b=3"
+            ]
+        );
+        for empty in ["--blink-settings", "--blink-settings=", "-blink-settings"] {
+            assert_eq!(
+                add_ab(&["--blink-settings=x=1", empty]),
+                ["--blink-settings=x=1", "--blink-settings=a=1,b=2"]
+            );
+        }
+    }
+
+    #[test]
+    fn add_blink_settings_without_a_switch_adds_one_before_any_terminator() {
+        assert_eq!(
+            add_ab(&["--blink-settingsx=1", "about:blank"]),
+            [
+                "--blink-settingsx=1",
+                "about:blank",
+                "--blink-settings=a=1,b=2"
+            ]
+        );
+        assert_eq!(
+            add_ab(&["--c", "--", "--blink-settings=x=1"]),
+            [
+                "--c",
+                "--blink-settings=a=1,b=2",
+                "--",
+                "--blink-settings=x=1"
+            ]
         );
     }
 
     #[test]
-    fn merge_blink_settings_without_a_switch_changes_nothing() {
-        let flags = ["--a", "--blink-settingsx=1", "about:blank"]
-            .map(String::from)
-            .to_vec();
-        assert_eq!(super::merge_blink_settings(flags.clone()), flags);
-    }
-
-    /// A caller's `--blink-settings`, through the builder or the stealth
-    /// profile, joins the one that `build_flags` emits, after it.
-    #[test]
-    fn launch_argv_has_one_blink_settings_switch_with_the_callers_last() {
-        let profile = StealthProfile::native().arg("--blink-settings=from=profile");
-        let base = Browser::builder()
-            .stealth(profile.clone())
-            .arg("--blink-settings=from=builder")
-            .build_flags(Path::new("/tmp/zd-test"));
-        let merged = super::merge_blink_settings(super::merge_launch_flags(
-            base,
-            profile.build_flags(),
-            GpuBackend::Disabled,
-        ));
-        let mouse = profile.headless_blink_settings().join(",");
-        let expected = format!("--blink-settings={mouse},from=builder,from=profile");
-        assert_eq!(blink_settings_switches(&merged), [&expected]);
+    fn add_blink_settings_without_settings_changes_nothing() {
+        let flags = vec![
+            "--blink-settings=x=1".to_string(),
+            "--blink-settings=".to_string(),
+        ];
+        assert_eq!(super::add_blink_settings(flags.clone(), &[]), flags);
     }
 
     #[test]

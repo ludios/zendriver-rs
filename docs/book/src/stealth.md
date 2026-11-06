@@ -64,11 +64,12 @@ is done with launch flags and CDP commands, not page JS:
   No CDP command changes these media features, so under headless the
   profile passes `--blink-settings` to make every frame see a mouse:
   `fine` and `hover`, in both `matchMedia` and CSS `@media` rules.
-  `navigator.maxTouchPoints` stays 0. Chrome keeps only the last of
+  `navigator.maxTouchPoints` stays 0. Chrome reads only the last of
   several `--blink-settings` switches, so if you pass your own with
-  `BrowserBuilder::arg`, zendriver combines it with its own, and your
-  values win where both name a setting. A headed launch gets none of
-  this, since Chrome then reports the host's real devices.
+  `BrowserBuilder::arg`, zendriver puts its settings in front of those
+  of your last switch, and your values win where both name a setting.
+  A headed launch gets none of this, since Chrome then reports the
+  host's real devices.
 - **UA scrub** — strips the `HeadlessChrome` segment from the User-Agent
   string and the Sec-CH-UA brand list.
 - **Emulation overrides** —

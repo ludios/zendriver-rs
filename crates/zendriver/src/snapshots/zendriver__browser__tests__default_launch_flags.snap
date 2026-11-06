@@ -11,5 +11,4 @@ expression: flags
 - "--disable-features=PasswordManagerOnboarding,AutofillServerCommunication"
 - "--headless=new"
 - "--disable-gpu"
-- "--blink-settings=availablePointerTypes=4,primaryPointerType=4,availableHoverTypes=2,primaryHoverType=2"
 - "about:blank"

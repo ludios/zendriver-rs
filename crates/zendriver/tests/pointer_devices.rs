@@ -133,17 +133,18 @@ async fn headless_pages_see_no_pointer_with_stealth_off() {
     assert_eq!(seen_off, seen("none", "none"));
 }
 
-/// A caller's `--blink-settings`, from the builder and from the stealth
-/// profile, joins zendriver's instead of replacing it, and wins where both
-/// name a setting. Here the caller's settings say that no pointer can hover
-/// and that the only pointer is coarse, while zendriver's still make the
-/// primary pointer a fine one that can hover.
+/// zendriver's settings join those of the caller's last `--blink-settings`
+/// (the only one Chrome reads) instead of replacing them, and the caller's
+/// win where both name a setting. Here the last switch says that no pointer
+/// can hover, while zendriver's settings still make the primary pointer a
+/// fine one that can hover. The earlier switch, which says that the only
+/// pointer is coarse, is ignored, as Chrome would ignore it without
+/// zendriver.
 #[tokio::test]
-async fn callers_blink_settings_join_zendrivers() {
+async fn callers_last_blink_settings_join_zendrivers() {
     let server = FixtureServer::start().await;
-    let profile = StealthProfile::native().arg("--blink-settings=availablePointerTypes=2");
     let builder = Browser::builder()
-        .stealth(profile)
+        .arg("--blink-settings=availablePointerTypes=2")
         .arg("--blink-settings=availableHoverTypes=1");
     let browser = launch_for_test(builder).await;
     let tab = browser.main_tab();
@@ -154,7 +155,7 @@ async fn callers_blink_settings_join_zendrivers() {
     let features = json!({
         "pointer": "fine",
         "hover": "hover",
-        "any-pointer": "coarse",
+        "any-pointer": "fine",
         "any-hover": "none",
     });
     assert_eq!(seen_mixed["media"], features);
