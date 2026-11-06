@@ -1785,12 +1785,10 @@ fn describe_selector(sel: &SelectorKind) -> String {
 /// plus the JS post-filter when any `attr_regex`/text predicate is set.
 fn describe_predicates(pred: &PredicateSet) -> String {
     let css = pred.to_css_selector();
-    let filter = pred.to_js_filter();
-    if filter == "true" {
-        format!("predicate(css={css})")
-    } else {
-        format!("predicate(css={css}, filter={filter})")
-    }
+    let Some(filter) = pred.to_js_filter() else {
+        return format!("predicate(css={css})");
+    };
+    format!("predicate(css={css}, filter={filter})")
 }
 
 #[cfg(test)]

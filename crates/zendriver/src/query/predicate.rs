@@ -1,5 +1,5 @@
 //! bs4-like combinable predicate matchers. A `PredicateSet` compiles to a
-//! CSS selector (structural parts) + a JS boolean post-filter (regex/text).
+//! CSS selector (structural parts) + a JS post-filter function (regex/text).
 //! Pure — no CDP, fully unit-testable.
 
 use serde_json::json;
@@ -141,23 +141,32 @@ impl PredicateSet {
     }
 
     /// Post-filter predicates (`attr_regex` + all text predicates) → a JS
-    /// boolean expression over a bound `el`. Returns `"true"` when there are
-    /// no post-filters (so the caller can always `.filter(el => <expr>)`).
+    /// expression whose value is the function to pass to `Array.filter`, or
+    /// `None` when there are no post-filters.
+    ///
+    /// The function returns whether its one argument, an element, passes
+    /// every post-filter. Each regex predicate's `RegExp` is built once, when
+    /// the expression is evaluated: before `filter` runs, so an invalid
+    /// pattern throws its `SyntaxError` even when no candidate would reach
+    /// that predicate.
     ///
     /// [`TextPred::Equals`] normalizes both operands per [`normalize_space`];
     /// [`TextPred::Contains`] and [`TextPred::Matches`] run against the raw
     /// text, since a substring or regex needle may legitimately carry its own
     /// whitespace.
-    pub(crate) fn to_js_filter(&self) -> String {
+    pub(crate) fn to_js_filter(&self) -> Option<String> {
         const TXT: &str = r#"(el.innerText||el.textContent||"")"#;
+        // The JSON-quoted pattern of `r0`, `r1`, … in order.
+        let mut regexes: Vec<String> = Vec::new();
         let mut checks: Vec<String> = Vec::new();
         for a in &self.attrs {
             if let AttrPred::Regex(n, p) = a {
                 checks.push(format!(
-                    "new RegExp({}).test(el.getAttribute({})||\"\")",
-                    q(p),
+                    "r{}.test(el.getAttribute({})||\"\")",
+                    regexes.len(),
                     q(n)
                 ));
+                regexes.push(q(p));
             }
         }
         for t in &self.texts {
@@ -175,14 +184,28 @@ impl PredicateSet {
                     "{TXT}{JS_NORMALIZE_SPACE}.toLowerCase()==={}",
                     q(&normalize_space(&s.to_lowercase()))
                 )),
-                TextPred::Matches(p) => checks.push(format!("new RegExp({}).test({TXT})", q(p))),
+                TextPred::Matches(p) => {
+                    checks.push(format!("r{}.test({TXT})", regexes.len()));
+                    regexes.push(q(p));
+                }
             }
         }
         if checks.is_empty() {
-            "true".to_string()
-        } else {
-            checks.join("&&")
+            return None;
         }
+        let function = format!("function(el){{return {};}}", checks.join("&&"));
+        if regexes.is_empty() {
+            return Some(function);
+        }
+        let decls: Vec<String> = regexes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("r{i}=new RegExp({p})"))
+            .collect();
+        Some(format!(
+            "(function(){{var {};return {function};}})()",
+            decls.join(",")
+        ))
     }
 }
 
@@ -226,7 +249,7 @@ mod tests {
 
     #[test]
     fn empty_filter_is_true() {
-        assert_eq!(PredicateSet::default().to_js_filter(), "true");
+        assert_eq!(PredicateSet::default().to_js_filter(), None);
     }
 
     #[test]
@@ -240,11 +263,12 @@ mod tests {
                 TextPred::Matches(r"^\$".into()),
             ],
         };
-        let f = p.to_js_filter();
+        let f = p.to_js_filter().expect("has post-filters");
         assert!(
-            f.contains(r#"new RegExp("\\d+").test(el.getAttribute("href")||"")"#),
-            "{f}"
+            f.starts_with(r#"(function(){var r0=new RegExp("\\d+"),r1=new RegExp("^\\$");"#),
+            "each RegExp is built once, before the per-element function: {f}"
         );
+        assert!(f.contains(r#"r0.test(el.getAttribute("href")||"")"#), "{f}");
         assert!(
             f.contains(r#"(el.innerText||el.textContent||"").includes("Buy")"#),
             "{f}"
@@ -256,7 +280,7 @@ mod tests {
             "{f}"
         );
         assert!(
-            f.contains(r#"new RegExp("^\\$").test((el.innerText||el.textContent||""))"#),
+            f.contains(r#"r1.test((el.innerText||el.textContent||""))"#),
             "{f}"
         );
         assert!(f.contains("&&"), "checks are AND-joined: {f}");
@@ -312,7 +336,7 @@ mod tests {
             attrs: vec![],
             texts: vec![TextPred::Contains("Foo".into(), true)],
         };
-        let f = p.to_js_filter();
+        let f = p.to_js_filter().expect("has post-filters");
         assert!(
             f.contains(r#"(el.innerText||el.textContent||"").toLowerCase().includes("foo")"#),
             "{f}"
@@ -326,7 +350,7 @@ mod tests {
             attrs: vec![],
             texts: vec![TextPred::Equals("Foo".into(), true)],
         };
-        let f = p.to_js_filter();
+        let f = p.to_js_filter().expect("has post-filters");
         assert!(
             f.contains(
                 r#"(el.innerText||el.textContent||"").replace(/[ \t\r\n]+/g," ").replace(/^ | $/g,"").toLowerCase()==="foo""#
@@ -345,7 +369,7 @@ mod tests {
                 TextPred::Equals("OK".into(), false),
             ],
         };
-        let f = p.to_js_filter();
+        let f = p.to_js_filter().expect("has post-filters");
         assert!(
             f.contains(r#"(el.innerText||el.textContent||"").includes("Buy")"#),
             "{f}"
@@ -407,7 +431,7 @@ mod tests {
             attrs: vec![],
             texts: vec![TextPred::Equals("OK".into(), false)],
         };
-        let f = p.to_js_filter();
+        let f = p.to_js_filter().expect("has post-filters");
         assert!(
             !f.contains(".trim()"),
             "the page-side fold must not use trim(), got: {f}"
@@ -430,7 +454,7 @@ mod tests {
             attrs: vec![],
             texts: vec![TextPred::Equals("OK".into(), false)],
         };
-        let f = p.to_js_filter();
+        let f = p.to_js_filter().expect("has post-filters");
         assert!(
             f.contains(r#"(el.innerText||el.textContent||"")"#),
             "Equals reads rendered innerText with a textContent fallback, got: {f}"
@@ -448,7 +472,7 @@ mod tests {
             attrs: vec![],
             texts: vec![TextPred::Equals("Hello   world".into(), false)],
         };
-        let f = p.to_js_filter();
+        let f = p.to_js_filter().expect("has post-filters");
         assert!(f.contains(r#"==="Hello world""#), "{f}");
         assert!(!f.contains(r#"==="Hello   world""#), "{f}");
     }
@@ -463,7 +487,7 @@ mod tests {
             attrs: vec![],
             texts: vec![TextPred::Equals("Hello world".into(), false)],
         };
-        let f = p.to_js_filter();
+        let f = p.to_js_filter().expect("has post-filters");
         assert!(
             f.contains(r#".replace(/[ \t\r\n]+/g," ").replace(/^ | $/g,"")"#),
             "{f}"
@@ -477,7 +501,7 @@ mod tests {
             attrs: vec![],
             texts: vec![TextPred::Equals("  Hello \n WORLD ".into(), true)],
         };
-        let f = p.to_js_filter();
+        let f = p.to_js_filter().expect("has post-filters");
         assert!(
             f.contains(
                 r#"(el.innerText||el.textContent||"").replace(/[ \t\r\n]+/g," ").replace(/^ | $/g,"").toLowerCase()==="hello world""#
@@ -498,13 +522,14 @@ mod tests {
                 TextPred::Matches(r"a\s+b".into()),
             ],
         };
-        let f = p.to_js_filter();
+        let f = p.to_js_filter().expect("has post-filters");
         assert!(
             f.contains(r#"(el.innerText||el.textContent||"").includes("Buy  now")"#),
             "{f}"
         );
+        assert!(f.contains(r#"var r0=new RegExp("a\\s+b");"#), "{f}");
         assert!(
-            f.contains(r#"new RegExp("a\\s+b").test((el.innerText||el.textContent||""))"#),
+            f.contains(r#"r0.test((el.innerText||el.textContent||""))"#),
             "{f}"
         );
     }

@@ -96,6 +96,29 @@ async fn a_query_whose_script_throws_fails_at_once_with_the_exception() {
             .one_or_none(),
     )
     .await;
+    // A predicate's regex fails the query even when no element reaches it:
+    // when no element has the tag, or when an earlier predicate rejects
+    // every element.
+    assert_fails_at_once(
+        r#"tab.find().tag("no-such-tag").attr_regex("class", "(?i)x").one_or_none()"#,
+        "Invalid group",
+        tab.find()
+            .tag("no-such-tag")
+            .attr_regex("class", "(?i)x")
+            .timeout(QUERY_TIMEOUT)
+            .one_or_none(),
+    )
+    .await;
+    assert_fails_at_once(
+        r#"tab.find().containing_text("no such text").text_matches("(?i)x").one_or_none()"#,
+        "Invalid group",
+        tab.find()
+            .containing_text("no such text")
+            .text_matches("(?i)x")
+            .timeout(QUERY_TIMEOUT)
+            .one_or_none(),
+    )
+    .await;
     // `many_or_empty` must not turn the error into an empty `Vec`.
     assert_fails_at_once(
         r#"tab.find_all().text_matches("(?i)plain").many_or_empty()"#,

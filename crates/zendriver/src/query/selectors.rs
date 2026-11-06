@@ -239,9 +239,9 @@ async fn resolve_css_many(scope: &QueryScope<'_>, selector: &str) -> Result<Vec<
 // ---------------------------------------------------------------------
 //
 // A `PredicateSet` compiles to a CSS selector (`tag` + structural attrs)
-// plus a JS boolean post-filter (`attr_regex` + text predicates). The
-// terminal builds ONE `querySelectorAll(css).filter(el => <jsFilter>)`
-// per scope — exactly mirroring `resolve_css_many`'s scope dispatch
+// plus a JS post-filter function (`attr_regex` + text predicates). The
+// terminal builds ONE `querySelectorAll(css).filter(<jsFilter>)` per
+// scope — exactly mirroring `resolve_css_many`'s scope dispatch
 // (`contextId` for frames, `this` for element subtrees) so predicates
 // cross frames the same way CSS does.
 
@@ -249,31 +249,33 @@ use crate::query::predicate::PredicateSet;
 
 /// Resolve `pred` against `scope` and return every match in document
 /// order. Compiles to `Array.from((document|this).querySelectorAll(css))
-/// .filter(el => <jsFilter>)`, with the CSS selector JSON-embedded so a
-/// quote/backslash in an attribute value can't break out of the JS
-/// string literal. Empty `Vec` for no matches (not an error).
+/// .filter(<jsFilter>)` (without the `.filter` when `pred` has no
+/// post-filter), with the CSS selector JSON-embedded so a quote/backslash
+/// in an attribute value can't break out of the JS string literal. Empty
+/// `Vec` for no matches (not an error).
 pub(crate) async fn resolve_predicate_many(
     scope: &QueryScope<'_>,
     pred: &PredicateSet,
 ) -> Result<Vec<RemoteRef>> {
     let session = scope.session();
     let css = pred.to_css_selector();
-    let filter = pred.to_js_filter();
+    let mut filter = String::new();
+    if let Some(f) = pred.to_js_filter() {
+        filter = format!(".filter({f})");
+    }
     let result = match scope {
         QueryScope::Tab(_) | QueryScope::Frame(_) => {
             let expr = format!(
-                "Array.from(document.querySelectorAll({})).filter(function(el){{return {};}})",
-                json!(css),
-                filter,
+                "Array.from(document.querySelectorAll({})){filter}",
+                json!(css)
             );
             eval_expr_in_scope(scope, expr).await?
         }
         QueryScope::Element(el) => {
             let object_id = el.remote_object_id_cloned().await?;
             let func = format!(
-                "function(){{return Array.from(this.querySelectorAll({})).filter(function(el){{return {};}});}}",
-                json!(css),
-                filter,
+                "function(){{return Array.from(this.querySelectorAll({})){filter};}}",
+                json!(css)
             );
             session
                 .call(
