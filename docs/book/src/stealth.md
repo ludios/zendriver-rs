@@ -87,10 +87,13 @@ in the page:
   `StealthProfile::screen` or a persona's `screen`), and
   `--window-size` plus `--window-position`, which make every window fill
   that screen's work area. Chrome itself then reports a screen, window
-  and viewport that agree: by default a 1920x1080 screen, a 1920x1032 window at (0, 0),
-  and a 1920x945 viewport (the window minus the browser's toolbars,
-  which headless Chrome emulates). That holds for the tab in front of
-  each window. On Linux, Chrome 157 gives a background tab's page its
+  and viewport that agree: by default a 1920x1080 screen, a 1920x1032
+  window at (0, 0), and a 1920x945 viewport (the window minus the
+  browser's toolbars, which headless Chrome emulates; on Windows,
+  1904x937, since headless Chrome also gives the window a border, 8
+  pixels wide on each side with Windows' default window metrics, as
+  Windows does to a window that isn't maximized). That holds for the tab
+  in front of each window. On Linux, Chrome 157 gives a background tab's page its
   viewport as its window (by default at (0, 87), with `outerHeight`
   equal to `innerHeight`), headless or headed, even with no stealth.
   (Chrome 157 on Windows 11, under `native`, doesn't; macOS wasn't
@@ -107,16 +110,15 @@ in the page:
   window.
   Headless Chrome takes `--screen-info` from version 135 on Linux, 136
   on Windows and 138 on macOS. Chrome takes the screen in
-  physical pixels, so the launch fails unless a configured screen's
+  physical pixels, so a launch with a configured screen (and with no
+  `--screen-info` of yours) fails unless the screen's
   `device_pixel_ratio` is 1, 1.25, 1.5, … or 4 on Linux and Windows
   (which covers Windows' scaling steps), or 1 or 2 elsewhere (fractional
   ratios were measured only on Linux and Windows); its work area isn't
   empty; and its sizes (`width`, `height`, and the work area's width and
   height) times that ratio are whole numbers of physical pixels from 1 to
   65536 (1536x864 at 1.25 is 1920x1080). Otherwise Chrome would report a
-  different screen. On Windows, headless Chrome gives each window a
-  border, as Windows does to a window that isn't maximized, so the
-  default viewport there is 1904x937.
+  different screen.
 
 Since it runs no JS in the page, there's no patched function for a
 `Function.prototype.toString` check to catch.

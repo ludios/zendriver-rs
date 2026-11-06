@@ -32,9 +32,11 @@ async fn geometry(server: &FixtureServer, tab: &Tab) -> Value {
 }
 
 /// How much narrower than its window a viewport is, in CSS pixels: on
-/// Windows, headless Chrome gives a window a border 8 pixels wide on each
-/// side (measured with Chrome 157, at every device pixel ratio that
-/// zendriver takes), as Windows does to a window that isn't maximized.
+/// Windows, headless Chrome gives a window a border on each side, as
+/// Windows does to a window that isn't maximized. Chrome takes its width
+/// from the host's window metrics at 96 DPI: `SM_CXSIZEFRAME` plus
+/// `SM_CXPADDEDBORDER`, which are 4 each by default. Measured with Chrome
+/// 157 on Windows 11, at every device pixel ratio that zendriver takes.
 const WINDOW_BORDERS: u64 = if cfg!(target_os = "windows") { 16 } else { 0 };
 
 /// Assert that `seen` (from [`geometry`]) describes a screen of
