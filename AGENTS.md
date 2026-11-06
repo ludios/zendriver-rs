@@ -89,7 +89,7 @@ When writing _any_ kind of code:
 - Scan the functions and generalize if that makes a good result; evict any deadbeats: humans with a small context window need to review and maintain this code.
 - Abstraction boundaries are important. Comments should reflect the current abstraction and generally avoid talking about other things.
 
-Minutae:
+Minutiae:
 
 - Blank lines inside functions should only be used to separate different ideas or groups of steps.
 - Use space-based alignment but only where it looks good: on adjacent lines with a very similar structure, add spaces after shorter identifiers (or the syntax to the right of them) to align things.
