@@ -23,9 +23,9 @@ use crate::{Fingerprint, Persona, ProfileKind, StealthProfile};
 pub struct StealthObserver {
     profile: StealthProfile,
     fingerprint: Fingerprint,
-    /// Pre-rendered bootstrap source. Empty for `Off`/`Native` — we never send
-    /// `Page.addScriptToEvaluateOnNewDocument` in those modes, so there is no
-    /// need to pay the patches-bundle cost for them.
+    /// Pre-rendered bootstrap source: the full patches bundle for `Spoofed`,
+    /// only the geometry repair for `Native`, and empty for `Off`, which
+    /// never sends `Page.addScriptToEvaluateOnNewDocument`.
     bootstrap: String,
     /// Mock geolocation coordinates from the resolved [`Persona`], sent via
     /// `Emulation.setGeolocationOverride`. Unlike
@@ -172,9 +172,10 @@ impl TargetObserver for StealthObserver {
                     // Sending the CH spelling here made every session report a
                     // `navigator.platform` no real browser emits. It was invisible under
                     // `spoofed`, whose bootstrap re-patches `navigator.platform` from
-                    // `platformJs` and so happened to paper over it — but the bootstrap is
-                    // deliberately EMPTY for `Off`/`Native` (see `bootstrap` above), leaving
-                    // `native` profiles presenting `"macOS"` where Chrome reports `"MacIntel"`.
+                    // `platformJs` and so happened to paper over it — but under `Off`/`Native`
+                    // the bootstrap replaces nothing on `navigator` (see `bootstrap` above),
+                    // leaving `native` profiles presenting `"macOS"` where Chrome reports
+                    // `"MacIntel"`.
                     // Measured against a real Chrome build, not inferred.
                     "platform": self.fingerprint.platform.js_string(),
                     "userAgentMetadata": &user_agent_metadata,

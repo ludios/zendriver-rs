@@ -200,7 +200,7 @@ async fn random_canvas_stable_within_page() {
 /// (case (b) in that patch), flipping `'gpu' in navigator` to true — coherent
 /// for a modern-Chrome persona, which always exposes `navigator.gpu` even
 /// GPU-less. Requires `.stealth(StealthProfile::spoofed())` (the default
-/// profile injects no JS bootstrap, so the patch would never run).
+/// profile's bootstrap only repairs geometry, so the patch would never run).
 ///
 /// If this host DOES expose a real `navigator.gpu` adapter, case (a) passes
 /// the real adapter through instead (its vendor won't be our synthetic one),

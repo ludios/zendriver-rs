@@ -152,10 +152,10 @@ async fn spoofed_passes_intoli_basic_test() {
 #[tokio::test]
 #[serial]
 async fn native_hides_webdriver_and_scrubs_user_agent() {
-    // The native profile keeps its "no JS prototype patches" contract while
-    // still (a) scrubbing the headless UA and (b) hiding navigator.webdriver
-    // via the --disable-blink-features=AutomationControlled launch flag (a
-    // command-line flag, not a JS shim — so the contract holds).
+    // The native profile's script replaces nothing on `navigator`, yet the
+    // profile still (a) scrubs the headless UA and (b) hides
+    // navigator.webdriver via the --disable-blink-features=AutomationControlled
+    // launch flag (a command-line flag, not a JS patch).
     let browser = Browser::builder()
         .stealth(StealthProfile::native())
         .headless(true)

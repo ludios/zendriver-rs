@@ -13,8 +13,9 @@ use crate::persona::specs::ScreenSpec;
 pub enum ProfileKind {
     /// No stealth applied. Browser is launched stock; no JS patches, no UA scrub.
     Off,
-    /// Launch flags + UA scrub (HeadlessChrome → Chrome). No JS bootstrap.
-    /// Safe against `Function.prototype.toString` detection. Default.
+    /// Launch flags + UA scrub (HeadlessChrome → Chrome) + Emulation
+    /// overrides, plus a JS bootstrap that only repairs the window and screen
+    /// geometry (see [`StealthProfile::native`]). Default.
     Native,
     /// Native + Navigator-prototype JS patches. Passes sannysoft. Detectable
     /// by sophisticated bots that probe `toString` on Navigator getters.
@@ -126,10 +127,18 @@ impl StealthProfile {
         }
     }
 
-    /// Launch flags + UA scrub + Emulation overrides. No JS bootstrap.
+    /// Launch flags + UA scrub + Emulation overrides, plus a JS bootstrap that
+    /// only repairs the window and screen geometry. The default when stealth
+    /// is requested.
     ///
-    /// Safe against `Function.prototype.toString` detection (it doesn't
-    /// patch any prototype getter). The default when stealth is requested.
+    /// `Emulation.setDeviceMetricsOverride` sets `window.inner*` and
+    /// `screen.width`/`height`, but it can't set `window.outer*` or
+    /// `screen.avail*`. So the bootstrap defines getters for the window's
+    /// size and position (`outerWidth`, `innerHeight`, `screenX`, …) and for
+    /// `screen.avail*` and `screen.orientation`. It also replaces
+    /// `Function.prototype.toString`, so that those getters read as native
+    /// code. The bootstrap replaces no function on `navigator`, or on any
+    /// of the other surfaces that [`StealthProfile::spoofed`] patches.
     ///
     /// ```
     /// use zendriver_stealth::StealthProfile;

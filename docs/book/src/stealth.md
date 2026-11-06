@@ -16,7 +16,7 @@ over the specific tells that mainstream fingerprint checks probe for.
 | Profile     | Launch flags | UA scrub | Emulation overrides | JS bootstrap   | Bypass CSP | Use case                                     |
 |-------------|--------------|----------|---------------------|----------------|------------|----------------------------------------------|
 | `off()`     | none         | no       | no                  | none           | no         | Reproducing issues in vanilla Chrome.       |
-| `native()`  | yes          | yes      | yes                 | none           | no         | Most sites. Default recommendation.         |
+| `native()`  | yes          | yes      | yes                 | geometry only  | no         | Most sites. Default recommendation.         |
 | `spoofed()` | yes          | yes      | yes                 | Navigator JS   | yes (on)   | Sites with active fingerprint detection.    |
 
 ### `StealthProfile::off()`
@@ -51,8 +51,8 @@ let browser = Browser::builder()
 # Ok(()) }
 ```
 
-The default recommendation. Patches the layer that protocol-level
-fingerprinters see, without touching JS object prototypes:
+The default recommendation. Patches mostly the layer that
+protocol-level fingerprinters see:
 
 - **Launch flags** — `--disable-blink-features=AutomationControlled`,
   `--disable-features=IsolateOrigins,site-per-process` (toggleable),
@@ -64,9 +64,18 @@ fingerprinters see, without touching JS object prototypes:
   `Emulation.setUserAgentOverride` /
   `Emulation.setHardwareConcurrencyOverride` /
   `Emulation.setDeviceMetricsOverride` set a coherent identity.
+- **Geometry repair** — `Emulation.setDeviceMetricsOverride` sets
+  `window.inner*` and `screen.width`/`height`, but it can't set
+  `window.outer*` or `screen.avail*`, which would leave a window
+  narrower than its own content and a screen with no taskbar. A small
+  script, injected with `Page.addScriptToEvaluateOnNewDocument`, defines
+  getters for the window's size and position and for `screen.avail*`,
+  and replaces `Function.prototype.toString` so that those getters read
+  as native code.
 
-Safe against `Function.prototype.toString` detection because it patches
-nothing at the JS level — there's no `[native code]` mismatch to detect.
+Its script replaces no function on `navigator`, WebGL, canvas, or the
+other surfaces that `spoofed()` patches, so a page that checks those
+functions for tampering finds only the ones that Chrome itself defines.
 Passes most consumer site detectors. Doesn't pass [sannysoft]'s deeper
 Navigator-prototype checks.
 
