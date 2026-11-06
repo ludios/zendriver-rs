@@ -175,7 +175,7 @@ fn headless_screen_switches(screen: &ScreenSpec) -> Result<Vec<String>, StealthE
     let avail_width = screen.avail_width.unwrap_or(screen.width);
     let avail_height = screen
         .avail_height
-        .unwrap_or(screen.height - DEFAULT_TASKBAR_HEIGHT);
+        .unwrap_or_else(|| screen.height - DEFAULT_TASKBAR_HEIGHT);
     if avail_width > screen.width || avail_height > screen.height {
         return Err(StealthError::InvalidOverride(format!(
             "the screen's work area {avail_width}x{avail_height} is larger than the screen {}x{}",
@@ -1806,6 +1806,21 @@ mod persona_reaches_cdp_tests {
                 "--window-size=1400,860",
                 "--window-position=0,0",
             ]
+        );
+    }
+
+    /// A screen no taller than the default taskbar is taken when it sets
+    /// its own work area: the default taskbar's height isn't subtracted.
+    #[test]
+    fn native_headless_flags_take_a_short_screen_with_its_own_work_area() {
+        let flags = native_headless_flags(
+            Some(ScreenSpec::new(100, 40, 1.0).with_avail(100, 40)),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            flags[0],
+            "--screen-info={100x40 devicePixelRatio=1 workAreaRight=0 workAreaBottom=0}"
         );
     }
 
