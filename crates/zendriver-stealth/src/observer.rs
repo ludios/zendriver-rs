@@ -20,43 +20,62 @@ use crate::{Fingerprint, Persona, ProfileKind, StealthError, StealthProfile};
 /// screen has no `avail_height`; the default that [`ScreenSpec`] documents.
 const DEFAULT_TASKBAR_HEIGHT: u32 = 48;
 
+/// The largest size, in physical pixels, that [`headless_screen_switches`]
+/// takes: over 4 times the width of a 16K display. Chrome dumps core on a
+/// size beyond `i32::MAX`.
+const MAX_PHYSICAL: u64 = 1 << 16;
+
+/// Whether [`headless_screen_switches`] takes the device pixel ratio of
+/// `quarters` quarters. On Linux, where zendriver measured Chrome's rounding
+/// (see [`chrome_css`]), it takes 1, 1.25, 1.5, … 4, which cover Windows'
+/// scaling steps. Elsewhere it takes only 1 and 2 (macOS's), whose `f32`
+/// reciprocals are exact, so that Chrome's rounding can't matter: Windows'
+/// headless screen converts its work area in a way of its own, and macOS's
+/// is said to truncate a fractional ratio, and neither was measured.
+fn ratio_taken(quarters: u64) -> bool {
+    if cfg!(target_os = "linux") {
+        (4..=16).contains(&quarters)
+    } else {
+        quarters == 4 || quarters == 8
+    }
+}
+
 /// The CSS pixels that headless Chrome reports for `physical` physical
 /// pixels at the ratio `dpr`, for a window's size or a work area's inset: it
 /// multiplies by the `f32` reciprocal of the ratio and rounds up. The
 /// reciprocal can be inexact, so the result can be 1 more than expected: at
 /// 1.75, 84 physical pixels come to 48.000004 CSS pixels, reported as 49.
-fn chrome_css(physical: u32, dpr: f64) -> u32 {
-    let reciprocal = 1.0f32 / dpr as f32;
-    (physical as f32 * reciprocal).ceil() as u32
+fn chrome_css(physical: u32, dpr: f32) -> u32 {
+    (physical as f32 * (1.0 / dpr)).ceil() as u32
+}
+
+/// The error for a size of `css` CSS pixels (of the kind `what`) that
+/// headless Chrome can't report at the ratio `dpr`.
+fn unreportable(what: &str, css: u32, dpr: f32) -> StealthError {
+    StealthError::InvalidOverride(format!(
+        "headless Chrome can't report a {what} of {css} at a device_pixel_ratio of {dpr}"
+    ))
 }
 
 /// The physical inset (from the screen's edge to its work area's) that
 /// headless Chrome reports as `css` CSS pixels at the ratio `dpr` (see
-/// [`chrome_css`]): `css` times the ratio, or one physical pixel less.
-fn chrome_inset(css: u32, dpr: f64) -> Result<u32, StealthError> {
-    let exact = (f64::from(css) * dpr).round() as u32;
+/// [`chrome_css`]): `exact` (`css` times the ratio, a whole number), or one
+/// physical pixel less.
+fn chrome_inset(css: u32, exact: u32, dpr: f32) -> Result<u32, StealthError> {
     [exact, exact.saturating_sub(1)]
         .into_iter()
         .find(|&physical| chrome_css(physical, dpr) == css)
-        .ok_or_else(|| unreportable("inset", css, dpr))
+        .ok_or_else(|| unreportable("work-area inset", css, dpr))
 }
 
 /// The `--window-size` (in CSS pixels) for which headless Chrome reports a
 /// window size of `css` at the ratio `dpr`: `css` or 1 less. Chrome rounds
 /// the size up to physical pixels, and back as [`chrome_css`] says.
-fn chrome_window_size(css: u32, dpr: f64) -> Result<u32, StealthError> {
+fn chrome_window_size(css: u32, dpr: f32) -> Result<u32, StealthError> {
     [css, css.saturating_sub(1)]
         .into_iter()
-        .find(|&size| chrome_css((f64::from(size) * dpr).ceil() as u32, dpr) == css)
+        .find(|&size| chrome_css((size as f32 * dpr).ceil() as u32, dpr) == css)
         .ok_or_else(|| unreportable("window size", css, dpr))
-}
-
-/// The error for a size of `css` CSS pixels (of the kind `what`) that
-/// headless Chrome can't report at the ratio `dpr`.
-fn unreportable(what: &str, css: u32, dpr: f64) -> StealthError {
-    StealthError::InvalidOverride(format!(
-        "headless Chrome can't report a {what} of {css} at a device_pixel_ratio of {dpr}"
-    ))
 }
 
 /// The switches that give headless Chrome the screen `screen`, with each
@@ -67,42 +86,53 @@ fn unreportable(what: &str, css: u32, dpr: f64) -> StealthError {
 /// CSS pixels of `screen` times its device pixel ratio. The work area is
 /// `avail_width` by `avail_height`, at the top left; an unset `avail_width`
 /// keeps the full width, and an unset `avail_height` leaves
-/// [`DEFAULT_TASKBAR_HEIGHT`]. `--window-size` takes CSS pixels. Both the
-/// insets and the window size make up for Chrome's rounding (see
-/// [`chrome_css`]).
+/// [`DEFAULT_TASKBAR_HEIGHT`]. `--window-size` takes CSS pixels.
+///
+/// Chrome divides the screen's size by the ratio, which is exact for a
+/// ratio that [`ratio_taken`] takes, so a whole number of physical pixels
+/// comes back as the same CSS size. But it scales a work area's inset and a
+/// window's size by the ratio's `f32` reciprocal, which can be inexact (see
+/// [`chrome_css`]), so the switches give the inset and the window size that
+/// come back as intended ([`chrome_inset`], [`chrome_window_size`]). A test
+/// sweeps every ratio and size taken, so those always exist.
 ///
 /// The window isn't maximized (`--start-maximized`), because Chrome then
 /// ignores the size of the first `Browser.setWindowBounds`, which only
 /// restores the window from its maximized state.
 ///
 /// # Errors
-/// Returns [`StealthError::InvalidOverride`] for a screen that Chrome can't
-/// take or would misreport: a device pixel ratio that isn't a multiple of
-/// 0.25 from 1; a work area larger than the screen; or a width, height, or
-/// work-area width or height that doesn't come to a whole number of
-/// physical pixels from 1 to 2^24.
-///
-/// Chrome keeps the ratio as an `f32`, and rounds each size from physical
-/// pixels up to CSS pixels. A multiple of 0.25 is exact in an `f32` (and
-/// covers Windows' scaling steps and macOS's 2x), so a whole number of
-/// physical pixels, up to 2^24 (which an `f32` holds exactly), comes back
-/// as the same CSS size. Otherwise, Chrome reports a different size, and
-/// makes windows 1 CSS pixel larger than the work area (measured with
-/// Chrome 157 at a ratio of 1.75). Chrome dumps core on a ratio below 0.5,
-/// on a work area larger than the screen, and on a size beyond `i32::MAX`.
+/// Returns [`StealthError::InvalidOverride`] for a screen whose ratio
+/// [`ratio_taken`] doesn't take; whose work area is larger than the screen,
+/// or empty; or one of whose sizes (width, height, and the work area's width
+/// and height), times the ratio, isn't a whole number of physical pixels
+/// from 1 to [`MAX_PHYSICAL`]. Chrome would report a different screen for
+/// most of those, and dumps core on some.
 fn headless_screen_switches(screen: &ScreenSpec) -> Result<Vec<String>, StealthError> {
-    let dpr = screen.device_pixel_ratio;
-    let quarters = dpr * 4.0;
-    if !(quarters.is_finite() && quarters.fract() == 0.0 && quarters >= 4.0) {
+    let ratio = screen.device_pixel_ratio;
+    let quarters = ratio * 4.0;
+    if !(quarters.is_finite() && quarters.fract() == 0.0 && ratio_taken(quarters as u64)) {
+        let taken = if cfg!(target_os = "linux") {
+            "1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3, 3.25, 3.5, 3.75 or 4"
+        } else {
+            "1 or 2 (zendriver takes the others only on Linux)"
+        };
         return Err(StealthError::InvalidOverride(format!(
-            "the screen's device_pixel_ratio must be a multiple of 0.25 from 1, not {dpr}"
+            "the screen's device_pixel_ratio must be {taken}, not {ratio}"
         )));
     }
     let quarters = quarters as u64;
+    let dpr = ratio as f32;
+    if screen.avail_height.is_none() && screen.height <= DEFAULT_TASKBAR_HEIGHT {
+        return Err(StealthError::InvalidOverride(format!(
+            "the screen's height of {} leaves no work area above the default taskbar of \
+             {DEFAULT_TASKBAR_HEIGHT}; set avail_height",
+            screen.height
+        )));
+    }
     let avail_width = screen.avail_width.unwrap_or(screen.width);
     let avail_height = screen
         .avail_height
-        .unwrap_or(screen.height.saturating_sub(DEFAULT_TASKBAR_HEIGHT));
+        .unwrap_or(screen.height - DEFAULT_TASKBAR_HEIGHT);
     if avail_width > screen.width || avail_height > screen.height {
         return Err(StealthError::InvalidOverride(format!(
             "the screen's work area {avail_width}x{avail_height} is larger than the screen {}x{}",
@@ -111,25 +141,24 @@ fn headless_screen_switches(screen: &ScreenSpec) -> Result<Vec<String>, StealthE
     }
     // `css` CSS pixels in physical pixels, as `--screen-info` takes them.
     let physical = |name: &str, css: u32| -> Result<u32, StealthError> {
-        let quarter_pixels = u64::from(css).saturating_mul(quarters);
-        let pixels = quarter_pixels / 4;
-        if css == 0 || quarter_pixels % 4 != 0 || pixels > 1 << 24 {
+        let quarter_pixels = u64::from(css) * quarters;
+        if css == 0 || quarter_pixels % 4 != 0 || quarter_pixels / 4 > MAX_PHYSICAL {
             return Err(StealthError::InvalidOverride(format!(
-                "the screen's {name} of {css} at a device_pixel_ratio of {dpr} must come to a \
-                 whole number of physical pixels from 1 to 2^24"
+                "the screen's {name} of {css}, times its device_pixel_ratio of {ratio}, must be \
+                 a whole number of physical pixels from 1 to {MAX_PHYSICAL}"
             )));
         }
-        Ok(pixels as u32)
+        Ok((quarter_pixels / 4) as u32)
     };
     let width = physical("width", screen.width)?;
     let height = physical("height", screen.height)?;
-    physical("work-area width", avail_width)?;
-    physical("work-area height", avail_height)?;
+    let work_width = physical("work-area width", avail_width)?;
+    let work_height = physical("work-area height", avail_height)?;
     let screen_info = format!(
-        "--screen-info={{{width}x{height} devicePixelRatio={dpr} workAreaRight={} \
+        "--screen-info={{{width}x{height} devicePixelRatio={ratio} workAreaRight={} \
          workAreaBottom={}}}",
-        chrome_inset(screen.width - avail_width, dpr)?,
-        chrome_inset(screen.height - avail_height, dpr)?,
+        chrome_inset(screen.width - avail_width, width - work_width, dpr)?,
+        chrome_inset(screen.height - avail_height, height - work_height, dpr)?,
     );
     Ok(vec![
         screen_info,
@@ -249,13 +278,13 @@ impl StealthObserver {
     /// reports the real display.
     ///
     /// # Errors
-    /// Returns [`StealthError::InvalidOverride`] for a screen that headless
-    /// Chrome can't take, or would report as a different screen: one whose
-    /// `device_pixel_ratio` isn't a multiple of 0.25 from 1, whose
-    /// `avail_width` or `avail_height` is larger than the screen, or one of
-    /// whose sizes (`width`, `height`, and the work area's width and
-    /// height), times `device_pixel_ratio`, isn't a whole number of physical
-    /// pixels from 1 to 2^24.
+    /// Returns [`StealthError::InvalidOverride`] for a screen whose
+    /// `device_pixel_ratio` isn't one that zendriver takes (1, 1.25, 1.5,
+    /// … 4 on Linux; 1 or 2 elsewhere); whose work area is empty or larger
+    /// than the screen; or one of whose sizes (`width`, `height`, and the
+    /// work area's width and height), times `device_pixel_ratio`, isn't a
+    /// whole number of physical pixels from 1 to 65536. Headless Chrome would
+    /// report a different screen for most of those, and dumps core on some.
     pub fn headless_flags(&self) -> Result<Vec<String>, StealthError> {
         if self.profile.kind() != ProfileKind::Native {
             return Ok(Vec::new());
@@ -1725,44 +1754,65 @@ mod persona_reaches_cdp_tests {
         );
     }
 
-    /// Chrome can't take these, or would report sizes other than these.
+    /// Whether `native_headless_flags` rejects `screen` as an invalid
+    /// override.
+    fn rejected(screen: ScreenSpec) -> bool {
+        matches!(
+            native_headless_flags(Some(screen), None),
+            Err(StealthError::InvalidOverride(_))
+        )
+    }
+
+    /// Screens that headless Chrome can't take, or would report as different
+    /// screens, on every platform.
     #[test]
-    fn native_headless_flags_reject_a_screen_chrome_would_crash_on_or_misreport() {
-        let tiny_ratio = ScreenSpec::new(1920, 1080, 0.75);
+    fn native_headless_flags_reject_a_screen_chrome_cant_take_or_would_misreport() {
+        let below_one = ScreenSpec::new(1920, 1080, 0.75);
         // 1.3 isn't exact in Chrome's `f32`.
         let inexact_ratio = ScreenSpec::new(1000, 1000, 1.3);
         let nan_ratio = ScreenSpec::new(1920, 1080, f64::NAN);
         let tall_work_area = ScreenSpec::new(1920, 1080, 1.0).with_avail(1920, 1081);
-        // 2194 x 1.75 = 3839.5 physical pixels; at 1.75, Chrome reports
-        // 3840 as 2195 and makes a window 2196 wide.
-        let inexact_size = ScreenSpec::new(2194, 1232, 1.75);
-        let inexact_work_area = ScreenSpec::new(2192, 1232, 1.75).with_avail(2192, 1186);
         let zero_width = ScreenSpec::new(0, 1080, 1.0);
+        let empty_work_area = ScreenSpec::new(1920, 1080, 1.0).with_avail(1920, 0);
         // The default taskbar of 48 leaves no work area.
-        let no_work_area = ScreenSpec::new(1920, 40, 1.0);
-        let beyond_f32 = ScreenSpec::new((1 << 24) + 1, 1080, 1.0);
+        let too_short_for_the_taskbar = ScreenSpec::new(1920, 40, 1.0);
+        let too_wide = ScreenSpec::new((1 << 16) + 1, 1080, 1.0);
         for screen in [
-            tiny_ratio,
+            below_one,
             inexact_ratio,
             nan_ratio,
             tall_work_area,
-            inexact_size,
-            inexact_work_area,
             zero_width,
-            no_work_area,
-            beyond_f32,
+            empty_work_area,
+            too_short_for_the_taskbar,
+            too_wide,
         ] {
-            assert!(
-                matches!(
-                    native_headless_flags(Some(screen), None),
-                    Err(StealthError::InvalidOverride(_))
-                ),
-                "{screen:?} must be rejected"
-            );
+            assert!(rejected(screen), "{screen:?} must be rejected");
         }
     }
 
+    /// At a fractional ratio, a size that isn't a whole number of physical
+    /// pixels: 2194 x 1.75 = 3839.5. Chrome reports a screen of 3840
+    /// physical pixels as 2195, and makes a window 2196 wide.
     #[test]
+    #[cfg(target_os = "linux")]
+    fn native_headless_flags_reject_a_fractional_size_of_physical_pixels() {
+        assert!(rejected(ScreenSpec::new(2194, 1232, 1.75)));
+        assert!(rejected(
+            ScreenSpec::new(2192, 1232, 1.75).with_avail(2192, 1186)
+        ));
+    }
+
+    /// Fractional ratios weren't measured off Linux.
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn native_headless_flags_take_only_ratios_1_and_2_off_linux() {
+        assert!(rejected(ScreenSpec::new(1536, 864, 1.25)));
+        assert!(!rejected(ScreenSpec::new(1440, 900, 2.0)));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn native_headless_flags_take_a_fractional_ratio_with_whole_physical_pixels() {
         let flags = native_headless_flags(
             Some(ScreenSpec::new(1536, 864, 1.25).with_avail(1536, 824)),
@@ -1775,11 +1825,11 @@ mod persona_reaches_cdp_tests {
         );
     }
 
-    /// 48 times any multiple of 0.25 is a whole number. At 1.75, the inset of
-    /// 84 physical pixels is 1 less, which Chrome reports as 48 (see
-    /// `chrome_inset`).
+    /// At 1.75, the default taskbar is 48 x 1.75 = 84 physical pixels, but
+    /// the switch passes 83, which Chrome reports as 48 (see `chrome_inset`).
     #[test]
-    fn the_default_taskbar_is_whole_physical_pixels_at_any_ratio_taken() {
+    #[cfg(target_os = "linux")]
+    fn native_headless_flags_make_up_for_chromes_rounding_at_1_75() {
         let flags = native_headless_flags(Some(ScreenSpec::new(2192, 1232, 1.75)), None).unwrap();
         assert_eq!(
             flags,
@@ -1795,11 +1845,36 @@ mod persona_reaches_cdp_tests {
     /// of inset as 49 CSS pixels, and a `--window-size` of 1596 as 1597.
     #[test]
     fn chromes_rounding_is_made_up_for() {
-        assert_eq!(chrome_inset(48, 1.75).unwrap(), 83);
+        assert_eq!(chrome_inset(48, 84, 1.75).unwrap(), 83);
         assert_eq!(chrome_window_size(1596, 1.75).unwrap(), 1595);
         assert_eq!(chrome_window_size(2192, 1.75).unwrap(), 2192);
-        assert_eq!(chrome_inset(50, 1.25).unwrap(), 62);
+        assert_eq!(chrome_inset(40, 50, 1.25).unwrap(), 50);
         assert_eq!(chrome_window_size(1920, 1.0).unwrap(), 1920);
+    }
+
+    /// `chrome_inset` and `chrome_window_size` find a value for every size
+    /// that `headless_screen_switches` can pass them: every ratio from 1 to
+    /// 4 in quarters, and every size of whole physical pixels up to
+    /// `MAX_PHYSICAL`.
+    #[test]
+    fn chromes_rounding_can_always_be_made_up_for() {
+        for quarters in 4..=16u32 {
+            let dpr = quarters as f32 / 4.0;
+            for css in 1..=(MAX_PHYSICAL as u32) * 4 / quarters {
+                if css * quarters % 4 != 0 {
+                    continue;
+                }
+                let exact = css * quarters / 4;
+                assert!(
+                    chrome_inset(css, exact, dpr).is_ok(),
+                    "inset {css} at {dpr}"
+                );
+                assert!(
+                    chrome_window_size(css, dpr).is_ok(),
+                    "window {css} at {dpr}"
+                );
+            }
+        }
     }
 
     #[test]

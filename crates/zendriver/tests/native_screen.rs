@@ -105,7 +105,9 @@ async fn a_configured_screen_reaches_chrome() {
 /// (with the default taskbar of 48, which is 84 physical pixels) is
 /// 3836x2156. At 1.75, Chrome's rounding would make the taskbar 49, and a
 /// window 1596 wide 1597, without zendriver making up for it.
+/// zendriver takes fractional ratios only on Linux.
 #[tokio::test]
+#[cfg(target_os = "linux")]
 async fn a_screen_at_a_fractional_ratio_reaches_chrome_exactly() {
     let builder = with_screen(
         r#""width": 1536, "height": 864, "device_pixel_ratio": 1.25,
