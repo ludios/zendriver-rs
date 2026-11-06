@@ -62,6 +62,18 @@ impl Platform {
     }
 }
 
+/// Blink settings of a desktop whose only pointing device is a mouse or a
+/// touchpad: a fine pointer that can hover. 4 is Blink's
+/// `PointerType::kPointerFineType` and 2 its `HoverType::kHoverHoverType`
+/// (`web_preferences.mojom`); the `available*` settings are bit sets of the
+/// same values.
+const MOUSE_BLINK_SETTINGS: &[&str] = &[
+    "availablePointerTypes=4",
+    "primaryPointerType=4",
+    "availableHoverTypes=2",
+    "primaryHoverType=2",
+];
+
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub(crate) struct PerFieldOverride {
@@ -580,6 +592,36 @@ impl StealthProfile {
         }
         flags.extend(self.extra_flags.iter().cloned());
         flags
+    }
+
+    /// Blink settings that a headless launch needs for its pages to see this
+    /// profile's pointing device, as `name=value` items of Chrome's
+    /// `--blink-settings` switch.
+    ///
+    /// Headless Chrome has no input devices, so without these settings its
+    /// pages match `(pointer: none)`, `(hover: none)`, `(any-pointer: none)`
+    /// and `(any-hover: none)`, which no desktop does. No CDP command changes
+    /// these media features: `Emulation.setEmulatedMedia` ignores them.
+    ///
+    /// Every [`Platform`] is a desktop operating system, so
+    /// [`native`](Self::native) and [`spoofed`](Self::spoofed) return the
+    /// settings of a mouse: a fine pointer that can hover. [`off`](Self::off)
+    /// returns none, so its launch stays stock. A persona of a touch device
+    /// would need other settings (a coarse pointer that can't hover), and a
+    /// matching `navigator.maxTouchPoints`.
+    ///
+    /// ```
+    /// use zendriver_stealth::StealthProfile;
+    /// let settings = StealthProfile::native().headless_blink_settings();
+    /// assert!(settings.contains(&"primaryPointerType=4"));
+    /// assert!(StealthProfile::off().headless_blink_settings().is_empty());
+    /// ```
+    #[must_use]
+    pub fn headless_blink_settings(&self) -> &'static [&'static str] {
+        match self.kind {
+            ProfileKind::Off => &[],
+            ProfileKind::Native | ProfileKind::Spoofed => MOUSE_BLINK_SETTINGS,
+        }
     }
 
     /// Whether `Page.setBypassCSP` will be sent for this profile. Defaults

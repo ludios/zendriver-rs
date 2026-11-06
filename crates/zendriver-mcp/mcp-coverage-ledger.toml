@@ -1148,3 +1148,8 @@ excluded = "unsafe to expose: an MCP client that could set Chrome's environment 
 [[entry]]
 api = "zendriver::browser::BrowserBuilder::env_remove"
 excluded = "no agent-facing value without BrowserBuilder::env, which is excluded above because it would let an MCP client make Chrome run its code"
+
+# ── Headless pages see a mouse, not "no pointer" ────────────────────────────
+[[entry]]
+api = "zendriver_stealth::StealthProfile::headless_blink_settings"
+excluded = "reader of the Blink settings that a stealth profile implies; every headless browser_open applies them, since MCP offers no off profile"

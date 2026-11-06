@@ -58,6 +58,17 @@ protocol-level fingerprinters see:
   `--disable-features=IsolateOrigins,site-per-process` (toggleable),
   and a curated list of flags that turn off the "this browser is
   controlled by automation" infobar plus various leaks.
+- **A mouse for headless pages** — headless Chrome has no input
+  devices, so its pages match `(pointer: none)`, `(hover: none)`,
+  `(any-pointer: none)` and `(any-hover: none)`, which no desktop does.
+  No CDP command changes these media features, so under headless the
+  profile passes `--blink-settings` to make every frame see a mouse:
+  `fine` and `hover`, in both `matchMedia` and CSS `@media` rules.
+  `navigator.maxTouchPoints` stays 0. Chrome keeps only the last of
+  several `--blink-settings` switches, so if you pass your own with
+  `BrowserBuilder::arg`, zendriver combines it with its own, and your
+  values win where both name a setting. A headed launch gets none of
+  this, since Chrome then reports the host's real devices.
 - **UA scrub** — strips the `HeadlessChrome` segment from the User-Agent
   string and the Sec-CH-UA brand list.
 - **Emulation overrides** —
