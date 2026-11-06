@@ -1325,7 +1325,8 @@ impl BrowserBuilder {
     ///
     /// # Panics
     ///
-    /// If `key` is empty or contains `=`.
+    /// If `key` is empty or contains `=` or NUL, or if `value` contains NUL:
+    /// the cases in which [`std::env::set_var`] panics.
     ///
     /// # Examples
     ///
@@ -1339,12 +1340,19 @@ impl BrowserBuilder {
     #[must_use]
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         let key = key.as_ref();
+        let value = value.as_ref();
+        let key_bytes = key.as_encoded_bytes();
         assert!(
-            !key.is_empty() && !key.as_encoded_bytes().contains(&b'='),
+            !key_bytes.is_empty() && !key_bytes.contains(&b'=') && !key_bytes.contains(&0),
             "BrowserBuilder::env: the name of an environment variable must be \
-             non-empty and must not contain '=', but got {key:?}"
+             non-empty and contain neither '=' nor NUL, but got {key:?}"
         );
-        self.env.push((key.to_owned(), value.as_ref().to_owned()));
+        // Unlike the name, the value may be a secret, so it isn't shown.
+        assert!(
+            !value.as_encoded_bytes().contains(&0),
+            "BrowserBuilder::env: the value of {key:?} contains NUL"
+        );
+        self.env.push((key.to_owned(), value.to_owned()));
         self
     }
 
@@ -5204,6 +5212,12 @@ mod tests {
         let debug = format!("{builder:?}");
         assert!(debug.contains("API_KEY=<redacted>"), "{debug}");
         assert!(!debug.contains("hunter2"), "{debug}");
+    }
+
+    #[test]
+    #[should_panic(expected = "contain neither '=' nor NUL")]
+    fn env_rejects_a_name_with_an_equals_sign() {
+        let _ = BrowserBuilder::new().env("A=B", "c");
     }
 
     /// A [`ProcessJob::none`] confines nothing, so it must report that it
