@@ -327,7 +327,7 @@ async fn wait(
         }
     }
     Err(ZendriverError::Navigation(
-        "the page or its connection closed while waiting for a navigation".into(),
+        "the tab's session or connection ended while waiting for a navigation".into(),
     ))
 }
 

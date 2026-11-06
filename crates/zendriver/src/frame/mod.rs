@@ -439,8 +439,10 @@ impl Frame {
     /// # Errors
     ///
     /// Returns [`ZendriverError::Timeout`] on expiry, and
-    /// [`ZendriverError::Navigation`] for the main frame of a tab that is
-    /// gone.
+    /// [`ZendriverError::Navigation`] if the tab is closed, or its
+    /// connection closes, first. For a sub-frame in its own process, it
+    /// also returns `Navigation` if the frame's session ends first (as when
+    /// the frame is removed, or moves into its parent's process).
     ///
     /// # Examples
     ///

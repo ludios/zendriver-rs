@@ -1177,10 +1177,10 @@ impl Tab {
     /// Returns [`ZendriverError::Timeout`] when the tab isn't at a matching,
     /// loaded page within the timeout, and [`ZendriverError::Navigation`]
     /// when a navigation to a matching URL ends on Chrome's error page
-    /// because it couldn't be reached, or if the tab's connection closes
-    /// first, whether Chrome exited or zendriver shut it down, as closing
-    /// the tab does. Lost events don't end the wait: it asks the page where
-    /// it is instead, and then reports `same_document` as `false`.
+    /// because it couldn't be reached, or if the tab is closed or its
+    /// connection closes first (because Chrome exited, or zendriver shut the
+    /// connection down). Lost events don't end the wait: it asks the page
+    /// where it is instead, and then reports `same_document` as `false`.
     ///
     /// # Examples
     ///

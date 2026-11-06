@@ -337,7 +337,7 @@ pub(crate) async fn next_stop(
     match tokio::time::timeout(within, stop).await {
         Err(_) => Err(ZendriverError::Timeout(within)),
         Ok(None) => Err(ZendriverError::Navigation(
-            "the page or its connection closed while waiting for the frame to load".into(),
+            "the frame's session or connection ended while waiting for the frame to load".into(),
         )),
         Ok(Some(_)) => Ok(()),
     }
@@ -415,7 +415,7 @@ impl LoadTracker {
         match tokio::time::timeout(within, self.loading.wait_for(|loading| !loading)).await {
             Err(_) => Err(ZendriverError::Timeout(within)),
             Ok(Err(_)) => Err(ZendriverError::Navigation(
-                "the page or its connection closed while waiting for it to load".into(),
+                "the frame's session or connection ended while waiting for it to load".into(),
             )),
             Ok(Ok(_)) => Ok(()),
         }
