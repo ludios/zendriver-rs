@@ -7,9 +7,9 @@ subscription registers), you register an expectation **before** the
 action and await the returned `Future` afterwards. The subscriber is live
 by the time `expect_*` returns, so the event cannot slip past.
 
-`expect_navigation`, which waits for a navigation that a click or a key
-press starts, follows the same pattern but needs no feature: see
-[Waiting for navigation](./navigation.md).
+`expect_navigation`, which waits for the next navigation of the page (armed
+just before the click or key press that is to start it), follows the same
+pattern but needs no feature: see [Waiting for navigation](./navigation.md).
 
 Enable it in `Cargo.toml`:
 

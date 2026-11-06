@@ -39,7 +39,9 @@ A navigation that stays in the document (a fragment change, or
 `history.pushState`) resolves it at once. The [`Navigation`] it resolves
 with carries the URL reached, and `same_document`, which tells the two
 cases apart. Any navigation counts, even one to the same URL, such as a
-form that posts back to its own page.
+form that posts back to its own page, and even one the action didn't
+cause: arm it right before the action. A navigation that fails, so that
+Chrome shows its error page, is an error, as a failed `goto` is.
 
 ## `wait_for_url`
 
@@ -56,27 +58,37 @@ let home = tab
     .await?;
 ```
 
-Being at a URL is a state, so this one is safe to call after the action.
-If the tab is already there, the wait ends as soon as that page has loaded
-(at once, if it has). Pages at other URLs on the way, such as a login's
-bounce through another site, don't end it. Mind a pattern that the page you start
-from also matches: the wait ends there at once.
+Being at a URL is a state, so this one is safe to call after the action, as
+long as the tab stays at the destination (a matching page that the tab
+leaves again before the call is missed). If the tab is already there, the
+wait ends as soon as that page has loaded (at once, if it has). Pages at
+other URLs on the way, such as a login's bounce through another site, don't
+end it. A navigation to a matching URL that fails, so that Chrome shows its
+error page, is an error. Mind a pattern that the page you start from also
+matches: the wait ends there at once.
+
+The wait asks the page itself where it is (`location.href`) and whether it
+has loaded (`document.readyState`), rather than Chrome's `Target` domain,
+which reports a navigation's URL while it is still pending.
 
 ## Timeouts and lost events
 
-Both waits give up after 30 s unless `.timeout(duration)` says otherwise.
-If the event stream loses events (a lagging subscriber, or a reconnect),
-`expect_navigation` fails with `EventStreamIncomplete`, because the
-navigation may have happened unseen; `wait_for_url` reads the URL again and
-keeps waiting.
+Both waits give up after 30 s unless `.timeout(duration)` says otherwise;
+the clock starts at the first `.await`. If the event stream loses events (a
+lagging subscriber, or a reconnect), `expect_navigation` fails with
+`EventStreamIncomplete`, because the navigation may have happened unseen;
+`wait_for_url` asks the page where it is and keeps waiting, and then reports
+`same_document` as `false`, since a new document may have arrived unseen.
+Closing the tab, or Chrome exiting, ends a wait with a `Navigation` error.
 
 ## In the MCP server
 
 `browser_wait_for_url` is `wait_for_url` with `url_substr` or `url_regex`,
 `timeout_ms`, and `return_snapshot`. `browser_click` and `browser_press`
-take `wait_for_navigation: true`, which arms `expect_navigation` before the
-action, so the reply (and its snapshot) describes the page the action led
-to.
+take `wait_for_navigation: true` (and `navigation_timeout_ms`), which arms
+`expect_navigation` before the action, so the reply (and its snapshot)
+describes the page the next navigation led to; a `pushState` or fragment
+change ends that wait at once, on the same page.
 
 [`wait_for_load`]: https://docs.rs/zendriver/latest/zendriver/struct.Tab.html#method.wait_for_load
 [`expect_navigation`]: https://docs.rs/zendriver/latest/zendriver/struct.Tab.html#method.expect_navigation

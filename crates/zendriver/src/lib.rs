@@ -230,7 +230,8 @@ pub use zendriver_datadome::{
 #[cfg(feature = "datadome")]
 pub use zendriver_datadome::ClearanceOutcome as DataDomeClearanceOutcome;
 
-/// Re-export the shared `UrlMatcher` used by `expect_*` and `monitor`.
+/// Re-export the shared `UrlMatcher` used by `expect_*`, `monitor` and
+/// `Tab::wait_for_url`.
 pub use url_matcher::UrlMatcher;
 
 /// Network monitor public types re-exports.

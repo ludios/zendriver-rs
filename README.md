@@ -29,8 +29,10 @@ async fn main() -> zendriver::Result<()> {
 
     // Find by visible text (auto-waits up to the selector's timeout).
     let link = tab.find().text("More information...").one().await?;
+    // Arm the wait before the click: it ends once the linked page has loaded.
+    let navigation = tab.expect_navigation();
     link.click().await?;
-    tab.wait_for_load().await?;
+    navigation.await?;
 
     // Read back from the page's main world.
     let title: String = tab.evaluate_main("document.title").await?;

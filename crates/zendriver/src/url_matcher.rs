@@ -1,11 +1,13 @@
-//! Shared URL matcher used by `expect_*` and the network `monitor`.
+//! Shared URL matcher used by `expect_*`, the network `monitor`, and
+//! `Tab::wait_for_url`.
 
-/// URL match predicate used by request/response expectations.
+/// URL match predicate used by request/response expectations and by
+/// [`crate::Tab::wait_for_url`].
 ///
 /// `From<&str>` / `From<String>` build a [`UrlMatcher::Substring`], while
 /// `From<regex::Regex>` builds a [`UrlMatcher::Regex`] — so callers can pass
 /// any of the three to [`crate::Tab::expect_request`] /
-/// [`crate::Tab::expect_response`].
+/// [`crate::Tab::expect_response`] / [`crate::Tab::wait_for_url`].
 ///
 /// # Examples
 ///
