@@ -12,9 +12,10 @@
 //! - **How it goes.** One task per browser follows
 //!   `Browser.downloadProgress` on the browser's own connection, which goes
 //!   on after the tab closes, and keeps what it learns per download guid.
-//!   The tab's event and the browser's come on different sockets, so either
-//!   can come first: whichever does makes the record, and a finished
-//!   download's record is kept for a while, for a claim that comes late.
+//!   The tab's event and the browser's may come on different sockets (they
+//!   do for a tab with its own socket), so either can come first: whichever
+//!   does makes the record, and the records of the last 256 finished
+//!   downloads are kept, for a claim that comes late.
 //! - **Where the file goes.** The first `expect_download` in a browser
 //!   context where zendriver set no download behavior yet sends the
 //!   context's downloads into zendriver's staging directory (one per
@@ -61,7 +62,6 @@ const FINISHED_KEPT: usize = 256;
 
 /// Where a download is in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum DownloadProgressState {
     /// Chrome is actively transferring bytes.
     InProgress,
@@ -391,8 +391,10 @@ impl MatchedDownload {
     }
 
     /// The directory Chrome saves the download into: zendriver's staging
-    /// directory, or the one that [`crate::Tab::set_download_path`] (or the
-    /// like) chose for the tab's browser context.
+    /// directory, or the one that [`crate::Tab::set_download_path`],
+    /// [`crate::Browser::set_download_path`] or
+    /// [`crate::BrowserBuilder::downloads_dir`] chose for the tab's browser
+    /// context.
     #[must_use]
     pub fn download_dir(&self) -> &Path {
         &self.download_dir
@@ -477,7 +479,7 @@ impl MatchedDownload {
             DownloadProgressState::Completed => self.completed_path(&ended).ok_or_else(|| {
                 ZendriverError::Navigation(format!(
                     "download {} completed, but Chrome didn't say where the file is \
-                     (Chrome 138 and later do)",
+                     (Chrome 138 and later usually do)",
                     self.guid
                 ))
             }),
@@ -528,8 +530,10 @@ impl MatchedDownload {
 }
 
 /// Awaitable handle returned by [`crate::Tab::expect_download`]. Resolves
-/// with the first matched [`MatchedDownload`] or [`ZendriverError::Timeout`]
-/// if no download begins within the configured timeout.
+/// with the first matched [`MatchedDownload`], [`ZendriverError::Timeout`]
+/// if no download begins within the configured timeout, or
+/// [`ZendriverError::EventStreamIncomplete`] if the tab's events end or
+/// lose continuity first (as when the tab closes).
 ///
 /// Implements [`Future`] directly — `.await` works without calling
 /// `.matched()`. The `.matched()` accessor exists for parity with the

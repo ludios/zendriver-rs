@@ -3103,10 +3103,12 @@ impl Tab {
     ///   [`crate::BrowserContext`] to keep them apart. The staging directory
     ///   is on the machine zendriver runs on, so a Chrome on another machine
     ///   can't save into it.
-    /// - If [`Tab::set_download_path`] (or the like) chose a directory, this
-    ///   changes nothing: the file goes there, under the name Chrome gives
-    ///   it, and the `MatchedDownload` finds it only on Chrome 138 or later,
-    ///   which reports where a completed file is.
+    /// - If [`Tab::set_download_path`] (on a tab of the context),
+    ///   [`crate::Browser::set_download_path`] or
+    ///   [`crate::BrowserBuilder::downloads_dir`] (for the default context)
+    ///   chose a directory, this changes nothing: the file goes there, under
+    ///   the name Chrome gives it, and the `MatchedDownload` finds it only on
+    ///   Chrome 138 or later, which reports where a completed file is.
     ///
     /// `Page.enable` is already on per-Tab via P1's `Tab::goto` / the frame
     /// lifecycle subscriber, so this call does not re-enable.

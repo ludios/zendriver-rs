@@ -1292,7 +1292,7 @@ pub type zendriver::expect::dialog::MatchedDialog::Output = T
 impl<V, T> ppv_lite86::types::VZip<V> for zendriver::expect::dialog::MatchedDialog where V: ppv_lite86::types::MultiLane<T>
 pub fn zendriver::expect::dialog::MatchedDialog::vzip(self) -> V
 pub mod zendriver::expect::download
-#[non_exhaustive] pub enum zendriver::expect::download::DownloadProgressState
+pub enum zendriver::expect::download::DownloadProgressState
 pub zendriver::expect::download::DownloadProgressState::Canceled
 pub zendriver::expect::download::DownloadProgressState::Completed
 pub zendriver::expect::download::DownloadProgressState::InProgress
@@ -5247,7 +5247,7 @@ impl<T> typenum::type_operators::Same for zendriver::expect::dialog::DialogType
 pub type zendriver::expect::dialog::DialogType::Output = T
 impl<V, T> ppv_lite86::types::VZip<V> for zendriver::expect::dialog::DialogType where V: ppv_lite86::types::MultiLane<T>
 pub fn zendriver::expect::dialog::DialogType::vzip(self) -> V
-#[non_exhaustive] pub enum zendriver::DownloadProgressState
+pub enum zendriver::DownloadProgressState
 pub zendriver::DownloadProgressState::Canceled
 pub zendriver::DownloadProgressState::Completed
 pub zendriver::DownloadProgressState::InProgress

@@ -26,16 +26,17 @@
 //! / `MatchedFileChooser`) into a `serde_json::Value` and, when asked,
 //! *drives* the matched object before it is dropped. The drive parameters
 //! live on `browser_expect_register` (not `_await`) because the spawned
-//! task owns the matched handle and several drive methods consume it
-//! (`accept` / `dismiss` / `save_to`); the decision must therefore be made
-//! at register time, before the triggering action runs:
+//! task owns the matched handle, which it drops after flattening it, and
+//! two drive methods consume it (`accept` / `dismiss`); the decision must
+//! therefore be made at register time, before the triggering action runs:
 //!
 //! - **Dialog** — `dialog_action: accept|dismiss` (+ `dialog_prompt_text`)
 //!   drives the dialog so the page's blocking `alert/confirm/prompt` returns.
 //! - **Response** — `fetch_body: true` fetches the body and inlines it as
 //!   `body_base64` + `body_len`.
 //! - **Download** — `save_to: <path>` waits for completion and copies the file
-//!   to the MCP host, reporting `saved_path`.
+//!   to the MCP host, reporting `saved_path` (and the downloaded file's own
+//!   `path`). A closed tab doesn't stop either.
 //! - **FileChooser** — `file_chooser_paths: [<path>, ...]` (required, must be
 //!   non-empty) is applied automatically the instant the chooser opens, via
 //!   `DOM.setFileInputFiles`; there is nothing left to drive by the time the
@@ -286,8 +287,9 @@ pub async fn register(
             })
         }
         ExpectKind::Download => {
-            // expect_download is async (lazy per-tab setup of the download
-            // coordinator + Browser.setDownloadBehavior dispatch). Surface
+            // expect_download is async (it starts following the browser's
+            // download events, and may send Browser.setDownloadBehavior for
+            // the tab's browser context). Surface
             // its setup error inline instead of stashing the expectation —
             // a registration we can never await isn't worth recording.
             let exp = tab
@@ -575,22 +577,23 @@ async fn dialog_to_json(
 /// completed download to `save_to` on the MCP host.
 ///
 /// `MatchedDownload::save_to` waits for completion before copying, so the
-/// reported `saved_path` is a fully-written file. Without `save_to`, the
+/// reported `saved_path` is a fully-written file, and `path` is the
+/// downloaded file itself. Without `save_to`, both are `null`, and the
 /// download goes on into `download_dir` (named by its guid in zendriver's
 /// staging directory, which lives as long as the browser).
 async fn download_to_json(m: MatchedDownload, save_to: Option<String>) -> Result<Value, String> {
-    let saved_path = if let Some(dest) = save_to {
+    let mut saved_path = None;
+    if let Some(dest) = save_to {
         m.save_to(&dest).await.map_err(err_to_str)?;
-        Some(dest)
-    } else {
-        None
-    };
+        saved_path = Some(dest);
+    }
     Ok(json!({
         "kind": "download",
         "url": m.url(),
         "suggested_filename": m.suggested_filename(),
         "guid": m.guid(),
         "download_dir": m.download_dir().to_string_lossy(),
+        "path": m.path(),
         "saved_path": saved_path,
     }))
 }

@@ -791,7 +791,7 @@ impl ZendriverServer {
     /// Download a URL through the page's own network context.
     #[tool(
         name = "browser_download",
-        description = "Download `url` by fetching it from the page's own network context (cookies / referer / same-origin credentials) and saving it via Chrome's download behavior. Optional `filename` sets the saved name (else derived from the URL). Fire-and-forget: returns once the fetch is dispatched, NOT when the file lands — for await/save-to-path use `browser_expect_register { kind: download, save_to }`."
+        description = "Download `url` by fetching it from the page's own network context (cookies / referer / same-origin credentials) and saving it via Chrome's download behavior. Optional `filename` sets the saved name (else derived from the URL), except where a `download` expectation sent the tab's browser context's downloads into zendriver's staging directory, whose files are named by guid (the expectation's `save_to` then names the copy). Fire-and-forget: returns once the fetch is dispatched, NOT when the file lands — for await/save-to-path use `browser_expect_register { kind: download, save_to }`."
     )]
     pub async fn browser_download(
         &self,
@@ -965,7 +965,7 @@ impl ZendriverServer {
     /// Wait for a previously-registered expectation to resolve.
     #[tool(
         name = "browser_expect_await",
-        description = "Wait for a previously-registered expectation to resolve. `timeout_ms` (default 30_000 = 30s) is the outer wait on the spawned task's matched-event channel. Returns `{ expectation_id, event }` where `event` is a JSON object whose shape depends on the expectation's `kind`: request/response carry `url` / `headers` / `method` or `status`; dialog carries `dialog_type` / `message` / `default_prompt` / `driven`; download carries `suggested_filename` / `guid` / `download_dir` / `saved_path`. When the expectation was registered with `fetch_body: true`, response events also carry `body_base64` + `body_len`. Dialog drive and download save are requested at register time (see `browser_expect_register`)."
+        description = "Wait for a previously-registered expectation to resolve. `timeout_ms` (default 30_000 = 30s) is the outer wait on the spawned task's matched-event channel. Returns `{ expectation_id, event }` where `event` is a JSON object whose shape depends on the expectation's `kind`: request/response carry `url` / `headers` / `method` or `status`; dialog carries `dialog_type` / `message` / `default_prompt` / `driven`; download carries `suggested_filename` / `guid` / `download_dir` / `path` (the downloaded file, once `save_to` waited for it) / `saved_path`. When the expectation was registered with `fetch_body: true`, response events also carry `body_base64` + `body_len`. Dialog drive and download save are requested at register time (see `browser_expect_register`)."
     )]
     pub async fn browser_expect_await(
         &self,

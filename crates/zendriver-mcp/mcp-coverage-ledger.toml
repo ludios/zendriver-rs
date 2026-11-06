@@ -1166,7 +1166,7 @@ excluded = "reader of the Blink settings that a stealth profile implies; every h
 # ── Downloads followed at browser scope (MatchedDownload's accessors) ──────
 # `MatchedDownload` became opaque: its public fields turned into accessors,
 # `path` stopped waiting (and being async), `save_to` borrows, and `wait`
-# is new. `DownloadProgressState` gained `Unknown` and `#[non_exhaustive]`.
+# is new. `DownloadProgressState` gained `Unknown`.
 # MCP's handle is the expectation task (it keeps no `MatchedDownload`), so
 # what it reports comes from `browser_expect_await`'s download event.
 [[entry]]

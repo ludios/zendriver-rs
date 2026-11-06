@@ -182,14 +182,15 @@ pub struct SessionState {
 /// the in-flight `.matched()` future instead of leaving it orphaned until its
 /// inner timeout fires.
 ///
-/// `kind` is a static label ("request" / "response" / "dialog" / "download")
-/// for diagnostics — not currently surfaced, but cheap to keep alongside.
+/// `kind` is a static label ("request" / "response" / "dialog" / "download");
+/// `browser_tab_close` keeps a "download" one (see `tab_id`).
 ///
 /// `tab_id` is the CDP target id of the tab the expectation was registered
 /// against (same id space as `zendriver::Tab::target_id` /
 /// `SessionState::current_tab_id`). It lets `browser_tab_close` reap this
 /// entry when its tab closes instead of leaking until `browser_expect_cancel`
-/// or `browser_close` — see `crate::tools::tabs::drain_tab_scoped`.
+/// or `browser_close` — see `crate::tools::tabs::drain_tab_scoped` — unless
+/// it is a download's, whose download (and save) outlives the tab.
 #[cfg(feature = "expect")]
 pub struct ExpectationHandle {
     pub kind: &'static str,
