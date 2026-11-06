@@ -38,6 +38,7 @@ pub use zendriver::InterceptBuilder
 pub use zendriver::InterceptHandle
 pub use zendriver::InterceptStream
 pub use zendriver::InterceptionError
+pub use zendriver::Interceptor
 pub use zendriver::ObserverError
 pub use zendriver::ObserverFailurePolicy
 pub use zendriver::PausedRequest

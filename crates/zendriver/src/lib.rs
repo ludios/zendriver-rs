@@ -171,8 +171,8 @@ pub use zendriver_transport::{
 #[cfg(feature = "interception")]
 pub use zendriver_interception::{
     AbortReason, HostMatcher, InterceptBuilder, InterceptHandle, InterceptStream,
-    InterceptionError, PausedRequest, RequestInfo, RequestOverrides, RequestStage, ResourceType,
-    ResponseInfo, ResponseOverrides,
+    InterceptionError, Interceptor, PausedRequest, RequestInfo, RequestOverrides, RequestStage,
+    ResourceType, ResponseInfo, ResponseOverrides,
 };
 
 /// Cloudflare Turnstile bypass re-exports.
@@ -454,6 +454,7 @@ mod auto_trait_assertions {
         assert_send_sync::<InterceptBuilder>();
         assert_send_sync::<InterceptHandle>();
         assert_send_sync::<InterceptStream>();
+        assert_send_sync::<Interceptor>();
         assert_send_sync::<InterceptionError>();
         assert_send_sync::<PausedRequest>();
         assert_send_sync::<RequestInfo>();
