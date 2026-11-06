@@ -1155,5 +1155,5 @@ excluded = "no agent-facing value without BrowserBuilder::env, which is excluded
 
 # ── Headless pages see a mouse, not "no pointer" ────────────────────────────
 [[entry]]
-api = "zendriver_stealth::StealthProfile::headless_blink_settings"
-excluded = "reader of the Blink settings that a stealth profile implies; every headless browser_open applies them, since MCP offers no off profile"
+api = "zendriver_stealth::StealthProfile::pointer_blink_settings"
+excluded = "reader of the Blink settings that a stealth profile implies; every headless browser_open on Linux applies them, since MCP offers no off profile"

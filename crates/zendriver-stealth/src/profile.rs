@@ -595,30 +595,38 @@ impl StealthProfile {
         flags
     }
 
-    /// Blink settings that a headless launch needs for its pages to see this
-    /// profile's pointing device, as `name=value` items of Chrome's
-    /// `--blink-settings` switch.
+    /// Blink settings that make pages see this profile's pointing device, as
+    /// `name=value` items of Chrome's `--blink-settings` switch.
     ///
-    /// Headless Chrome has no input devices, so without these settings its
-    /// pages match `(pointer: none)`, `(hover: none)`, `(any-pointer: none)`
-    /// and `(any-hover: none)`, which no desktop does. No CDP command changes
-    /// these media features: `Emulation.setEmulatedMedia` ignores them.
+    /// They are for a Chrome whose pages would otherwise see no pointing
+    /// device. Headless Chrome on Linux has no input devices, so its pages
+    /// match `(pointer: none)`, `(hover: none)`, `(any-pointer: none)` and
+    /// `(any-hover: none)`: rare on a desktop, and flagged by bot detectors.
+    /// (On macOS, Chrome always reports a mouse; on Windows, it reports the
+    /// host's real devices, even when headless.) No CDP command can make
+    /// these media features report a mouse: `Emulation.setEmulatedMedia`
+    /// ignores them, and `Emulation.setTouchEmulationEnabled` gives them a
+    /// touchscreen's values.
     ///
     /// Every [`Platform`] is a desktop operating system, so
     /// [`native`](Self::native) and [`spoofed`](Self::spoofed) return the
     /// settings of a mouse: a fine pointer that can hover. [`off`](Self::off)
-    /// returns none, so its launch stays stock. A persona of a touch device
-    /// would need other settings (a coarse pointer that can't hover), and a
-    /// matching `navigator.maxTouchPoints`.
+    /// returns none, so that pages see Chrome's own values. A persona of a
+    /// touch device would need other settings (a coarse pointer that can't
+    /// hover), and a matching `navigator.maxTouchPoints`.
+    ///
+    /// Sending `Emulation.setTouchEmulationEnabled` with `enabled: false`
+    /// (even if touch emulation was never on) puts back Chrome's own values,
+    /// until the page navigates again.
     ///
     /// ```
     /// use zendriver_stealth::StealthProfile;
-    /// let settings = StealthProfile::native().headless_blink_settings();
+    /// let settings = StealthProfile::native().pointer_blink_settings();
     /// assert!(settings.contains(&"primaryPointerType=4"));
-    /// assert!(StealthProfile::off().headless_blink_settings().is_empty());
+    /// assert!(StealthProfile::off().pointer_blink_settings().is_empty());
     /// ```
     #[must_use]
-    pub fn headless_blink_settings(&self) -> &'static [&'static str] {
+    pub fn pointer_blink_settings(&self) -> &'static [&'static str] {
         match self.kind {
             ProfileKind::Off => &[],
             ProfileKind::Native | ProfileKind::Spoofed => MOUSE_BLINK_SETTINGS,

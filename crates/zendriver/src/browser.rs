@@ -860,11 +860,12 @@ impl BrowserBuilder {
 
     /// Toggle headless mode (default: `true`).
     ///
-    /// When `on`, Chrome runs with `--headless=new --disable-gpu`. Unless the
-    /// stealth profile is [`StealthProfile::off`], Chrome also gets the
-    /// Blink settings of a mouse (see
-    /// [`StealthProfile::headless_blink_settings`]), because headless Chrome
-    /// has no input devices and its pages would otherwise see no pointer.
+    /// When `on`, Chrome runs with `--headless=new`, and with `--disable-gpu`
+    /// unless the GPU backend is [`GpuBackend::Native`]. On Linux, where
+    /// headless Chrome has no input devices and its pages would see no
+    /// pointer, Chrome also gets the Blink settings of a mouse (see
+    /// [`StealthProfile::pointer_blink_settings`]), with the `native` or
+    /// `spoofed` stealth profile (`native` is the default).
     /// Pass `false` to launch a visible window (useful for local debugging).
     ///
     /// # Examples
@@ -1326,8 +1327,8 @@ impl BrowserBuilder {
     ///
     /// Flags accumulate; later calls do NOT replace earlier ones.
     ///
-    /// For a headless launch, zendriver also gives Chrome Blink settings (see
-    /// [`headless`](Self::headless)). Chrome reads only the last of several
+    /// For a headless launch on Linux, zendriver also gives Chrome Blink
+    /// settings (see [`headless`](Self::headless)). Chrome reads only the last of several
     /// `--blink-settings` switches, so zendriver puts its settings in front
     /// of the settings of the last one that you pass (here, or with a stealth
     /// profile's `arg`, whose flags come after these). Where that switch and
@@ -1937,10 +1938,12 @@ impl BrowserBuilder {
     /// The argv that `launch` passes to Chrome (before its CI-only
     /// additions): [`build_flags`](Self::build_flags), then `profile_flags`
     /// (the stealth profile's own flags, empty without a profile), then the
-    /// Blink settings of a mouse for a headless launch.
+    /// Blink settings of a mouse for a headless launch on Linux.
     ///
-    /// Headless Chrome has no input devices, so its pages would see no
-    /// pointer; a headed launch reports the host's real devices.
+    /// Headless Chrome on Linux has no input devices, so its pages would see
+    /// no pointer. Elsewhere, and in a headed launch, Chrome gives pages a
+    /// pointer of its own: on macOS always a mouse, otherwise the host's
+    /// real devices.
     pub(crate) fn launch_flags(
         &self,
         user_data_dir: &Path,
@@ -1952,9 +1955,9 @@ impl BrowserBuilder {
             self.effective_gpu_backend(),
         );
         let mut pointer: &[&str] = &[];
-        if self.headless.unwrap_or(true) {
+        if self.headless.unwrap_or(true) && cfg!(target_os = "linux") {
             if let Some(profile) = &self.stealth {
-                pointer = profile.headless_blink_settings();
+                pointer = profile.pointer_blink_settings();
             }
         }
         add_blink_settings(flags, pointer)
@@ -6198,10 +6201,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn launch_flags_give_headless_pages_a_mouse_unless_stealth_is_off() {
         let mouse = format!(
             "--blink-settings={}",
-            StealthProfile::native().headless_blink_settings().join(",")
+            StealthProfile::native().pointer_blink_settings().join(",")
         );
         for profile in [StealthProfile::native(), StealthProfile::spoofed()] {
             let flags = launch_flags_of(&Browser::builder().stealth(profile));
@@ -6217,18 +6221,27 @@ mod tests {
     /// `--blink-settings`, the one Chrome reads: here the stealth profile's,
     /// whose flags come after the builder's.
     #[test]
+    #[cfg(target_os = "linux")]
     fn launch_flags_put_the_mouse_in_front_of_the_callers_last_switch() {
         let profile = StealthProfile::native().arg("--blink-settings=from=profile");
         let builder = Browser::builder()
             .stealth(profile.clone())
             .arg("--blink-settings=from=builder");
         let flags = launch_flags_of(&builder);
-        let mouse = profile.headless_blink_settings().join(",");
+        let mouse = profile.pointer_blink_settings().join(",");
         let last = format!("--blink-settings={mouse},from=profile");
         assert_eq!(
             blink_settings_switches(&flags),
             ["--blink-settings=from=builder", &last]
         );
+    }
+
+    /// Off Linux, Chrome gives headless pages a pointer of its own.
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn launch_flags_add_no_blink_settings_off_linux() {
+        let flags = launch_flags_of(&Browser::builder());
+        assert!(blink_settings_switches(&flags).is_empty(), "{flags:?}");
     }
 
     /// `add_blink_settings` of `flags` and the settings `a=1,b=2`.

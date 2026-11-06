@@ -58,18 +58,22 @@ is done with launch flags and CDP commands, not page JS:
   `--disable-features=IsolateOrigins,site-per-process` (toggleable),
   and a curated list of flags that turn off the "this browser is
   controlled by automation" infobar plus various leaks.
-- **A mouse for headless pages** — headless Chrome has no input
-  devices, so its pages match `(pointer: none)`, `(hover: none)`,
-  `(any-pointer: none)` and `(any-hover: none)`, which no desktop does.
-  No CDP command changes these media features, so under headless the
-  profile passes `--blink-settings` to make every frame see a mouse:
-  `fine` and `hover`, in both `matchMedia` and CSS `@media` rules.
-  `navigator.maxTouchPoints` stays 0. Chrome reads only the last of
-  several `--blink-settings` switches, so if you pass your own with
-  `BrowserBuilder::arg`, zendriver puts its settings in front of those
-  of your last switch, and your values win where both name a setting.
-  A headed launch gets none of this, since Chrome then reports the
-  host's real devices.
+- **A mouse for headless pages on Linux** — headless Chrome on Linux
+  has no input devices, so its pages match `(pointer: none)`,
+  `(hover: none)`, `(any-pointer: none)` and `(any-hover: none)`: rare
+  on a desktop, and flagged by bot detectors. No CDP command can make
+  these media features report a mouse, so when zendriver launches a
+  headless Chrome on Linux, it passes `--blink-settings` to make every
+  frame see one: `fine` and `hover`, in both `matchMedia` and CSS
+  `@media` rules. `navigator.maxTouchPoints` stays 0. Chrome reads only
+  the last of several `--blink-settings` switches, so if you pass your
+  own with `BrowserBuilder::arg`, zendriver puts its settings in front
+  of those of your last switch, and your values win where both name a
+  setting. zendriver adds no such settings to a headed launch, or on
+  macOS (where Chrome always reports a mouse) or Windows (where Chrome
+  reports the host's real devices, even when headless). Sending
+  `Emulation.setTouchEmulationEnabled` with `enabled: false` yourself
+  puts the page back at no pointer, until it navigates again.
 - **UA scrub** — strips the `HeadlessChrome` segment from the User-Agent
   string and the Sec-CH-UA brand list.
 - **Emulation overrides** —

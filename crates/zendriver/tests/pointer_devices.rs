@@ -2,11 +2,12 @@
 //! CSS media features `pointer`, `hover`, `any-pointer` and `any-hover`, and
 //! through `navigator.maxTouchPoints`.
 //!
-//! Headless Chrome has no input devices; the stealth profiles give its pages
-//! a mouse with `--blink-settings` (see
-//! `StealthProfile::headless_blink_settings`).
+//! Linux only: headless Chrome on Linux has no input devices, and the
+//! `native` and `spoofed` stealth profiles give its pages a mouse with
+//! `--blink-settings` (see `StealthProfile::pointer_blink_settings`).
+//! Elsewhere, Chrome gives pages a pointer of its own.
 
-#![cfg(feature = "integration-tests")]
+#![cfg(all(feature = "integration-tests", target_os = "linux"))]
 
 use serde_json::{Value, json};
 use zendriver::Browser;
@@ -45,9 +46,10 @@ const PROBE_JS: &str = r#"(() => {
   return {media, css, maxTouchPoints: navigator.maxTouchPoints, ontouchstart: 'ontouchstart' in window};
 })()"#;
 
-/// What [`PROBE_JS`] evaluates to when the page's only pointing device is
-/// `pointer` (`"fine"`, `"coarse"` or `"none"`), which can hover if `hover`
-/// is `"hover"`, and the page sees no touchscreen.
+/// What [`PROBE_JS`] evaluates to when the page sees one kind of pointer,
+/// `pointer` (`"fine"` or `"coarse"`), or no pointer (`"none"`); when the
+/// pointer can hover (`hover` is `"hover"`) or not (`"none"`); and when the
+/// page sees no touchscreen.
 fn seen(pointer: &str, hover: &str) -> Value {
     let features = json!({
         "pointer": pointer,
@@ -71,11 +73,12 @@ async fn server_with_probe_page() -> FixtureServer {
 /// JS that embeds an iframe of `url` and resolves to the first message that
 /// the page receives.
 fn embed_js(url: &str) -> String {
+    let url = serde_json::to_string(url).expect("a string serializes");
     format!(
         "new Promise(resolve => {{
            addEventListener('message', e => resolve(e.data), {{once: true}});
            const frame = document.createElement('iframe');
-           frame.src = {url:?};
+           frame.src = {url};
            document.body.append(frame);
          }})"
     )
@@ -119,9 +122,9 @@ async fn headless_pages_and_cross_site_iframes_see_a_mouse() {
     );
 }
 
-/// `StealthProfile::off()` launches stock headless Chrome, whose pages see
-/// no pointing device. This also shows that the probe can tell the
-/// difference.
+/// With `StealthProfile::off()`, zendriver gives Chrome no Blink settings,
+/// so the pages of headless Chrome see no pointing device. This also shows
+/// that the probe can tell the difference.
 #[tokio::test]
 async fn headless_pages_see_no_pointer_with_stealth_off() {
     let server = FixtureServer::start().await;
