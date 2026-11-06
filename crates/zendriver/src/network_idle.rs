@@ -53,8 +53,9 @@ use zendriver_transport::SessionHandle;
 
 /// Controls how [`crate::Tab::wait_for_idle_opts`] reacts when it notices —
 /// during its own wait window — that the underlying CDP event stream lost
-/// delivery continuity: a lagging broadcast subscriber, a
-/// [`zendriver_transport::Connection::reconnect`], or the WebSocket dying.
+/// delivery continuity or ended: a lagging broadcast subscriber, a
+/// [`zendriver_transport::Connection::reconnect`], the WebSocket dying, or
+/// the connection being shut down.
 ///
 /// This is independent of the in-flight tracker's own subscription (which
 /// always uses [`zendriver_transport::Connection::subscribe_raw`] and

@@ -170,16 +170,16 @@ impl Future for FileChooserExpectation {
         match Pin::new(&mut self.rx).poll(cx) {
             Poll::Ready(Ok(Ok(matched))) => return Poll::Ready(Ok(matched)),
             // Subscriber observed a delivery-loss boundary (disconnect,
-            // reconnect, lag, or a same-method decode failure), or the
+            // shutdown, reconnect, lag, or a same-method decode failure), or the
             // matched chooser had no backendNodeId to answer — see
             // `crate::expect::watch` / `handle_event` below.
             Poll::Ready(Ok(Err(e))) => return Poll::Ready(Err(e)),
             Poll::Ready(Err(_)) => {
-                // Sender dropped without sending anything — the accounted
-                // stream itself ended (e.g. a clean `Connection::shutdown`,
-                // which never emits a `Disconnected` boundary) with no
-                // boundary and no match observed. Surface as timeout: same
-                // observable shape as a genuine no-show.
+                // Sender dropped without sending anything — the watching
+                // task ended with no boundary and no match observed. The
+                // accounted stream ends a generation with a `Disconnected`
+                // or `Shutdown` boundary, so this arm is defensive. Surface
+                // as timeout: same observable shape as a genuine no-show.
                 return Poll::Ready(Err(ZendriverError::Timeout(self.timeout)));
             }
             Poll::Pending => {}
@@ -320,9 +320,10 @@ pub(crate) async fn register(
                     // (the intercept was already disabled by handle_event).
                     let _ = tx.send(outcome);
                 }
-                // else: stream ended cleanly with no event (e.g. a clean
-                // `Connection::shutdown`) — tx drops, surfacing as Timeout
-                // at the Future::poll layer, matching dialog/download.
+                // else: stream ended with no event (defensive: the
+                // accounted stream ends a generation with a boundary, which
+                // arrives as an item) — tx drops, surfacing as Timeout at
+                // the Future::poll layer, matching dialog/download.
             }
         }
     });

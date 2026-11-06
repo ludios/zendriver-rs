@@ -270,7 +270,8 @@ slow origin).
 
 `wait_for_idle` is best-effort by default: if the underlying CDP event
 stream loses delivery continuity mid-wait (a lagging subscriber, a
-[`Browser::reconnect`], or the WebSocket dying), it silently tolerates
+[`Browser::reconnect`], the WebSocket dying, or the connection being shut
+down), it silently tolerates
 the gap and still resolves on what it *did* observe —
 `IdleOptions::loss_policy: IdleLossPolicy::Lenient`, matching every
 prior release's behavior. Opt into `IdleLossPolicy::Strict` to fail

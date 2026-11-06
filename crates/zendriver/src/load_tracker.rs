@@ -321,7 +321,8 @@ async fn follow(
 /// # Errors
 ///
 /// [`ZendriverError::Timeout`] if none arrives within `within`;
-/// [`ZendriverError::Navigation`] if the socket dies first.
+/// [`ZendriverError::Navigation`] if the connection ends first (the socket
+/// dies, or the connection is shut down).
 pub(crate) async fn next_stop(
     session: &SessionHandle,
     frame_id: &str,
@@ -346,7 +347,8 @@ pub(crate) async fn next_stop(
 }
 
 /// Follows whether one frame is loading, in a task that runs until the
-/// tracker is dropped or the socket dies.
+/// tracker is dropped or the connection ends (the socket dies, or the
+/// connection is shut down).
 #[derive(Debug)]
 pub(crate) struct LoadTracker {
     loading: watch::Receiver<bool>,
@@ -410,7 +412,8 @@ impl LoadTracker {
     /// # Errors
     ///
     /// [`ZendriverError::Timeout`] if it is still loading after `within`;
-    /// [`ZendriverError::Navigation`] if the socket dies first.
+    /// [`ZendriverError::Navigation`] if the connection ends first (the
+    /// socket dies, or the connection is shut down).
     pub(crate) async fn wait(mut self, within: Duration) -> Result<()> {
         match tokio::time::timeout(within, self.loading.wait_for(|loading| !loading)).await {
             Err(_) => Err(ZendriverError::Timeout(within)),

@@ -218,17 +218,17 @@ impl Future for ResponseExpectation {
         match Pin::new(&mut self.rx).poll(cx) {
             Poll::Ready(Ok(Ok(resp))) => return Poll::Ready(Ok(resp)),
             // Subscriber observed a delivery-loss boundary (disconnect,
-            // reconnect, lag, or a same-method decode failure) before a
+            // shutdown, reconnect, lag, or a same-method decode failure) before a
             // matching response arrived — see `crate::expect::watch`. We
             // can no longer prove the response didn't arrive just before
             // the boundary, so reporting a plain timeout would be a lie.
             Poll::Ready(Ok(Err(e))) => return Poll::Ready(Err(e)),
             Poll::Ready(Err(_)) => {
-                // Sender dropped without sending anything — the accounted
-                // stream itself ended (e.g. a clean `Connection::shutdown`,
-                // which never emits a `Disconnected` boundary) with no
-                // boundary and no match observed. Surface as timeout: same
-                // observable shape as a genuine no-show.
+                // Sender dropped without sending anything — the watching
+                // task ended with no boundary and no match observed. The
+                // accounted stream ends a generation with a `Disconnected`
+                // or `Shutdown` boundary, so this arm is defensive. Surface
+                // as timeout: same observable shape as a genuine no-show.
                 return Poll::Ready(Err(ZendriverError::Timeout(self.timeout)));
             }
             Poll::Pending => {}
@@ -453,8 +453,8 @@ mod tests {
         conn.shutdown();
     }
 
-    /// The same when the connection is shut down on purpose (as
-    /// `Tab::close` does) instead of dying.
+    /// The same when the connection is shut down instead of dying (as
+    /// `Tab::close` does to a tab that has its own socket).
     #[tokio::test]
     async fn expect_response_returns_event_stream_incomplete_on_shutdown() {
         let (_mock, conn) = MockConnection::pair();

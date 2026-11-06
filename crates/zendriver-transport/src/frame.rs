@@ -84,8 +84,8 @@ pub struct RawEvent {
 /// to signal a reconnect or a dead socket. That is fine for the lenient
 /// default, but a capture/replay/monitor consumer built on top of it is
 /// silently misled about what it actually saw. `AccountedRawEvent` is the
-/// opt-in, honest alternative: every gap, reconnect, and disconnect is
-/// reported explicitly instead of vanishing.
+/// opt-in, honest alternative: every gap, reconnect, disconnect, and
+/// shutdown is reported explicitly instead of vanishing.
 ///
 /// Every variant carries a `generation` — the
 /// [`Connection::connection_generation`](crate::connection::Connection::connection_generation)
@@ -106,8 +106,8 @@ pub enum AccountedRawEvent {
         /// rather than resetting. Do NOT compare `sequence` across a
         /// [`AccountedRawEvent::Reconnected`]: the counter restarts at 1 for
         /// the new generation, and a `Lagged`'s `missed` may also count the
-        /// non-sequenced `Reconnected`/`Disconnected` markers, so only
-        /// same-`generation` values are comparable.
+        /// non-sequenced `Reconnected`/`Disconnected`/`Shutdown` markers, so
+        /// only same-`generation` values are comparable.
         sequence: u64,
         /// The underlying raw CDP event.
         event: RawEvent,

@@ -114,17 +114,17 @@ impl Future for RequestExpectation {
         match Pin::new(&mut self.rx).poll(cx) {
             Poll::Ready(Ok(Ok(req))) => return Poll::Ready(Ok(req)),
             // Subscriber observed a delivery-loss boundary (disconnect,
-            // reconnect, lag, or a same-method decode failure) before a
+            // shutdown, reconnect, lag, or a same-method decode failure) before a
             // matching request arrived — see `crate::expect::watch`. We can
             // no longer prove the request didn't fire just before the
             // boundary, so reporting a plain timeout would be a lie.
             Poll::Ready(Ok(Err(e))) => return Poll::Ready(Err(e)),
             Poll::Ready(Err(_)) => {
-                // Sender dropped without sending anything — the accounted
-                // stream itself ended (e.g. a clean `Connection::shutdown`,
-                // which never emits a `Disconnected` boundary) with no
-                // boundary and no match observed. Surface as timeout: same
-                // observable shape as a genuine no-show.
+                // Sender dropped without sending anything — the watching
+                // task ended with no boundary and no match observed. The
+                // accounted stream ends a generation with a `Disconnected`
+                // or `Shutdown` boundary, so this arm is defensive. Surface
+                // as timeout: same observable shape as a genuine no-show.
                 return Poll::Ready(Err(ZendriverError::Timeout(self.timeout)));
             }
             Poll::Pending => {}

@@ -427,9 +427,9 @@ pub struct IdleOptions {
     /// the historical behavior: a single never-completing request keeps the
     /// tab non-idle until `timeout`.
     pub max_inflight_age: Option<Duration>,
-    /// How the wait reacts to a CDP event-stream delivery gap (a lagging
-    /// broadcast subscriber, a reconnect, or the WebSocket dying) observed
-    /// during the wait. Default: [`IdleLossPolicy::Lenient`] — a gap is
+    /// How the wait reacts to a CDP event-stream delivery gap or end (a
+    /// lagging broadcast subscriber, a reconnect, the WebSocket dying, or
+    /// the connection being shut down) observed during the wait. Default: [`IdleLossPolicy::Lenient`] — a gap is
     /// tolerated and the call still resolves best-effort, matching every
     /// prior release's behavior. Opt into [`IdleLossPolicy::Strict`] to fail
     /// loudly with [`ZendriverError::EventStreamIncomplete`] instead of
@@ -2012,8 +2012,8 @@ impl Tab {
     /// Returns [`ZendriverError::Timeout`] (carrying [`IdleOptions::timeout`])
     /// once the outer deadline elapses. Returns
     /// [`ZendriverError::EventStreamIncomplete`] under
-    /// [`IdleLossPolicy::Strict`] if a delivery gap is observed before the
-    /// network settles; [`IdleLossPolicy::Lenient`] (the default) never
+    /// [`IdleLossPolicy::Strict`] if a delivery gap, or the event stream's
+    /// end, is observed before the network settles; [`IdleLossPolicy::Lenient`] (the default) never
     /// returns this variant.
     ///
     /// # Examples

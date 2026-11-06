@@ -20,8 +20,8 @@
 //! - [`AccountedRawEvent`] — opt-in loss-accounted alternative to
 //!   `RawEvent`, delivered by
 //!   [`Connection::subscribe_raw_accounted`](connection::Connection::subscribe_raw_accounted);
-//!   reports lag, reconnects, and disconnects explicitly instead of silently
-//!   dropping frames.
+//!   reports lag, reconnects, disconnects, and shutdowns explicitly instead
+//!   of silently dropping frames.
 //! - [`TargetObserver`] — observer trait fired on `Target.attachedToTarget`
 //!   before the debugger is released; used by `zendriver-stealth` to install
 //!   patches on new pages.
