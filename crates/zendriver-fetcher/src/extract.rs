@@ -174,7 +174,7 @@ fn extract_blocking(
         // Symlinks: validate the target, then create. See the trust-boundary
         // note at the top of this module for why this is not a blanket refusal.
         #[cfg(unix)]
-        if is_symlink(&entry) {
+        if is_symlink(entry.unix_mode()) {
             let mut target = String::new();
             io::Read::read_to_string(&mut entry, &mut target)?;
 
@@ -211,7 +211,7 @@ fn extract_blocking(
         }
         // Windows: no privileges to create one, and no Windows archive has any.
         #[cfg(not(unix))]
-        if is_symlink(&entry) {
+        if is_symlink(entry.unix_mode()) {
             continue;
         }
 
@@ -271,13 +271,12 @@ fn extract_blocking(
     Ok(())
 }
 
-/// True when a zip entry's mode marks it a symlink.
-fn is_symlink(entry: &zip::read::ZipFile<'_, impl io::Read>) -> bool {
+/// True when `unix_mode`, a zip entry's Unix mode (`None` if the entry has
+/// none), marks the entry a symlink.
+fn is_symlink(unix_mode: Option<u32>) -> bool {
     const S_IFMT: u32 = 0o170_000;
     const S_IFLNK: u32 = 0o120_000;
-    entry
-        .unix_mode()
-        .is_some_and(|mode| mode & S_IFMT == S_IFLNK)
+    unix_mode.is_some_and(|mode| mode & S_IFMT == S_IFLNK)
 }
 
 /// Where does a symlink at `link_path` pointing at `target` actually land?
