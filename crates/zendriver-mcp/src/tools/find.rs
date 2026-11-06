@@ -186,8 +186,7 @@ macro_rules! apply_selector_to {
         } else if let Some(t) = sel.text_exact.as_deref() {
             Ok(builder.text_exact(t))
         } else if let Some(pat) = sel.text_regex.as_deref() {
-            let re = compile_regex(pat)?;
-            Ok(builder.text_regex(re))
+            Ok(builder.text_regex_with_flags(pat, ""))
         } else if let Some(role_str) = sel.role.as_deref() {
             let role = parse_role(role_str)?;
             Ok(match sel.role_name.as_deref() {
@@ -235,11 +234,6 @@ fn apply_modifiers_all<'a>(mut builder: FindAllBuilder<'a>, sel: &Selector) -> F
     builder = builder.visible_only(sel.visible_only);
     builder = builder.timeout(Duration::from_millis(sel.timeout_ms));
     builder
-}
-
-fn compile_regex(pat: &str) -> Result<regex::Regex, ErrorData> {
-    regex::Regex::new(pat)
-        .map_err(|e| ErrorData::invalid_params(format!("Invalid `text_regex` pattern: {e}"), None))
 }
 
 /// Map the wire `role` string onto a [`zendriver::AriaRole`].
@@ -544,25 +538,6 @@ mod tests {
         assert!(err.message.contains("browser_open"));
         let data = err.data.as_ref().expect("data populated");
         assert_eq!(data["suggested_next"], "browser_open");
-    }
-
-    #[test]
-    fn compile_regex_rejects_malformed_pattern() {
-        // `[unclosed` is a parse error in `regex`. The bridge surfaces it
-        // as `invalid_params` so an agent can fix the pattern without
-        // touching the live browser.
-        let err = compile_regex("[unclosed").expect_err("malformed regex must error");
-        assert!(
-            err.message.contains("Invalid `text_regex`"),
-            "msg: {}",
-            err.message
-        );
-    }
-
-    #[test]
-    fn compile_regex_accepts_valid_pattern() {
-        let re = compile_regex(r"^hello\s+world$").expect("valid regex");
-        assert!(re.is_match("hello   world"));
     }
 
     #[test]

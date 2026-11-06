@@ -77,10 +77,10 @@ pub struct Selector {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_exact: Option<String>,
     /// Regex matched against each element's text, run as a JavaScript
-    /// `RegExp` (in single-selector mode, it must also parse as a Rust
-    /// regex). For case-insensitivity, wrap the whole pattern in a `(?i:…)`
-    /// group (Chrome 125 or newer); `text_case_insensitive` doesn't apply,
-    /// and JS rejects a bare `(?i)` prefix.
+    /// `RegExp`; a pattern that JavaScript can't parse fails the call with
+    /// its `SyntaxError`. For case-insensitivity, wrap the whole pattern in
+    /// a `(?i:…)` group (Chrome 125 or newer); `text_case_insensitive`
+    /// doesn't apply, and JS rejects a bare `(?i)` prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_regex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

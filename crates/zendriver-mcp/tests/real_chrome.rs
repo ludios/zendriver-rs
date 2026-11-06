@@ -96,6 +96,42 @@ async fn browse_and_close_over_http() {
     browse_and_close(Transport::Http).await;
 }
 
+/// A single-selector `text_regex` is a JavaScript `RegExp`: a lookbehind,
+/// which Rust's `regex` crate lacks, matches; and a pattern that JavaScript
+/// can't parse fails the call at once with its `SyntaxError`, instead of
+/// waiting out the timeout and reporting `found: false`.
+#[tokio::test]
+async fn text_regex_is_javascript_syntax() {
+    let fixtures = FixtureServer::start().await;
+    let mut server = McpServer::start(Transport::Stdio).await;
+    let url = fixtures.url("127.0.0.1", "/plain?title=Hello");
+    open_at(&mut server, json!({}), &url).await;
+
+    let found = server
+        .call("browser_find", json!({ "text_regex": "(?<=He)llo" }))
+        .await;
+    assert_eq!(found["found"], true, "browser_find returned {found}");
+
+    let started = Instant::now();
+    let err = server
+        .try_call(
+            "browser_find",
+            json!({ "text_regex": "(?i)hello", "timeout_ms": 30_000 }),
+        )
+        .await
+        .expect_err("a pattern that JavaScript rejects must fail the call");
+    let elapsed = started.elapsed();
+    assert!(err.contains("Invalid group"), "got {err}");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "failed after {elapsed:?}, so it polled instead of failing at once"
+    );
+
+    let chrome = server.chrome();
+    server.call("browser_close", json!({})).await;
+    assert_chrome_exits(&chrome, "browser_close").await;
+}
+
 /// How a test stops the server.
 #[derive(Clone, Copy, Debug)]
 enum Stop {
