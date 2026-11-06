@@ -1,4 +1,5 @@
-//! Does the geometry patch follow the CALLER's resolution, or assert its own?
+//! Does the native profile's screen follow the CALLER's resolution, or
+//! assert its own?
 //!
 //! `cargo run -p zendriver --example screen_geometry -- 1366 768`
 use zendriver::{Browser, Persona, stealth::StealthProfile};
