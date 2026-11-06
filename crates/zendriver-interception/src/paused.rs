@@ -60,8 +60,8 @@ pub struct PausedRequest {
     pub response: Option<ResponseInfo>,
     session: SessionHandle,
     /// Flipped to `true` by every terminal action (`continue_`, `abort`,
-    /// `respond`, `modify_and_continue`, `continue_response`) once Chrome
-    /// has accepted its CDP call.
+    /// `respond`, `modify_and_continue`, `continue_response`) as it sends
+    /// its CDP call, and back to `false` if Chrome refuses it.
     /// [`Drop`] inspects this to decide whether to fire a fallback
     /// `Fetch.continueRequest` — set means "already released, don't
     /// double-fire"; clear means "not released, release Chrome".
@@ -219,17 +219,22 @@ impl PausedRequest {
         self.release("Fetch.continueResponse", params).await
     }
 
-    /// Send `method` with `params`, which release this request. It counts
-    /// as released (so [`Drop`] sends nothing) only once Chrome has accepted
-    /// the call; if Chrome refuses it, the drop at the end of this call
-    /// continues the request.
+    /// Send `method` with `params`, which release this request.
+    ///
+    /// It counts as released (so [`Drop`] sends nothing) while the call is
+    /// in flight: a caller that stops waiting must not also continue it,
+    /// which could release the request's next pause (its Response stage
+    /// has the same id). If Chrome refuses the call, it doesn't count, and
+    /// the drop at the end of this call continues the request.
     async fn release(
         mut self,
         method: &'static str,
         params: Value,
     ) -> Result<(), InterceptionError> {
-        self.session.call(method, params).await?;
         self.released = true;
+        let sent = self.session.call(method, params).await;
+        self.released = sent.is_ok();
+        sent?;
         Ok(())
     }
 
@@ -283,10 +288,8 @@ impl Drop for PausedRequest {
         let session = self.session.clone();
         let request_id = std::mem::take(&mut self.request_id);
         tokio::spawn(async move {
-            if let Err(e) = session
-                .call("Fetch.continueRequest", json!({ "requestId": request_id }))
-                .await
-            {
+            let params = fetch::continue_params(&request_id, RequestOverrides::default());
+            if let Err(e) = session.call("Fetch.continueRequest", params).await {
                 tracing::debug!(
                     error = %e,
                     request_id = %request_id,
@@ -378,6 +381,24 @@ mod tests {
         let id = mock.expect_cmd("Fetch.continueRequest").await;
         assert_eq!(mock.last_sent()["params"]["requestId"], "REQ-REFUSED");
         mock.reply(id, serde_json::json!({})).await;
+        conn.shutdown();
+    }
+
+    /// An action whose caller stops waiting while it is in flight leaves
+    /// the release to it: the drop sends no `continueRequest` of its own.
+    #[tokio::test]
+    async fn an_action_cancelled_in_flight_is_not_followed_by_a_continue() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let req = PausedRequest::new("REQ-CANCELLED", make_request_info(), None, sess);
+        let abort = tokio::spawn(req.abort(AbortReason::Failed));
+        mock.expect_cmd("Fetch.failRequest").await;
+        abort.abort();
+        assert!(abort.await.unwrap_err().is_cancelled());
+        let next = mock
+            .recv_cmd_timeout(std::time::Duration::from_millis(200))
+            .await;
+        assert_eq!(next, None, "a command followed the cancelled action");
         conn.shutdown();
     }
 
