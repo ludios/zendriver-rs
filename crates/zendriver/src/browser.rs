@@ -4715,14 +4715,15 @@ impl Browser {
     /// launch, by default), and `outerHeight` shrinks to `innerHeight`.
     /// Chrome 157 does this both headless and headed, even with no stealth,
     /// and the page sees its whole window again once its tab is back in
-    /// front. (On Windows 11, Chrome 157 doesn't: a background tab's page
-    /// keeps its whole window. macOS wasn't measured.) Chrome without
-    /// stealth also hides a background tab. But under
-    /// [`StealthProfile::native`] (the default), focus emulation
+    /// front. (On Windows 11, Chrome 157 under `native` doesn't: a
+    /// background tab's page keeps its whole window there. macOS wasn't
+    /// measured.) Chrome without stealth also hides a background tab. But
+    /// under [`StealthProfile::native`] (the default), focus emulation
     /// (`Emulation.setFocusEmulationEnabled`) keeps every tab visible and
-    /// focused, so on Linux a background tab's page is visible and focused,
-    /// with a window that Chrome without stealth gives only to a hidden
-    /// page. So to work in several pages at the same time, open each with
+    /// focused, on every platform. On Linux, a background tab's page is
+    /// therefore visible and focused while it has a window that Chrome
+    /// without stealth gives only to a hidden page. So on Linux, to work in
+    /// several pages at the same time, open each with
     /// [`Browser::new_window`], which puts it in front of a window of its
     /// own.
     ///

@@ -123,23 +123,27 @@ async fn a_window_keeps_its_geometry_while_others_open() {
 
 /// On Linux, Chrome gives a background tab's page its viewport as its
 /// window: the window that the page sees starts where the viewport starts,
-/// and is as tall as the viewport. Chrome without stealth does this too,
-/// headless or headed. `Browser::new_tab` says so, and this test fails if
-/// Chrome stops doing it. Once the tab is back in front, its page sees its
-/// whole window again. (On Windows 11, a background tab's page keeps its
-/// whole window.)
+/// and is as tall as the viewport. Once the tab is back in front, its page
+/// sees its whole window again. `Browser::new_tab` says so, and this test,
+/// of headless Chrome under `native`, fails if Chrome stops doing it.
+/// (Chrome 157 without stealth, headless or headed, did the same when
+/// measured by hand. On Windows 11, Chrome 157 under `native` doesn't: a
+/// background tab's page keeps its whole window there. macOS wasn't
+/// measured.)
 #[tokio::test]
 #[cfg(target_os = "linux")]
 async fn a_background_tab_sees_its_viewport_as_its_window() {
     use std::time::Duration;
     use zendriver_testkit::assert_eventually;
 
-    /// Wait until the page in `tab` sees `window` (as `[screenX, screenY,
-    /// outerWidth, outerHeight]`); panic, naming `what`, if it doesn't
-    /// within 5 seconds.
-    async fn assert_window_becomes(tab: &Tab, window: &Value, what: &str) {
+    /// Wait until the page in `tab` sees `seen` (its window and viewport,
+    /// as `[screenX, screenY, outerWidth, outerHeight, innerWidth,
+    /// innerHeight]`); panic, naming `what`, if it doesn't within 5
+    /// seconds.
+    async fn assert_page_sees(tab: &Tab, seen: &Value, what: &str) {
+        const JS: &str = "[screenX, screenY, outerWidth, outerHeight, innerWidth, innerHeight]";
         assert_eventually(Duration::from_secs(5), what, || async move {
-            eval(tab, "[screenX, screenY, outerWidth, outerHeight]").await == *window
+            eval(tab, JS).await == *seen
         })
         .await;
     }
@@ -151,16 +155,23 @@ async fn a_background_tab_sees_its_viewport_as_its_window() {
     assert_fills_work_area(&in_front, [1920, 1080], [1920, 1032], 1.0);
     let viewport_height = in_front["viewport"][1].as_u64().expect("a viewport height");
     let other = browser.new_tab().await.expect("new tab");
-    assert_window_becomes(
+    assert_page_sees(
         &tab,
-        &json!([0, 1032 - viewport_height, 1920, viewport_height]),
+        &json!([
+            0,
+            1032 - viewport_height,
+            1920,
+            viewport_height,
+            1920,
+            viewport_height
+        ]),
         "the background tab's page sees its viewport as its window",
     )
     .await;
     other.close().await.expect("close the new tab");
-    assert_window_becomes(
+    assert_page_sees(
         &tab,
-        &json!([0, 0, 1920, 1032]),
+        &json!([0, 0, 1920, 1032, 1920, viewport_height]),
         "the page sees its whole window once its tab is back in front",
     )
     .await;

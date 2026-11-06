@@ -152,9 +152,9 @@ impl StealthProfile {
     /// viewport that agree, with no `Emulation.setDeviceMetricsOverride` and
     /// nothing patched in the page, to the page in front of each window.
     /// (On Linux, Chrome gives a background tab's page its viewport as its
-    /// window.) The viewport is the window minus the
-    /// browser's toolbars, which headless Chrome emulates: 1920x945 by
-    /// default (1904x937 on Windows, where the window also has a border).
+    /// window.) The front page's viewport is the window minus the browser's
+    /// toolbars, which headless Chrome emulates: 1920x945 by default
+    /// (1904x937 on Windows, where the window also has a border).
     /// A `--screen-info` or `--window-size` switch that the caller passes
     /// wins over these. A headed Chrome reports the real display and window.
     /// (Headless Chrome takes `--screen-info` from version 135 on Linux, 136
