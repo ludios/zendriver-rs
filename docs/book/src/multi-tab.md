@@ -33,9 +33,9 @@ fully-initialised [`Tab`]:
 2. Stealth bootstrap re-applied via the auto-attach observer chain.
 3. Isolated-world ready for `evaluate()` calls.
 
-Internally, `new_tab*` polls the tab registry every 50 ms for up to 5 s
-waiting for the new target to register — typically returns within a few
-milliseconds. If the auto-attach observer crashes or is misconfigured,
+Internally, `new_tab*` waits up to 5 s for the new target to appear in
+the tab registry, and returns as soon as it does — typically within a
+few milliseconds. If the auto-attach observer crashes or is misconfigured,
 you'll get [`ZendriverError::TabNotFound`] after the 5 s window.
 
 [`Browser::new_tab()`]: https://docs.rs/zendriver/latest/zendriver/struct.Browser.html#method.new_tab

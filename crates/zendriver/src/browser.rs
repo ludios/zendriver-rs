@@ -4700,10 +4700,10 @@ impl Browser {
     /// Internally:
     /// 1. Sends `Target.createTarget { url: "about:blank" }` at browser
     ///    scope (no session_id) — the response includes the new `targetId`.
-    /// 2. Polls the internal tabs registry every 50ms for up to 5s, looking
-    ///    for a [`Tab`] whose [`Tab::target_id`] matches. The tab registrar
-    ///    populates that entry asynchronously when the
-    ///    `Target.attachedToTarget` event arrives.
+    /// 2. Waits up to 5s for a [`Tab`] whose [`Tab::target_id`] matches to
+    ///    appear in the internal tabs registry. The tab registrar adds it
+    ///    when the `Target.attachedToTarget` event arrives, and wakes the
+    ///    wait then.
     /// 3. Returns the matching [`Tab`] on success.
     ///
     /// # Background tabs
@@ -7254,9 +7254,8 @@ mod tests {
         .expect("debugger-release did not fire within 2s");
         mock.reply(release_id, json!({})).await;
 
-        // `Browser::new_tab` polls every 50ms — give it up to 2s wall-clock
-        // to observe the registrar insertion. In practice it lands on the
-        // first or second poll.
+        // `Browser::new_tab` wakes when the registrar inserts the tab —
+        // give it up to 2s wall-clock to see that.
         let new_tab = tokio::time::timeout(std::time::Duration::from_secs(2), fut)
             .await
             .expect("new_tab future did not resolve within 2s")
