@@ -154,10 +154,11 @@ impl StealthProfile {
     /// (On Linux, Chrome gives a background tab's page its viewport as its
     /// window.) The viewport is the window minus the
     /// browser's toolbars, which headless Chrome emulates: 1920x945 by
-    /// default. A `--screen-info` or `--window-size` switch that the caller
-    /// passes wins over these. A headed Chrome reports the real display and
-    /// window. (Headless Chrome takes `--screen-info` from version 135 on
-    /// Linux, 136 on Windows and 138 on macOS; an older one ignores it.)
+    /// default (1904x937 on Windows, where the window also has a border).
+    /// A `--screen-info` or `--window-size` switch that the caller passes
+    /// wins over these. A headed Chrome reports the real display and window.
+    /// (Headless Chrome takes `--screen-info` from version 135 on Linux, 136
+    /// on Windows and 138 on macOS; an older one ignores it.)
     ///
     /// ```
     /// use zendriver_stealth::StealthProfile;

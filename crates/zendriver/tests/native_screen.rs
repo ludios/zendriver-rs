@@ -31,11 +31,17 @@ async fn geometry(server: &FixtureServer, tab: &Tab) -> Value {
     eval(tab, GEOMETRY_JS).await
 }
 
+/// How much narrower than its window a viewport is, in CSS pixels: on
+/// Windows, headless Chrome gives a window a border 8 pixels wide on each
+/// side (measured with Chrome 157, at every device pixel ratio that
+/// zendriver takes), as Windows does to a window that isn't maximized.
+const WINDOW_BORDERS: u64 = if cfg!(target_os = "windows") { 16 } else { 0 };
+
 /// Assert that `seen` (from [`geometry`]) describes a screen of
 /// `screen_size` (CSS pixels) at `device_pixel_ratio`, with a work area of
 /// `work_area` at its top left, and a window that fills that work area,
-/// whose viewport is as wide as the window and shorter (by the browser's
-/// toolbars, which headless Chrome emulates).
+/// whose viewport is as wide as the window less [`WINDOW_BORDERS`], and
+/// shorter (by the browser's toolbars, which headless Chrome emulates).
 fn assert_fills_work_area(
     seen: &Value,
     screen_size: [u64; 2],
@@ -57,7 +63,11 @@ fn assert_fills_work_area(
         .expect("a devicePixelRatio");
     assert_eq!(rest, expected, "all of it: {seen}");
     assert_eq!(ratio.as_f64(), Some(device_pixel_ratio), "{seen}");
-    assert_eq!(viewport[0], avail_width, "viewport width: {seen}");
+    assert_eq!(
+        viewport[0],
+        avail_width - WINDOW_BORDERS,
+        "viewport width: {seen}"
+    );
     let viewport_height = viewport[1].as_u64().expect("a viewport height");
     assert!(
         0 < viewport_height && viewport_height < avail_height,
@@ -180,11 +190,12 @@ async fn a_configured_screen_reaches_chrome() {
 /// At a fractional ratio, the sizes are exact as long as they are whole
 /// physical pixels: 1536x864 at 1.25 is 1920x1080, and 2192x1232 at 1.75
 /// (with the default taskbar of 48, which is 84 physical pixels) is
-/// 3836x2156. At 1.75, Chrome's rounding would make the taskbar 49, and a
-/// window 1596 wide 1597, without zendriver making up for it.
-/// zendriver takes fractional ratios only on Linux.
+/// 3836x2156. Without zendriver making up for Chrome's rounding at 1.75,
+/// the taskbar would be 49 on Linux, a screen 1600 wide would be 1601 on
+/// Windows, and a window 1596 wide would be 1597 on both.
+/// zendriver takes fractional ratios only on Linux and Windows.
 #[tokio::test]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 async fn a_screen_at_a_fractional_ratio_reaches_chrome_exactly() {
     let builder = with_screen(
         r#""width": 1536, "height": 864, "device_pixel_ratio": 1.25,

@@ -106,12 +106,15 @@ in the page:
   Headless Chrome takes `--screen-info` from version 135 on Linux, 136
   on Windows and 138 on macOS. Chrome takes the screen in
   physical pixels, so the launch fails unless a configured screen's
-  `device_pixel_ratio` is 1, 1.25, 1.5, … or 4 on Linux (which covers
-  Windows' scaling steps), or 1 or 2 elsewhere (fractional ratios were
-  measured only on Linux); its work area isn't empty; and its sizes
-  (`width`, `height`, and the work area's width and height) times that
-  ratio are whole numbers of physical pixels from 1 to 65536 (1536x864 at
-  1.25 is 1920x1080). Otherwise Chrome would report a different screen.
+  `device_pixel_ratio` is 1, 1.25, 1.5, … or 4 on Linux and Windows
+  (which covers Windows' scaling steps), or 1 or 2 elsewhere (fractional
+  ratios were measured only on Linux and Windows); its work area isn't
+  empty; and its sizes (`width`, `height`, and the work area's width and
+  height) times that ratio are whole numbers of physical pixels from 1 to
+  65536 (1536x864 at 1.25 is 1920x1080). Otherwise Chrome would report a
+  different screen. On Windows, headless Chrome gives each window a
+  border, as Windows does to a window that isn't maximized, so the
+  default viewport there is 1904x937.
 
 Since it runs no JS in the page, there's no patched function for a
 `Function.prototype.toString` check to catch.
