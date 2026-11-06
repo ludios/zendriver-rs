@@ -221,9 +221,12 @@ For multi-tab orchestration *within* one Chrome (cheaper), see
 Two paths:
 
 - **Observe only** — use [`expect_request`](./expect.md) /
-  `expect_response` for individual events, or stash a
-  `tab.interceptor().subscribe(..)` stream that auto-`continue_()`s and logs
-  each `PausedRequest`.
+  `expect_response` for individual events, or the
+  [network monitor](./network-monitor.md) (`tab.monitor()`) for a stream of
+  every exchange. An interception stream is no observer: it decides the
+  requests it fits, so a stream ahead of an entry (the tracker blocking,
+  say) keeps that entry from them, and a stream behind an entry never sees
+  the requests that entry decides.
 - **Modify** — use [`Interception`](./interception.md)'s rule API
   (block / redirect / respond / modify_request / modify_response).
 

@@ -64,8 +64,9 @@ pub struct PausedRequest {
     pub pause: PauseKind,
     /// Decoded request payload as Chrome surfaced it.
     pub request: RequestInfo,
-    /// Decoded response payload — populated only when Chrome paused at the
-    /// `Response` stage. `None` at the `Request` stage.
+    /// Decoded response payload — populated only at a
+    /// [`ResponseHeaders`](PauseKind::ResponseHeaders) pause; `None` at a
+    /// `Request` or `ResponseError` pause.
     pub response: Option<ResponseInfo>,
     session: SessionHandle,
     /// The multiplexer's queue, which every answer goes through.
@@ -131,8 +132,10 @@ impl PausedRequest {
 
     /// Abort the request with the given Chrome [`Network.ErrorReason`].
     ///
-    /// Dispatches `Fetch.failRequest { requestId, errorReason }`. The exact
-    /// reason surfaces to JS as the rejected `fetch()` / `XHR` error.
+    /// Dispatches `Fetch.failRequest { requestId, errorReason }`. The page
+    /// sees a plain network error (a `fetch()` rejects with `TypeError`);
+    /// the reason shows in Chrome's own reports of the request (DevTools,
+    /// `Network.loadingFailed`).
     ///
     /// ```no_run
     /// # use futures::StreamExt;
@@ -275,8 +278,10 @@ impl PausedRequest {
             .map_err(|_| InterceptionError::SubscriptionClosed)?
     }
 
-    /// Fetch the upstream response body. Only useful at the `Response`
-    /// stage — at the `Request` stage Chrome has no body to return.
+    /// Fetch the upstream response body. Only useful at a
+    /// [`ResponseHeaders`](PauseKind::ResponseHeaders) pause — at a
+    /// `Request` or `ResponseError` pause Chrome has no body to return —
+    /// and not for a redirect (3xx), whose body Chrome doesn't give.
     ///
     /// Dispatches `Fetch.getResponseBody { requestId }`. Per CDP the result
     /// carries a `body` string plus a `base64Encoded: bool` flag: when true,

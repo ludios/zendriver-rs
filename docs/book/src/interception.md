@@ -67,8 +67,8 @@ decides the tracker requests it fits ahead of it, so `allow` or
 `modify_request` there lets them through, visibly so in the call and in
 [`snapshot`].
 
-[`snapshot`]: https://docs.rs/zendriver/latest/zendriver/interception/struct.Interceptor.html#method.snapshot
-[`zendriver::interception`]: https://docs.rs/zendriver/latest/zendriver/interception/interceptor/index.html
+[`snapshot`]: https://docs.rs/zendriver/latest/zendriver/struct.Interceptor.html#method.snapshot
+[`zendriver::interception`]: https://docs.rs/zendriver-interception/latest/zendriver_interception/interceptor/index.html
 
 ## Rules
 
@@ -201,7 +201,11 @@ let responses = Match::url("*")?.at(PauseKind::ResponseHeaders);
 let mut stream = tab.interceptor().subscribe(responses, Position::Last).await?;
 
 while let Some(paused) = stream.next().await {
-    let body = paused.body().await?;
+    // Chrome gives no body for a redirect (3xx): let it go on.
+    let Ok(body) = paused.body().await else {
+        paused.continue_().await?;
+        continue;
+    };
     if body.windows(7).any(|w| w == b"BLOCKED") {
         paused.abort(AbortReason::BlockedByClient).await?;
     } else {
@@ -214,9 +218,11 @@ Each [`PausedRequest`] is consumed by exactly one of
 [`continue_`] / [`abort`] / [`respond`][paused-respond] / [`modify_and_continue`] /
 [`continue_response`] (at a `ResponseHeaders` pause). The [`body`] method
 is `&self` and reads the upstream response body non-destructively — only
-useful at a `ResponseHeaders` pause; before the response Chrome has no body.
+useful at a `ResponseHeaders` pause (before the response, and at a
+`ResponseError` pause, Chrome has no body), and not for a redirect, whose
+body Chrome doesn't give.
 
-[`subscribe`]: https://docs.rs/zendriver/latest/zendriver/interception/struct.Interceptor.html#method.subscribe
+[`subscribe`]: https://docs.rs/zendriver/latest/zendriver/struct.Interceptor.html#method.subscribe
 [`PausedRequest`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html
 [`continue_`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.continue_
 [`abort`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.abort
@@ -253,7 +259,7 @@ credentials are set it pauses every request (`AuthPause::EveryRequest`), or
 only documents (`AuthPause::DocumentsOnly`: fewer round trips, but a 407 on
 another request's connection is missed unless an entry pauses it).
 
-[`set_proxy_auth`]: https://docs.rs/zendriver/latest/zendriver/interception/struct.Interceptor.html#method.set_proxy_auth
+[`set_proxy_auth`]: https://docs.rs/zendriver/latest/zendriver/struct.Interceptor.html#method.set_proxy_auth
 
 ## Tracker / fingerprinter blocklist
 
@@ -274,7 +280,7 @@ use zendriver::Browser;
 
 let browser = Browser::builder()
     .block_trackers(true)                        // curated bundled list
-    .tracker_blocklist_add(["ads.example.com"])  // + your own hosts
+    .tracker_blocklist_add(["ads.example.com".to_string()])  // + your own hosts
     .launch().await?;
 ```
 
