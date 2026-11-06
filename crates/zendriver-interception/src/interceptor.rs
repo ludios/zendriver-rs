@@ -1176,6 +1176,18 @@ impl Mux {
         self.unsubscribe_if_idle();
     }
 
+    /// Nothing can send the multiplexer commands any more (the last
+    /// `Interceptor` clone, handle and paused request are gone), so nothing
+    /// could change or answer the interception: turn `Fetch` off if it is
+    /// on (the credentials outlive every handle).
+    async fn close(&mut self) {
+        if self.events.is_some() {
+            if let Err(e) = self.session.call("Fetch.disable", json!({})).await {
+                debug!(error = %e, "interception: Fetch.disable at the end failed");
+            }
+        }
+    }
+
     /// The session is gone (its socket closed, or it detached): drop every
     /// entry, which ends their streams.
     fn end(&mut self) {
@@ -1299,6 +1311,7 @@ async fn run(
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else {
+                    mux.close().await;
                     break;
                 };
                 mux.obey(command).await;
@@ -1880,6 +1893,23 @@ mod tests {
             .await;
         let answer = answered(&mut mock, "Fetch.continueWithAuth").await;
         assert_eq!(answer["authChallengeResponse"]["username"], "u");
+        conn.shutdown();
+    }
+
+    /// Proxy credentials outlive every handle, so the multiplexer turns
+    /// `Fetch` off when the last `Interceptor` clone goes: nothing would
+    /// answer the requests Chrome pauses.
+    #[tokio::test]
+    async fn dropping_the_last_interceptor_turns_fetch_off() {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let auth = ProxyAuth {
+            user: "u".into(),
+            password: "p".into(),
+            pause: AuthPause::EveryRequest,
+        };
+        applied(&mut mock, interceptor.set_proxy_auth(Some(auth))).await;
+        drop(interceptor);
+        assert_eq!(answered(&mut mock, "Fetch.disable").await, json!({}));
         conn.shutdown();
     }
 
