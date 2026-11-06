@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::connection::Connection;
 use crate::error::CallError;
-use crate::frame::RawEvent;
+use crate::frame::{AccountedRawEvent, RawEvent};
 
 /// Cheap-to-clone handle binding a [`Connection`] to a specific CDP session.
 ///
@@ -103,6 +103,51 @@ impl SessionHandle {
             }
         }))
     }
+
+    /// Subscribe to this session's events on the loss-accounted bus of
+    /// [`Connection::subscribe_raw_accounted`]: the events that
+    /// [`SessionHandle::subscribe`] would match, whatever their method, and
+    /// every marker of the connection (`Lagged`, `Reconnected`,
+    /// `Disconnected`, `Shutdown`).
+    ///
+    /// A flat session's stream also ends when Chrome detaches the session
+    /// (for example, because the session's target closed), since Chrome
+    /// sends no event of the session after that: at the
+    /// `Target.detachedFromTarget` naming the session, the stream yields
+    /// [`AccountedRawEvent::Shutdown`], with that event's generation, and
+    /// then ends. A stream subscribed after the detach doesn't see the
+    /// detach, and so doesn't end until the connection does.
+    pub fn subscribe_accounted(
+        &self,
+    ) -> impl Stream<Item = AccountedRawEvent> + Send + Unpin + use<> {
+        let events = self.inner.conn.subscribe_raw_accounted();
+        let state = Some((events, self.inner.session_id.clone()));
+        // The state is `None` after the detach, which ends the stream.
+        Box::pin(futures::stream::unfold(state, |state| async move {
+            let (mut events, session_id) = state?;
+            loop {
+                let ev = events.next().await?;
+                if let AccountedRawEvent::Event {
+                    generation, event, ..
+                } = &ev
+                {
+                    let detached = event.method == "Target.detachedFromTarget"
+                        && session_id.is_some()
+                        && event.params["sessionId"].as_str() == session_id.as_deref();
+                    if detached {
+                        let end = AccountedRawEvent::Shutdown {
+                            generation: *generation,
+                        };
+                        return Some((end, None));
+                    }
+                    if event.session_id != session_id {
+                        continue;
+                    }
+                }
+                return Some((ev, Some((events, session_id))));
+            }
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -111,6 +156,7 @@ mod tests {
     use super::*;
     use crate::connection::spawn_actor;
     use crate::connection::test_only::duplex_pair;
+    use crate::testing::MockConnection;
     use serde_json::json;
     use tokio_tungstenite::tungstenite::Message;
 
@@ -168,5 +214,73 @@ mod tests {
 
         drop(call);
         conn.shutdown();
+    }
+
+    /// The next item of `events`, which must come within a second.
+    async fn next_within_a_second(
+        events: &mut (impl Stream<Item = AccountedRawEvent> + Unpin),
+    ) -> Option<AccountedRawEvent> {
+        tokio::time::timeout(std::time::Duration::from_secs(1), events.next())
+            .await
+            .unwrap()
+    }
+
+    /// A flat session's accounted stream skips the events of other sessions
+    /// (including another session's detach), and ends with `Shutdown` at its
+    /// own detach.
+    #[tokio::test]
+    async fn flat_accounted_stream_ends_at_its_own_detach() {
+        let (mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn, "S1");
+        let mut events = sess.subscribe_accounted();
+
+        mock.emit_event_for_session("Page.loadEventFired", json!({}), "S2")
+            .await;
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S2" }))
+            .await;
+        mock.emit_event_for_session("Page.frameStoppedLoading", json!({}), "S1")
+            .await;
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S1" }))
+            .await;
+
+        match next_within_a_second(&mut events).await {
+            Some(AccountedRawEvent::Event { event, .. }) => {
+                assert_eq!(event.method, "Page.frameStoppedLoading");
+            }
+            other => panic!("expected S1's event, got {other:?}"),
+        }
+        match next_within_a_second(&mut events).await {
+            Some(AccountedRawEvent::Shutdown { generation: 1 }) => {}
+            other => panic!("expected Shutdown, got {other:?}"),
+        }
+        assert!(next_within_a_second(&mut events).await.is_none());
+    }
+
+    /// A root session has no session id for a detach to name: a detach on
+    /// its socket is just one of its events, and the stream goes on until
+    /// the connection ends.
+    #[tokio::test]
+    async fn root_accounted_stream_does_not_end_at_a_detach() {
+        let (mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new_root(conn.clone());
+        let mut events = sess.subscribe_accounted();
+
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S1" }))
+            .await;
+        mock.emit_event("Target.detachedFromTarget", json!({}))
+            .await;
+        for _ in 0..2 {
+            match next_within_a_second(&mut events).await {
+                Some(AccountedRawEvent::Event { event, .. }) => {
+                    assert_eq!(event.method, "Target.detachedFromTarget");
+                }
+                other => panic!("expected the detach event, got {other:?}"),
+            }
+        }
+        conn.shutdown();
+        match next_within_a_second(&mut events).await {
+            Some(AccountedRawEvent::Shutdown { generation: 1 }) => {}
+            other => panic!("expected Shutdown, got {other:?}"),
+        }
     }
 }

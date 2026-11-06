@@ -19,7 +19,9 @@
 //!   types.
 //! - [`AccountedRawEvent`] — opt-in loss-accounted alternative to
 //!   `RawEvent`, delivered by
-//!   [`Connection::subscribe_raw_accounted`](connection::Connection::subscribe_raw_accounted);
+//!   [`Connection::subscribe_raw_accounted`](connection::Connection::subscribe_raw_accounted)
+//!   (or, for one session, by
+//!   [`SessionHandle::subscribe_accounted`](session::SessionHandle::subscribe_accounted));
 //!   reports lag, reconnects, disconnects, and shutdowns explicitly instead
 //!   of silently dropping frames.
 //! - [`TargetObserver`] — observer trait fired on `Target.attachedToTarget`

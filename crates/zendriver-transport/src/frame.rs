@@ -77,7 +77,9 @@ pub struct RawEvent {
 }
 
 /// Loss-accounted event as delivered by
-/// [`Connection::subscribe_raw_accounted`](crate::connection::Connection::subscribe_raw_accounted).
+/// [`Connection::subscribe_raw_accounted`](crate::connection::Connection::subscribe_raw_accounted),
+/// or, for one session, by
+/// [`SessionHandle::subscribe_accounted`](crate::session::SessionHandle::subscribe_accounted).
 ///
 /// [`Connection::subscribe_raw`](crate::connection::Connection::subscribe_raw)
 /// silently drops any [`RawEvent`] a lagging subscriber missed and has no way
@@ -157,6 +159,11 @@ pub enum AccountedRawEvent {
     /// [`Connection::reconnect`](crate::connection::Connection::reconnect)
     /// also stops the current generation, but produces
     /// [`AccountedRawEvent::Reconnected`] instead.
+    ///
+    /// On the stream of a flat session's
+    /// [`SessionHandle::subscribe_accounted`](crate::session::SessionHandle::subscribe_accounted),
+    /// it also marks Chrome's detaching of the session, and is the stream's
+    /// last item.
     Shutdown {
         /// Generation that was shut down.
         generation: u64,
