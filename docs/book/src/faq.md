@@ -88,7 +88,8 @@ Chrome that `launch()` starts (and Chrome's child processes). Chrome still
 inherits the rest of your program's environment, and your program's own
 environment doesn't change.
 
-It's for what Chrome reads only from its environment. For example, to run
+It's for what Chrome (or the loader that starts it) takes only from its
+environment, such as `LD_LIBRARY_PATH`. For example, to run
 headed Chrome on a Wayland compositor that your program started (such as a
 headless sway), give Chrome the compositor's socket:
 
@@ -104,8 +105,10 @@ let browser = zendriver::Browser::builder()
 ```
 
 Chrome has no command-line switch for the Wayland socket. Pass
-`--ozone-platform=wayland` too: without it, Chrome can choose X11 instead
-when `DISPLAY` is also set.
+`--ozone-platform=wayland` too, because without it Chrome may choose X11:
+Chrome 157 and newer choose X11 when `DISPLAY` is also set (unless
+`XDG_SESSION_TYPE` is `wayland`), and older Chromes choose X11 unless
+`XDG_SESSION_TYPE` is `wayland`.
 
 ## Why is my `evaluate()` not seeing `window.foo`?
 

@@ -1318,9 +1318,10 @@ impl BrowserBuilder {
     /// that the stealth profile may run first (to learn Chrome's version)
     /// gets these variables too.
     ///
-    /// Use it for what Chrome reads only from its environment, such as the
-    /// Wayland compositor's socket (`WAYLAND_DISPLAY`) or the time zone
-    /// (`TZ`).
+    /// Use it for what Chrome (or the loader that starts it) takes only from
+    /// its environment, such as the Wayland compositor's socket
+    /// (`WAYLAND_DISPLAY`) or the directories of shared libraries
+    /// (`LD_LIBRARY_PATH`).
     ///
     /// # Panics
     ///
