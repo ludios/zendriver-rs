@@ -507,16 +507,21 @@ pub(crate) fn merge_launch_flags(
     base_flags
 }
 
-/// The value of `flag` if it is a `blink-settings` switch, parsed as Chrome
-/// parses a POSIX command line: the name follows `--` or `-`, and a switch
-/// without `=` has the empty value.
-fn blink_settings_value(flag: &str) -> Option<&str> {
+/// The name and value of `flag` if it is a switch, parsed as Chrome parses a
+/// POSIX command line: the name follows `--` or `-` and ends at the first
+/// `=`, and a switch without `=` has the empty value.
+fn parse_switch(flag: &str) -> Option<(&str, &str)> {
     let switch = flag.strip_prefix("--").or_else(|| flag.strip_prefix('-'))?;
-    let rest = switch.strip_prefix("blink-settings")?;
-    if rest.is_empty() {
-        return Some("");
+    Some(switch.split_once('=').unwrap_or((switch, "")))
+}
+
+/// The value of `flag` if it is a `blink-settings` switch (see
+/// [`parse_switch`]).
+fn blink_settings_value(flag: &str) -> Option<&str> {
+    match parse_switch(flag) {
+        Some(("blink-settings", value)) => Some(value),
+        _ => None,
     }
-    rest.strip_prefix('=')
 }
 
 /// Give Chrome the Blink settings `ours` (`name=value` items) on top of the
@@ -865,7 +870,9 @@ impl BrowserBuilder {
     /// headless Chrome has no input devices and its pages would see no
     /// pointer, Chrome also gets the Blink settings of a mouse (see
     /// [`StealthProfile::pointer_blink_settings`]), with the `native` or
-    /// `spoofed` stealth profile (`native` is the default).
+    /// `spoofed` stealth profile (`native` is the default). With `native`,
+    /// Chrome also gets a screen (`--screen-info`) and maximized windows (see
+    /// [`StealthProfile::native`]).
     /// Pass `false` to launch a visible window (useful for local debugging).
     ///
     /// # Examples
@@ -1933,6 +1940,34 @@ impl BrowserBuilder {
             v.push("about:blank".to_string());
         }
         v
+    }
+
+    /// The switches that `observer` asks for in a headless launch (none in a
+    /// headed launch), minus each switch that the caller also passes, with
+    /// [`arg`](Self::arg) or in `profile_flags` (the stealth profile's own
+    /// flags), so that the caller's value wins.
+    ///
+    /// # Errors
+    /// Returns the error of [`StealthObserver::headless_flags`] for a
+    /// configured screen that Chrome would crash on.
+    fn headless_stealth_flags(
+        &self,
+        observer: &StealthObserver,
+        profile_flags: &[String],
+    ) -> Result<Vec<String>, ZendriverError> {
+        if !self.headless.unwrap_or(true) {
+            return Ok(Vec::new());
+        }
+        let callers: Vec<&str> = self
+            .extra_args
+            .iter()
+            .chain(profile_flags)
+            .filter_map(|flag| parse_switch(flag))
+            .map(|(name, _)| name)
+            .collect();
+        let mut ours = observer.headless_flags()?;
+        ours.retain(|flag| parse_switch(flag).is_none_or(|(name, _)| !callers.contains(&name)));
+        Ok(ours)
     }
 
     /// The argv that `launch` passes to Chrome (before its CI-only
@@ -3877,13 +3912,11 @@ impl BrowserBuilder {
                     None => profile.clone(),
                 };
                 let fp = profile.resolve_fingerprint(&exe, &self.env)?;
-                let obs: Arc<dyn TargetObserver> = Arc::new(StealthObserver::with_persona(
-                    profile.clone(),
-                    fp,
-                    self.resolved_persona()?,
-                ));
-                let flags = profile.build_flags();
-                (Some(obs), flags)
+                let observer =
+                    StealthObserver::with_persona(profile.clone(), fp, self.resolved_persona()?);
+                let mut flags = profile.build_flags();
+                flags.extend(self.headless_stealth_flags(&observer, &flags)?);
+                (Some(Arc::new(observer)), flags)
             } else {
                 (None, Vec::new())
             };
@@ -6188,6 +6221,48 @@ mod tests {
             .map(String::as_str)
             .filter(|f| super::blink_settings_value(f).is_some())
             .collect()
+    }
+
+    /// The switches that `launch` adds to `builder`'s argv for a headless
+    /// launch under its stealth profile.
+    fn headless_stealth_flags_of(builder: &BrowserBuilder) -> Vec<String> {
+        let profile = builder.stealth.clone().expect("a stealth profile");
+        let fingerprint = profile
+            .resolve_fingerprint(Path::new(""), &[])
+            .expect("fingerprint");
+        let observer = StealthObserver::new(profile.clone(), fingerprint);
+        builder
+            .headless_stealth_flags(&observer, &profile.build_flags())
+            .expect("a screen that Chrome accepts")
+    }
+
+    #[test]
+    fn a_headless_native_launch_gets_a_screen_and_a_maximized_window() {
+        let flags = headless_stealth_flags_of(&Browser::builder());
+        assert_eq!(flags.len(), 2, "{flags:?}");
+        assert!(
+            flags[0].starts_with("--screen-info={1920x1080 "),
+            "{flags:?}"
+        );
+        assert_eq!(flags[1], "--start-maximized");
+    }
+
+    #[test]
+    fn a_headed_launch_gets_no_screen_switches() {
+        let builder = Browser::builder().headless(false);
+        assert_eq!(headless_stealth_flags_of(&builder), Vec::<String>::new());
+    }
+
+    /// Whether the caller passes it with `BrowserBuilder::arg` or with the
+    /// stealth profile's own `arg`.
+    #[test]
+    fn the_callers_screen_info_wins_over_zendrivers() {
+        let builder_arg = Browser::builder().arg("--screen-info={1280x720}");
+        let profile_arg =
+            Browser::builder().stealth(StealthProfile::native().arg("--screen-info={1280x720}"));
+        for builder in [builder_arg, profile_arg] {
+            assert_eq!(headless_stealth_flags_of(&builder), ["--start-maximized"]);
+        }
     }
 
     /// The argv that `launch` passes to Chrome for `builder`.

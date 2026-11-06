@@ -47,14 +47,9 @@
 //!    viewport left every element parked between the two heights permanently
 //!    "not visible", so `focus` — and with it `type_text` / `press` /
 //!    `type_keys` — failed on any below-the-fold field. That patch ships in
-//!    every profile except `StealthProfile::off()`: `Browser::builder()`
-//!    defaults to `StealthProfile::native()`, which installs the geometry
-//!    bootstrap (`observer.rs` maps `ProfileKind::Native` to
-//!    `geometry_bootstrap()` = `_native.js` + `screen.js`). Measured on a
-//!    default-profile launch: `innerHeight` 994 against a real 1080. So this
-//!    was the default-posture case rather than an edge one, and the existing
-//!    cases here missed it twice over: they launch with no explicit profile
-//!    and neither uses an element below the fold.
+//!    `StealthProfile::spoofed()`. Measured: `innerHeight` 994 against a
+//!    real 1080. The existing cases here missed it twice over: they launch
+//!    with no explicit profile and neither uses an element below the fold.
 //!
 //! 4. **The on-screen clause in quirks mode.** The clause that replaced case
 //!    3's read — the two are the same line, fixed twice — read
@@ -351,15 +346,10 @@ async fn hover_and_click_reach_an_element_inside_an_iframe() {
 /// A below-the-fold field must stay reachable while stealth spoofs the
 /// viewport.
 ///
-/// The `window.inner*` rewrite is NOT exclusive to `spoofed`: it lives in
-/// `screen.js`, which `observer.rs` installs for `ProfileKind::Native` too
-/// (`geometry_bootstrap()` = `_native.js` + `screen.js`), and
-/// `Browser::builder()` defaults to `StealthProfile::native()`. Only
-/// `StealthProfile::off()` leaves `window.inner*` alone — measured on a
-/// default-profile launch, `innerHeight` reads 994 against a real 1080,
-/// identical to `spoofed`. `spoofed` is the profile under test because it is
-/// the full shipping posture, and because its humanized `InputProfile` is
-/// what the typing at the end of this test exercises.
+/// The `window.inner*` rewrite lives in `screen.js`, which `observer.rs`
+/// installs for `ProfileKind::Spoofed`. `spoofed` is also the full shipping
+/// posture, and its humanized `InputProfile` is what the typing at the end
+/// of this test exercises.
 ///
 /// On the stock 1920x1080 persona it claims `innerHeight` 1080 - 86 (browser
 /// chrome) = 994, while the layout viewport stays at Chrome's real 1080.

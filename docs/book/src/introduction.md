@@ -47,9 +47,9 @@ borrow checker tracks instead of letting them drift across `await` points.
   no WebDriver-style adapter layer, so latency is one network round-trip
   per call — typically under 1 ms on localhost.
 - **Anti-detection controls on by default.** `StealthProfile::native` is
-  the suggested starting point — UA scrub plus Emulation overrides, and
-  JS only to repair the window and screen geometry those overrides leave
-  incoherent. `StealthProfile::spoofed` adds
+  the suggested starting point — UA scrub, launch flags and Emulation
+  overrides, no JS bootstrap, no prototype patching.
+  `StealthProfile::spoofed` adds
   Navigator-prototype patches that pass [sannysoft] + [areyouheadless].
   Neither is a guarantee against a determined, adaptive detector — see
   [Stealth](./stealth.md#when-to-use-which) for the tradeoffs. Use

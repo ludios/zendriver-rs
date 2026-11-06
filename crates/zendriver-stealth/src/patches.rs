@@ -108,44 +108,6 @@ fn screen_patch(screen: Option<&crate::persona::specs::ScreenSpec>) -> String {
         .replace("ZD_INNER_HEIGHT", &tok(screen.and_then(|s| s.inner_height)))
 }
 
-/// Geometry-coherence bootstrap for profiles that apply NO identity spoofing.
-///
-/// `Native` still receives `Emulation.setDeviceMetricsOverride` (see
-/// [`StealthObserver`](crate::StealthObserver)), and that command sets
-/// `window.inner*` and `screen.width`/`height` while being unable to touch
-/// `window.outer*` or `screen.avail*`. The result is a window a real browser cannot
-/// produce: `outerWidth` stays at the headless default (780 in Chrome 157) under an
-/// `innerWidth` of 1920, i.e. content wider than the window containing it, and
-/// `availHeight === height`, the kiosk signature. Both are cheap, deterministic,
-/// high-weight bot tells, and both are introduced BY THIS LIBRARY rather than by the
-/// host.
-///
-/// This emits the masking prelude (`_native.js`, which replaces
-/// `Function.prototype.toString` so that the patch's getters read as native code)
-/// plus the geometry patch (`screen.js`), and nothing else. It reads no persona and
-/// no fingerprint.
-#[must_use]
-pub fn geometry_bootstrap() -> String {
-    geometry_bootstrap_with(None)
-}
-
-/// [`geometry_bootstrap`], replaying a caller's MEASURED insets.
-///
-/// A profile captured on real hardware carries its own `availHeight` /
-/// `innerHeight`; presenting the derived defaults instead would describe a
-/// machine that does not exist. `None` is exactly [`geometry_bootstrap`].
-#[must_use]
-pub fn geometry_bootstrap_with(screen: Option<&crate::persona::specs::ScreenSpec>) -> String {
-    let mut body = String::from(NATIVE);
-    body.push('\n');
-    body.push_str(&screen_patch(screen));
-    // Same single outer IIFE `bootstrap_script_impl` uses, and for the same two reasons:
-    // `_native.js` is written as a fragment that runs inside it, and `screen.js` reaches
-    // `__zdGetter` as a closure-local of that scope. Emitting the fragments bare leaves the
-    // helper out of scope and keeps nothing off `globalThis`.
-    format!("(function(){{\n{body}\n}})();")
-}
-
 /// Shared implementation for [`bootstrap_script`] /
 /// [`bootstrap_script_native_webgl`]. `spoof_webgl` gates the `push_webgl`
 /// call and, together with the persona's own WebGL strategy, the WebGPU
@@ -2161,11 +2123,11 @@ mod tests {
 }
 
 #[cfg(test)]
-mod geometry_bootstrap_tests {
+mod screen_patch_tests {
+    use super::screen_patch;
     use crate::persona::specs::ScreenSpec;
 
-    /// The safety property of the whole change: a caller that measured nothing
-    /// gets exactly what it got before.
+    /// A caller that measured nothing gets the derived defaults.
     ///
     /// Every shipped zeus profile was captured THROUGH the metrics override, so
     /// all of them already carry `height - 48`. If `None` drifted from the
@@ -2173,15 +2135,10 @@ mod geometry_bootstrap_tests {
     /// to 0/80 would move underneath them silently.
     #[test]
     fn no_measured_insets_emits_the_derived_defaults() {
-        let derived = geometry_bootstrap();
+        let derived = screen_patch(None);
         assert_eq!(
             derived,
-            geometry_bootstrap_with(None),
-            "an absent screen must be byte-identical to the no-arg form"
-        );
-        assert_eq!(
-            derived,
-            geometry_bootstrap_with(Some(&ScreenSpec::new(1920, 1080, 1.0))),
+            screen_patch(Some(&ScreenSpec::new(1920, 1080, 1.0))),
             "a screen with no measured insets must ALSO derive them"
         );
         assert!(
@@ -2203,7 +2160,7 @@ mod geometry_bootstrap_tests {
         let mac = ScreenSpec::new(1920, 1080, 2.0)
             .with_avail(1920, 1030)
             .with_inner_height(974);
-        let js = geometry_bootstrap_with(Some(&mac));
+        let js = screen_patch(Some(&mac));
         assert!(
             js.contains("1030"),
             "the measured availHeight must reach the page"
@@ -2218,40 +2175,6 @@ mod geometry_bootstrap_tests {
         );
         // The derivation constants stay in the file as the fallback arm; what
         // must not happen is the PAGE seeing a derived value when one was given.
-        assert_ne!(
-            js,
-            geometry_bootstrap(),
-            "measured must differ from derived"
-        );
-    }
-
-    use super::*;
-
-    /// `Native` must ship the geometry repair. It receives
-    /// `Emulation.setDeviceMetricsOverride`, which cannot reach `outer*`/`avail*`, so without
-    /// this patch it reports `outerWidth` at the OS default under a 1920 `innerWidth` --
-    /// content wider than its own window, which no real browser can produce.
-    #[test]
-    fn geometry_bootstrap_carries_the_screen_patch_and_its_prelude() {
-        let js = geometry_bootstrap();
-        assert!(
-            js.contains("__zdGetter"),
-            "screen.js's only dependency must be present"
-        );
-        assert!(js.contains("outerWidth"), "must repair outerWidth");
-        assert!(js.contains("outerHeight"), "must repair outerHeight");
-        assert!(js.contains("availHeight"), "must repair the taskbar inset");
-    }
-
-    /// Identity-neutral by construction: pulling in an identity patch here would stop
-    /// `Native` being native, which is the whole reason callers choose it.
-    #[test]
-    fn geometry_bootstrap_carries_no_identity_patches() {
-        let js = geometry_bootstrap();
-        assert!(
-            !js.contains("navigator.webdriver"),
-            "must not spoof webdriver"
-        );
-        assert!(!js.contains("WEBGL_PROFILE"), "must not spoof WebGL");
+        assert_ne!(js, screen_patch(None), "measured must differ from derived");
     }
 }

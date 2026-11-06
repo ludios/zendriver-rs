@@ -113,7 +113,11 @@ impl UaMetadata {
     }
 }
 
-/// Screen / device-metrics override (`Emulation.setDeviceMetricsOverride`).
+/// The screen that stealth presents: under `native()`, the screen a headless
+/// Chrome gets at launch (`--screen-info`); under `spoofed()`, the screen of
+/// `Emulation.setDeviceMetricsOverride` and of the bootstrap's geometry patch.
+/// See `StealthProfile::screen`. Sizes are in CSS pixels.
+///
 /// Whole-value at [`Persona::overlay`](super::Persona::overlay) — composing
 /// two personas has the higher-priority persona's screen win outright when
 /// set, same as every other spec field (a screen is one coherent artifact,
@@ -140,10 +144,12 @@ pub struct ScreenSpec {
     /// by a constant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avail_height: Option<u32>,
-    /// Viewport height, i.e. `window.innerHeight`. `None` keeps the derived
-    /// default of `height - 86` (a plausible tab strip + omnibox + bookmarks
-    /// bar). Same reasoning as [`Self::avail_height`]: the browser chrome's
-    /// real height varies with the user's toolbars and zoom.
+    /// Viewport height, i.e. `window.innerHeight`, under `spoofed()` only.
+    /// `None` keeps the derived default of `height - 86` (a plausible tab
+    /// strip + omnibox + bookmarks bar). Same reasoning as
+    /// [`Self::avail_height`]: the browser chrome's real height varies with
+    /// the user's toolbars and zoom. Under `native()`, Chrome derives the
+    /// viewport from the window instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inner_height: Option<u32>,
 }

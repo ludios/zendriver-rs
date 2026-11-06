@@ -4,17 +4,59 @@
 //! `Target.attachedToTarget`, the actor pauses the new target, walks every
 //! observer serially, then releases the debugger via
 //! `Runtime.runIfWaitingForDebugger`. The observer's job is to push every
-//! UA/screen/timezone/locale override and (unless `Off`) the bootstrap script
-//! _before_ the debugger releases, so the first script the page runs sees the
-//! patched globals.
+//! UA/timezone/locale override and (for `Spoofed`) the screen override and the
+//! bootstrap script _before_ the debugger releases, so the first script the
+//! page runs sees the patched globals.
 
 use serde_json::json;
 use zendriver_transport::{CallError, ObserverError, PausedSession, TargetObserver};
 
-use crate::patches::{bootstrap_script, bootstrap_script_native_webgl, geometry_bootstrap_with};
+use crate::patches::{bootstrap_script, bootstrap_script_native_webgl};
 use crate::persona::GeoPos;
-use crate::persona::specs::UaMetadata;
-use crate::{Fingerprint, Persona, ProfileKind, StealthProfile};
+use crate::persona::specs::{ScreenSpec, UaMetadata};
+use crate::{Fingerprint, Persona, ProfileKind, StealthError, StealthProfile};
+
+/// The height that [`screen_info_switch`] leaves for a taskbar when the
+/// screen has no `avail_height`; the default that [`ScreenSpec`] documents.
+const DEFAULT_TASKBAR_HEIGHT: u32 = 48;
+
+/// Headless Chrome's `--screen-info` switch for `screen`.
+///
+/// Chrome takes the size and the work area in physical pixels: the CSS
+/// pixels of `screen` times its device pixel ratio. The work area is the
+/// screen minus the `avail_*` insets. An unset `avail_width` keeps the full
+/// width, and an unset `avail_height` leaves [`DEFAULT_TASKBAR_HEIGHT`].
+///
+/// # Errors
+/// Returns [`StealthError::InvalidOverride`] for a screen that Chrome would
+/// crash on: a device pixel ratio below 0.5 (Chrome's minimum) or not
+/// finite, or a work area larger than the screen.
+fn screen_info_switch(screen: &ScreenSpec) -> Result<String, StealthError> {
+    let dpr = screen.device_pixel_ratio;
+    if !(dpr.is_finite() && dpr >= 0.5) {
+        return Err(StealthError::InvalidOverride(format!(
+            "the screen's device_pixel_ratio {dpr} is below 0.5, Chrome's minimum"
+        )));
+    }
+    let avail_width = screen.avail_width.unwrap_or(screen.width);
+    let avail_height = screen
+        .avail_height
+        .unwrap_or(screen.height.saturating_sub(DEFAULT_TASKBAR_HEIGHT));
+    if avail_width > screen.width || avail_height > screen.height {
+        return Err(StealthError::InvalidOverride(format!(
+            "the screen's work area {avail_width}x{avail_height} is larger than the screen {}x{}",
+            screen.width, screen.height
+        )));
+    }
+    let physical = |css: u32| (f64::from(css) * dpr).round() as u32;
+    Ok(format!(
+        "--screen-info={{{}x{} devicePixelRatio={dpr} workAreaRight={} workAreaBottom={}}}",
+        physical(screen.width),
+        physical(screen.height),
+        physical(screen.width - avail_width),
+        physical(screen.height - avail_height),
+    ))
+}
 
 /// Observer that applies a [`StealthProfile`] + [`Fingerprint`] to every page
 /// target. Workers and iframes are skipped — workers have no DOM and iframes
@@ -23,9 +65,9 @@ use crate::{Fingerprint, Persona, ProfileKind, StealthProfile};
 pub struct StealthObserver {
     profile: StealthProfile,
     fingerprint: Fingerprint,
-    /// Pre-rendered bootstrap source: the full patches bundle for `Spoofed`,
-    /// only the geometry repair for `Native`, and empty for `Off`, which
-    /// never sends `Page.addScriptToEvaluateOnNewDocument`.
+    /// Pre-rendered bootstrap source: the patches bundle for `Spoofed`, and
+    /// empty for `Off` and `Native`, which never send
+    /// `Page.addScriptToEvaluateOnNewDocument`.
     bootstrap: String,
     /// Mock geolocation coordinates from the resolved [`Persona`], sent via
     /// `Emulation.setGeolocationOverride`. Unlike
@@ -84,23 +126,10 @@ impl StealthObserver {
                     bootstrap_script(&persona, &fingerprint)
                 }
             }
-            // `Native` gets the geometry repair and nothing else. It still receives
-            // `Emulation.setDeviceMetricsOverride` below, which sets `inner*` and
-            // `screen.width`/`height` but cannot reach `outer*`/`avail*` — leaving
-            // `outerWidth` at the OS default under a 1920 `innerWidth` (content wider than
-            // its own window) and `availHeight === height` (no taskbar inset). Those are
-            // artifacts this library introduces, not properties of the host, so repairing
-            // them keeps `Native` native rather than spoofing anything.
-            // The configured screen still reaches this arm even in `Native`: it
-            // carries no identity, only the geometry CDP cannot set. A profile
-            // captured on real hardware brings its own insets, and presenting
-            // the derived defaults instead would describe a machine that does
-            // not exist. `None` is byte-identical to the old call. It reads the
-            // merged `fingerprint.screen` so the JS geometry and the CDP metrics
-            // override below describe the same display — a screen that reached
-            // one but not the other is worse than one that reached neither.
-            ProfileKind::Native => geometry_bootstrap_with(fingerprint.screen.as_ref()),
-            ProfileKind::Off => String::new(),
+            // `Native` patches no JS: under headless, its screen comes from the
+            // launch switches of `headless_flags`, so Chrome itself reports a
+            // coherent screen, window and viewport.
+            ProfileKind::Native | ProfileKind::Off => String::new(),
         };
         let geolocation = persona.geolocation;
         let ua_metadata = persona.ua.as_ref().and_then(|u| u.ua_metadata.clone());
@@ -111,6 +140,40 @@ impl StealthObserver {
             geolocation,
             ua_metadata,
         }
+    }
+
+    /// The screen this observer presents: the merged fingerprint's (the
+    /// persona's when it set one, else the [`StealthProfile::screen`] pin),
+    /// or else 1920x1080 at a device pixel ratio of 1.
+    fn screen(&self) -> ScreenSpec {
+        self.fingerprint
+            .screen
+            .unwrap_or_else(|| ScreenSpec::new(1920, 1080, 1.0))
+    }
+
+    /// The switches to launch a headless Chrome with, for this observer's
+    /// profile and screen. Empty unless the profile is `Native`.
+    ///
+    /// For `Native`, they are `--screen-info`, which gives headless Chrome
+    /// the screen that the persona or the [`StealthProfile::screen`] pin
+    /// configures (else 1920x1080, with a 48-pixel taskbar), and
+    /// `--start-maximized`, which sizes each window to that screen's work
+    /// area. Chrome then reports a screen, window and viewport that agree,
+    /// with no `Emulation.setDeviceMetricsOverride` and no JS patch. A headed
+    /// Chrome needs neither switch, since it reports the real display.
+    ///
+    /// # Errors
+    /// Returns [`StealthError::InvalidOverride`] for a screen that Chrome
+    /// would crash on: a `device_pixel_ratio` below 0.5, or an `avail_width`
+    /// or `avail_height` larger than the screen.
+    pub fn headless_flags(&self) -> Result<Vec<String>, StealthError> {
+        if self.profile.kind() != ProfileKind::Native {
+            return Ok(Vec::new());
+        }
+        Ok(vec![
+            screen_info_switch(&self.screen())?,
+            "--start-maximized".to_string(),
+        ])
     }
 }
 
@@ -172,10 +235,9 @@ impl TargetObserver for StealthObserver {
                     // Sending the CH spelling here made every session report a
                     // `navigator.platform` no real browser emits. It was invisible under
                     // `spoofed`, whose bootstrap re-patches `navigator.platform` from
-                    // `platformJs` and so happened to paper over it — but under `Off`/`Native`
-                    // the bootstrap replaces nothing on `navigator` (see `bootstrap` above),
-                    // leaving `native` profiles presenting `"macOS"` where Chrome reports
-                    // `"MacIntel"`.
+                    // `platformJs` and so happened to paper over it — but `Off`/`Native` have
+                    // no bootstrap (see `bootstrap` above), leaving `native` profiles
+                    // presenting `"macOS"` where Chrome reports `"MacIntel"`.
                     // Measured against a real Chrome build, not inferred.
                     "platform": self.fingerprint.platform.js_string(),
                     "userAgentMetadata": &user_agent_metadata,
@@ -183,30 +245,28 @@ impl TargetObserver for StealthObserver {
             )
             .await?;
 
-        // Screen-size override + focus emulation: keeps headless from leaking
-        // an oddly-shaped viewport and from reporting `document.hasFocus()`
-        // false for the (always-backgrounded) headless tab. The merged
-        // fingerprint's screen (persona's when it set one, else the
-        // `StealthProfile::screen` pin) wins; neither set → the fixed
-        // 1920x1080 default.
-        let (screen_width, screen_height, device_scale_factor) = match self.fingerprint.screen {
-            Some(s) => (s.width, s.height, s.device_pixel_ratio),
-            None => (1920, 1080, 1.0),
-        };
-        session
-            .call(
-                "Emulation.setDeviceMetricsOverride",
-                json!({
-                    "width": screen_width,
-                    "height": screen_height,
-                    "deviceScaleFactor": device_scale_factor,
-                    "mobile": false,
-                    "screenWidth": screen_width,
-                    "screenHeight": screen_height,
-                }),
-            )
-            .await?;
+        // Screen-size override, for `Spoofed` only: `Native` takes its screen
+        // from the launch switches of `headless_flags` instead, or from the
+        // real display when headed.
+        if self.profile.kind() == ProfileKind::Spoofed {
+            let screen = self.screen();
+            session
+                .call(
+                    "Emulation.setDeviceMetricsOverride",
+                    json!({
+                        "width": screen.width,
+                        "height": screen.height,
+                        "deviceScaleFactor": screen.device_pixel_ratio,
+                        "mobile": false,
+                        "screenWidth": screen.width,
+                        "screenHeight": screen.height,
+                    }),
+                )
+                .await?;
+        }
 
+        // Focus emulation keeps the (always-backgrounded) headless tab from
+        // reporting `document.hasFocus()` false.
         session
             .call(
                 "Emulation.setFocusEmulationEnabled",
@@ -279,14 +339,12 @@ impl TargetObserver for StealthObserver {
                 .await?;
         }
 
-        // Injection is driven by whether there IS a bootstrap, not by the profile kind.
-        // `Native` now carries the geometry repair (and nothing else), and gating the send on
-        // `Spoofed` was a second, independent gate that would have left that repair assembled
-        // but never sent. `Off` still produces an empty bootstrap and so still sends nothing.
+        // Injection is driven by whether there IS a bootstrap (only `Spoofed` has one), not by
+        // a second, independent check of the profile kind.
         if !self.bootstrap.is_empty() {
             // Inject into the MAIN world (no `worldName`). The bootstrap's
             // patches mutate globals such as `Function.prototype`, `screen`
-            // and (for `Spoofed`) `Navigator.prototype` — every isolated
+            // and `Navigator.prototype` — every isolated
             // world gets its own copy of these, so a patch applied in a
             // named/isolated world is invisible to the page's own scripts
             // (and to `evaluate_main`, the surface detection sites probe).
@@ -330,9 +388,8 @@ mod tests {
     ///
     /// Regression guarded: the top-level param was sent as `ch_platform()`, so every session
     /// reported a `navigator.platform` no real browser emits. It was invisible under `spoofed`,
-    /// whose bootstrap re-patches the property from `platformJs`, but the `Off`/`Native`
-    /// bootstraps leave `navigator` alone — so `native` profiles shipped the bad value
-    /// straight through.
+    /// whose bootstrap re-patches the property from `platformJs`, but `Off`/`Native` have no
+    /// bootstrap — so `native` profiles shipped the bad value straight through.
     fn assert_platform_axes_not_swapped(sent: &serde_json::Value) {
         const JS_SPELLINGS: [&str; 3] = ["Win32", "MacIntel", "Linux x86_64"];
         const CH_SPELLINGS: [&str; 3] = ["Windows", "macOS", "Linux"];
@@ -1025,13 +1082,10 @@ mod tests {
         for expected in [
             "Page.enable",
             "Emulation.setUserAgentOverride",
-            "Emulation.setDeviceMetricsOverride",
+            // `Native` sends no `Emulation.setDeviceMetricsOverride` and no
+            // bootstrap: its screen comes from launch switches.
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setGeolocationOverride",
-            // `Native` now also receives the geometry-coherence bootstrap. It repairs the
-            // `outer*`/`avail*` props that `setDeviceMetricsOverride` above cannot reach, and
-            // carries no identity spoofing — see `patches::geometry_bootstrap`.
-            "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
         ] {
             let id =
@@ -1509,48 +1563,98 @@ mod persona_reaches_cdp_tests {
         );
     }
 
-    /// The `Native` arm builds its own bootstrap (geometry repair only, no
-    /// identity spoofing) and so reads the merged screen on a different code
-    /// path from every `spoofed()` test above. Left uncovered, reverting that
-    /// one line leaves the whole suite green.
+    /// `Native` takes its screen from launch switches (see
+    /// [`StealthObserver::headless_flags`]), so whatever screen is configured,
+    /// it sends no screen override and no bootstrap.
     #[tokio::test]
-    async fn fingerprint_screen_reaches_the_native_geometry_bootstrap() {
+    async fn native_sends_no_screen_override_and_no_bootstrap() {
         let fp = Fingerprint {
-            screen: Some(
-                ScreenSpec::new(1440, 900, 2.0)
-                    .with_avail(1440, 860)
-                    .with_inner_height(780),
-            ),
+            screen: Some(ScreenSpec::new(1440, 900, 2.0)),
             ..bare_fingerprint()
         };
-
         let frames = drive_attach(StealthObserver::with_persona(
             StealthProfile::native(),
             fp,
             Persona::default(),
         ))
         .await;
+        let methods = method_names(&frames);
+        for absent in [
+            "Emulation.setDeviceMetricsOverride",
+            "Page.addScriptToEvaluateOnNewDocument",
+        ] {
+            assert!(
+                !methods.iter().any(|m| m == absent),
+                "native sent {absent}: {methods:?}"
+            );
+        }
+    }
 
-        let source = params(&frames, "Page.addScriptToEvaluateOnNewDocument")["source"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        assert_eq!(
-            line_with(&source, "const AVAIL_H"),
-            "const AVAIL_H = 860;",
-            "the measured availHeight must reach Native's geometry bootstrap"
-        );
-        assert_eq!(
-            line_with(&source, "const INNER_H"),
-            "const INNER_H = 780;",
-            "the measured innerHeight must reach Native's geometry bootstrap"
-        );
+    /// The headless switches of a `native()` observer whose fingerprint
+    /// carries `fingerprint_screen` and whose persona carries `persona_screen`.
+    fn native_headless_flags(
+        fingerprint_screen: Option<ScreenSpec>,
+        persona_screen: Option<ScreenSpec>,
+    ) -> Result<Vec<String>, StealthError> {
+        let fp = Fingerprint {
+            screen: fingerprint_screen,
+            ..bare_fingerprint()
+        };
+        let persona = Persona {
+            screen: persona_screen,
+            ..Persona::default()
+        };
+        StealthObserver::with_persona(StealthProfile::native(), fp, persona).headless_flags()
+    }
 
-        // The CDP override and the JS geometry have to describe one display,
-        // which is the whole reason the arm reads the merged value.
-        let metrics = params(&frames, "Emulation.setDeviceMetricsOverride");
-        assert_eq!(metrics["width"].as_u64(), Some(1440));
-        assert_eq!(metrics["height"].as_u64(), Some(900));
+    #[test]
+    fn native_headless_flags_default_to_1920x1080_with_a_taskbar() {
+        assert_eq!(
+            native_headless_flags(None, None).unwrap(),
+            [
+                "--screen-info={1920x1080 devicePixelRatio=1 workAreaRight=0 workAreaBottom=48}",
+                "--start-maximized",
+            ]
+        );
+    }
+
+    /// The persona's screen wins over the fingerprint's, and Chrome takes the
+    /// size and the work area in physical pixels.
+    #[test]
+    fn native_headless_flags_give_the_persona_screen_in_physical_pixels() {
+        let flags = native_headless_flags(
+            Some(ScreenSpec::new(1366, 768, 1.0)),
+            Some(ScreenSpec::new(1440, 900, 2.0).with_avail(1400, 860)),
+        )
+        .unwrap();
+        assert_eq!(
+            flags[0],
+            "--screen-info={2880x1800 devicePixelRatio=2 workAreaRight=80 workAreaBottom=80}"
+        );
+    }
+
+    /// Chrome dumps core on these instead of starting.
+    #[test]
+    fn native_headless_flags_reject_a_screen_chrome_would_crash_on() {
+        let tiny_ratio = ScreenSpec::new(1920, 1080, 0.25);
+        let tall_work_area = ScreenSpec::new(1920, 1080, 1.0).with_avail(1920, 1081);
+        for screen in [tiny_ratio, tall_work_area] {
+            assert!(
+                matches!(
+                    native_headless_flags(Some(screen), None),
+                    Err(StealthError::InvalidOverride(_))
+                ),
+                "{screen:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn only_native_has_headless_flags() {
+        for profile in [StealthProfile::off(), StealthProfile::spoofed()] {
+            let observer = StealthObserver::new(profile, bare_fingerprint());
+            assert_eq!(observer.headless_flags().unwrap(), Vec::<String>::new());
+        }
     }
 
     /// The documented fallback for both `Persona::timezone` and

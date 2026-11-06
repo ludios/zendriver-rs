@@ -70,9 +70,8 @@ pub struct Persona {
     /// [`locale`](Self::locale) — keeps `navigator.geolocation` in step with
     /// the exit IP's real location instead of leaking the host's.
     pub geolocation: Option<GeoPos>,
-    /// Screen / device-metrics override (`Emulation.setDeviceMetricsOverride`
-    /// plus the bootstrap's `outer*`/`avail*` geometry repair, which CDP
-    /// cannot reach). Wins over
+    /// The screen that stealth presents (see [`ScreenSpec`] for how each
+    /// profile applies it). Wins over
     /// [`StealthProfile::screen`](crate::StealthProfile::screen); `None` falls
     /// back to it, and to the fixed 1920x1080 default when neither is set.
     pub screen: Option<ScreenSpec>,

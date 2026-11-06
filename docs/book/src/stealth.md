@@ -16,7 +16,7 @@ over the specific tells that mainstream fingerprint checks probe for.
 | Profile     | Launch flags | UA scrub | Emulation overrides | JS bootstrap   | Bypass CSP | Use case                                     |
 |-------------|--------------|----------|---------------------|----------------|------------|----------------------------------------------|
 | `off()`     | none         | no       | no                  | none           | no         | Reproducing issues in vanilla Chrome.       |
-| `native()`  | yes          | yes      | yes                 | geometry only  | no         | Most sites. Default recommendation.         |
+| `native()`  | yes          | yes      | yes                 | none           | no         | Most sites. Default recommendation.         |
 | `spoofed()` | yes          | yes      | yes                 | Navigator JS   | yes (on)   | Sites with active fingerprint detection.    |
 
 ### `StealthProfile::off()`
@@ -51,8 +51,9 @@ let browser = Browser::builder()
 # Ok(()) }
 ```
 
-The default recommendation. Everything but the geometry repair below
-is done with launch flags and CDP commands, not page JS:
+The default recommendation. Patches the layer that protocol-level
+fingerprinters see, with launch flags and CDP commands, and runs no JS
+in the page:
 
 - **Launch flags** — `--disable-blink-features=AutomationControlled`,
   `--disable-features=IsolateOrigins,site-per-process` (toggleable),
@@ -78,20 +79,23 @@ is done with launch flags and CDP commands, not page JS:
   string and the Sec-CH-UA brand list.
 - **Emulation overrides** —
   `Emulation.setUserAgentOverride` /
-  `Emulation.setHardwareConcurrencyOverride` /
-  `Emulation.setDeviceMetricsOverride` set a coherent identity.
-- **Geometry repair** — `Emulation.setDeviceMetricsOverride` sets
-  `window.inner*` and `screen.width`/`height`, but it can't set
-  `window.outer*` or `screen.avail*`, which would leave a window
-  narrower than its own content and a screen with no taskbar. A small
-  script, injected with `Page.addScriptToEvaluateOnNewDocument`, defines
-  getters for the window's size and position and for `screen.avail*`,
-  and replaces `Function.prototype.toString` so that those getters read
-  as native code.
+  `Emulation.setHardwareConcurrencyOverride` set a coherent identity.
+- **A screen for headless Chrome** — headless Chrome's own screen is
+  800x600, with no taskbar. So when zendriver launches a headless
+  Chrome, it passes `--screen-info` for a 1920x1080 screen with a
+  48-pixel taskbar (or the screen you configure with
+  `StealthProfile::screen` or a persona's `screen`), and
+  `--start-maximized`, which sizes every window to that screen's work
+  area. Chrome itself then reports a screen, window and viewport that
+  agree: by default a 1920x1080 screen, a 1920x1032 window at (0, 0),
+  and a 1920x945 viewport (the window minus the browser's toolbars,
+  which headless Chrome emulates). A `--screen-info` or `--window-size`
+  that you pass with `BrowserBuilder::arg` wins. A headed launch gets
+  neither switch, since Chrome then reports the real display and window.
+  `--screen-info` needs Chrome 133 or later.
 
-Apart from those, its script replaces no function: nothing on
-`navigator`, WebGL, canvas, or the other surfaces that only `spoofed()`
-patches.
+Since it runs no JS in the page, there's no patched function for a
+`Function.prototype.toString` check to catch.
 Passes most consumer site detectors. Doesn't pass [sannysoft]'s deeper
 Navigator-prototype checks.
 
@@ -303,8 +307,8 @@ identity.
   expect the JS bootstrap to fail to install).
 - **Sites that check functions for tampering** (their
   `Function.prototype.toString` output, or their shape) — `native()`
-  rather than `spoofed()`. Both replace `Function.prototype.toString`,
-  but `native()` replaces only it and the geometry getters, while
-  `spoofed()` also replaces dozens of `navigator`, WebGL, canvas and
-  other functions. zendriver's bootstrap papers over the obvious
-  differences, but a determined adversary will still find drift.
+  rather than `spoofed()`: `native()` replaces no function, while
+  `spoofed()` replaces `Function.prototype.toString` and dozens of
+  `navigator`, WebGL, canvas and other functions. zendriver's bootstrap
+  papers over the obvious differences, but a determined adversary will
+  still find drift.

@@ -214,16 +214,8 @@ fn invariants_js() -> String {
     js
 }
 
-/// Every profile that patches the page with JS.
-const PATCHED: &[&str] = &[
-    "default",
-    "native",
-    "spoofed",
-    "spoofed win32",
-    "spoofed fonts",
-];
-
-/// The profiles with the full set of spoofing patches.
+/// The profiles that patch the page with JS (`native()`, the default, patches
+/// none).
 const SPOOFED: &[&str] = &["spoofed", "spoofed win32", "spoofed fonts"];
 
 /// `(invariant, profiles, why)`: an invariant broken under each of
@@ -257,7 +249,7 @@ const KNOWN_BUGS: &[(&str, &[&str], &str)] = &[
     ),
     (
         "properties_live_on_prototypes",
-        PATCHED,
+        SPOOFED,
         "P1 Stealth: own properties on instances (ST #13)",
     ),
     (
@@ -272,7 +264,7 @@ const KNOWN_BUGS: &[(&str, &[&str], &str)] = &[
     ),
     (
         "inner_size_covers_client_size",
-        PATCHED,
+        SPOOFED,
         "P1 Stealth: innerHeight is smaller than clientHeight (ST #7)",
     ),
 ];

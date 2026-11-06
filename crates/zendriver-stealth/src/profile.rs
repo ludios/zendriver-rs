@@ -13,9 +13,9 @@ use crate::persona::specs::ScreenSpec;
 pub enum ProfileKind {
     /// No stealth applied. Browser is launched stock; no JS patches, no UA scrub.
     Off,
-    /// Launch flags + UA scrub (HeadlessChrome → Chrome) + Emulation
-    /// overrides, plus a JS bootstrap that only repairs the window and screen
-    /// geometry (see [`StealthProfile::native`]). Default.
+    /// Launch flags (including a screen for headless Chrome) + UA scrub
+    /// (HeadlessChrome → Chrome) + Emulation overrides. No JS bootstrap (see
+    /// [`StealthProfile::native`]). Default.
     Native,
     /// Native + Navigator-prototype JS patches. Passes sannysoft. Detectable
     /// by sophisticated bots that probe `toString` on Navigator getters.
@@ -139,19 +139,20 @@ impl StealthProfile {
         }
     }
 
-    /// Launch flags + UA scrub + Emulation overrides, plus a JS bootstrap that
-    /// only repairs the window and screen geometry. The default when stealth
-    /// is requested.
+    /// Launch flags + UA scrub + Emulation overrides, and no JS bootstrap.
+    /// The default when stealth is requested.
     ///
-    /// `Emulation.setDeviceMetricsOverride` sets `window.inner*` and
-    /// `screen.width`/`height`, but it can't set `window.outer*` or
-    /// `screen.avail*`. So the bootstrap defines getters for the window's
-    /// size and position (`outerWidth`, `innerHeight`, `screenX`, …), for
-    /// `screen.avail*`, and for `screen.orientation.type` and `.angle`. It
-    /// also replaces `Function.prototype.toString`, so that those getters
-    /// read as native code. Apart from those, the bootstrap replaces no
-    /// function: nothing on `navigator`, WebGL, canvas, or the other
-    /// surfaces that only [`StealthProfile::spoofed`] patches.
+    /// Under headless, the launch flags also give Chrome a screen: the
+    /// configured one (see [`screen`](Self::screen)), else 1920x1080 with a
+    /// 48-pixel taskbar, through Chrome's `--screen-info` switch, and windows
+    /// maximized to that screen's work area, through `--start-maximized`. So
+    /// Chrome itself reports a screen, window and viewport that agree, with
+    /// no `Emulation.setDeviceMetricsOverride` and nothing patched in the
+    /// page. The viewport is the window minus the browser's toolbars, which
+    /// headless Chrome emulates: 1920x945 by default. A headed Chrome
+    /// reports the real display and window. (Chrome takes `--screen-info`
+    /// from version 133 on; an older one ignores it, and so reports headless
+    /// Chrome's default screen of 800x600.)
     ///
     /// ```
     /// use zendriver_stealth::StealthProfile;
@@ -319,12 +320,16 @@ impl StealthProfile {
         self.per_field.ua_metadata = Some(m);
         self
     }
-    /// Override the reported screen / device-metrics
-    /// (`Emulation.setDeviceMetricsOverride`) wholesale.
+    /// Override the reported screen wholesale, replacing the default of
+    /// 1920x1080 with a 48-pixel taskbar.
     ///
-    /// Replaces the observer's fixed 1920x1080 default, and supplies the
-    /// bootstrap's `avail*` / `outer*` insets so the JS geometry describes the
-    /// same display CDP sizes. Like
+    /// Under [`native`](Self::native), a headless Chrome gets this screen at
+    /// launch (see [`native`](Self::native)), and its window fills the work
+    /// area that the `avail_*` fields describe; `inner_height` doesn't apply.
+    /// Under [`spoofed`](Self::spoofed), it sizes
+    /// `Emulation.setDeviceMetricsOverride`, and supplies the bootstrap's
+    /// `avail*` / `outer*` insets so the JS geometry describes the same
+    /// display that CDP sizes. Like
     /// [`user_agent_metadata`](Self::user_agent_metadata), this is a
     /// profile-level pin; a [`Persona`](crate::Persona)'s `screen` field
     /// (threaded via

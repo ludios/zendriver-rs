@@ -8,9 +8,9 @@
 //! Three stealth modes, exposed via [`StealthProfile`]:
 //!
 //! - [`StealthProfile::off`] — no stealth (stock Chrome launch).
-//! - [`StealthProfile::native`] — launch flags + UA scrub + CDP `Emulation`
-//!   overrides, plus a small JS bootstrap that repairs the window and screen
-//!   geometry; the default.
+//! - [`StealthProfile::native`] — launch flags (including a screen for
+//!   headless Chrome) + UA scrub + CDP `Emulation` overrides, with no JS
+//!   bootstrap; the default.
 //! - [`StealthProfile::spoofed`] — `native` plus a Navigator-prototype JS
 //!   bootstrap script that passes the [sannysoft][sannysoft] battery.
 //!
