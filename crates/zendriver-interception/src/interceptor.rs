@@ -85,7 +85,8 @@ struct Shared {
 }
 
 impl Interceptor {
-    /// The interceptor for `session`, which must have no other.
+    /// The interceptor for `session`. `session` must not have another
+    /// `Interceptor`.
     ///
     /// ```no_run
     /// # async fn ex(session: zendriver_transport::SessionHandle)
@@ -134,7 +135,7 @@ impl Interceptor {
 /// handle removes the layer, and [`stop`](Self::stop) removes it and waits
 /// until Chrome has applied the change.
 #[derive(Debug)]
-#[must_use = "interception stops when the handle is dropped — bind it to a variable to keep it alive"]
+#[must_use = "the layer is removed when the handle is dropped — bind it to a variable to keep it in force"]
 pub struct InterceptHandle {
     layer: LayerId,
     /// `None` after `stop`, and in a handle from `for_tests`.
@@ -161,8 +162,9 @@ impl InterceptHandle {
     /// # Errors
     ///
     /// [`InterceptionError::Call`] if Chrome refused the change, or the
-    /// session is gone (its tab closed, say). The layer is removed either
-    /// way.
+    /// session's socket couldn't carry it. The layer is removed either way.
+    /// (If the session's layers were already dropped, because its socket
+    /// closed or it detached, this returns `Ok`.)
     pub async fn stop(mut self) -> Result<(), InterceptionError> {
         let Some(commands) = self.commands.take() else {
             return Ok(());
@@ -193,7 +195,7 @@ impl Drop for InterceptHandle {
 /// stream removes its layer, and continues each request it took that
 /// wasn't read yet.
 #[derive(Debug)]
-#[must_use = "interception stops when the stream is dropped — bind it to a variable to keep it alive"]
+#[must_use = "the layer is removed when the stream is dropped — bind it to a variable to keep it in force"]
 pub struct InterceptStream {
     pub(crate) requests: mpsc::UnboundedReceiver<PausedRequest>,
     pub(crate) _layer: InterceptHandle,

@@ -13,7 +13,8 @@
 //!   [`block`](builder::InterceptBuilder::block) /
 //!   [`redirect`](builder::InterceptBuilder::redirect) /
 //!   [`respond`](builder::InterceptBuilder::respond) /
-//!   [`modify_request`](builder::InterceptBuilder::modify_request) and call
+//!   [`modify_request`](builder::InterceptBuilder::modify_request) /
+//!   [`modify_response`](builder::InterceptBuilder::modify_response) and call
 //!   [`start`](builder::InterceptBuilder::start). Dropping the returned
 //!   [`InterceptHandle`] removes the layer.
 //! - **Stream** — call
@@ -21,7 +22,8 @@
 //!   [`InterceptStream`] of [`PausedRequest`]s; release each pause by
 //!   calling one of [`continue_`](PausedRequest::continue_),
 //!   [`abort`](PausedRequest::abort), [`respond`](PausedRequest::respond),
-//!   or [`modify_and_continue`](PausedRequest::modify_and_continue).
+//!   [`modify_and_continue`](PausedRequest::modify_and_continue), or (at
+//!   the `Response` stage) [`continue_response`](PausedRequest::continue_response).
 //!
 //! Layers of one session compose: see [`interceptor`] for how a paused
 //! request is handed to them.

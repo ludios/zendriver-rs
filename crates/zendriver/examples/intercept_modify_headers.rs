@@ -29,8 +29,8 @@ async fn main() -> zendriver::Result<()> {
         .intercept()
         .modify_request("*httpbin.org/headers*", |req| {
             // CDP replaces — not merges — the header set. Copy the originals
-            // forward and stamp our custom header on top. Headers are an
-            // ordered Vec to preserve duplicates / Set-Cookie semantics.
+            // forward and stamp our custom header on top. (Chrome has
+            // already merged duplicate request headers by name.)
             let mut headers = req.headers.clone();
             headers.push(("X-Custom".into(), "zendriver-demo".into()));
             RequestOverrides {

@@ -318,21 +318,21 @@ impl InterceptBuilder {
     }
 
     /// Add the rules to the session's interception as one layer, and return
-    /// once Chrome pauses the requests they need: requests sent from then
-    /// on are intercepted.
+    /// once Chrome has applied the layer's patterns: a request sent from
+    /// then on is intercepted.
     ///
     /// The layer stays in force until the returned [`InterceptHandle`] is
     /// dropped or [stopped](InterceptHandle::stop). Layers added later take
-    /// precedence: each paused request goes to the newest layer that has a
-    /// pattern and a rule for it.
+    /// precedence: a paused request goes to the newest layer that has a
+    /// pattern for it and takes it (see [`crate::interceptor`]).
     ///
     /// If no [`pattern`](Self::pattern) entries were added, the patterns
-    /// come from the rules: each rule's URL pattern, at the stage it acts
-    /// at (`Response` for [`modify_response`](Self::modify_response),
-    /// `Request` for the others), and `"*"` at the `Request` stage for
+    /// come from the rules: each rule's URL pattern, at the `Response`
+    /// stage for [`modify_response`](Self::modify_response) and at the
+    /// `Request` stage for the others; and `"*"` at the `Request` stage for
     /// [`block_hosts`](Self::block_hosts) and for
-    /// [`handle_proxy_auth`](Self::handle_proxy_auth). Chrome then pauses
-    /// only the requests some rule acts on.
+    /// [`handle_proxy_auth`](Self::handle_proxy_auth). So, except for those
+    /// two, Chrome pauses only the URLs the rules match.
     ///
     /// # Errors
     ///
@@ -346,7 +346,8 @@ impl InterceptBuilder {
     }
 
     /// Add a layer that hands each request it pauses to the returned
-    /// [`InterceptStream`], and return once Chrome pauses them.
+    /// [`InterceptStream`], and return once Chrome has applied the layer's
+    /// patterns.
     ///
     /// The layer uses the declared patterns (a single match-all `"*"`
     /// pattern at the `Request` stage when none were added), and takes
@@ -355,8 +356,9 @@ impl InterceptBuilder {
     /// methods (`continue_` / `abort` / `respond` / `modify_and_continue` /
     /// `continue_response`): Chrome holds the request until then.
     ///
-    /// Rules registered via `block` / `redirect` / `respond` /
-    /// `modify_request` are ignored on this path: stream consumers drive
+    /// Rules registered via `block` / `block_hosts` / `redirect` /
+    /// `respond` / `modify_request` / `modify_response` are ignored on this
+    /// path: stream consumers drive
     /// every paused request themselves. Use [`start`](Self::start) when you
     /// want them applied. [`handle_proxy_auth`](Self::handle_proxy_auth)
     /// credentials are honored: a proxy's challenge never reaches the

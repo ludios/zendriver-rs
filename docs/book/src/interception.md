@@ -61,10 +61,10 @@ force — when you drop it, its layer is removed, and the tab's other layers
 keep working (`Fetch.disable` is sent once no layer is left). Await
 [`stop`] instead of dropping it to wait until Chrome has applied the
 change. **Bind the handle to a variable; letting it drop immediately
-silently disables interception.**
-Use `let _intercept = ...` (note the leading underscore — Rust would warn
-on a plain `_`, which is a different binding semantics that drops at end
-of statement, not end of scope).
+silently removes its rules.**
+Use `let _intercept = ...` (note the leading underscore: a plain `_` is
+no binding at all, so the handle drops at the end of the statement, not
+of the scope).
 
 [`stop`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptHandle.html#method.stop
 [`InterceptHandle`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptHandle.html
@@ -89,8 +89,8 @@ gone before the closure runs. Response headers (`modify_response`) keep both,
 since CDP sends those as an array.
 
 The closure runs synchronously per-event on the tab's interception task;
-it should not block. Spawn off the runtime if you need to call out to an async
-service before deciding the override.
+it should not block, and can't wait for anything async. When deciding the
+override needs an async call, use the [stream API](#stream-api) instead.
 
 ### Redirect and synthesize
 
@@ -152,7 +152,8 @@ while let Some(paused) = stream.next().await {
 ```
 
 Each [`PausedRequest`] is consumed by exactly one of
-[`continue_`] / [`abort`] / [`respond`] / [`modify_and_continue`]. The
+[`continue_`] / [`abort`] / [`respond`] / [`modify_and_continue`] /
+[`continue_response`] (at the `Response` stage). The
 [`body`] method is `&self` and reads the upstream response body
 non-destructively — only useful at the `Response` stage; at the `Request`
 stage Chrome has no body yet.
@@ -162,6 +163,7 @@ stage Chrome has no body yet.
 [`abort`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.abort
 [`respond`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.respond
 [`modify_and_continue`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.modify_and_continue
+[`continue_response`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.continue_response
 [`body`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.body
 
 **Release every `PausedRequest` promptly.** Chrome holds the request
@@ -174,7 +176,9 @@ treatment: a rule whose closure panics, or whose release Chrome refuses,
 logs it and continues the request unchanged. And if the tab's interception
 ever falls so far behind that it loses events (a pause it never saw would
 stay paused), it disables and re-enables `Fetch`, which continues every
-paused request, those a stream holds included.
+paused request, those a stream holds included. When the tab's socket
+closes or its session detaches, its layers are dropped, which ends their
+streams.
 
 ## Tracker / fingerprinter blocklist
 
@@ -225,10 +229,10 @@ character only ever lands in text the parser discards.
 
 ## Pattern + stage filters
 
-By default a rule layer pauses only what its rules act on: each rule's URL
-pattern, at the stage the rule acts at (`Response` for `modify_response`,
-`Request` for the others); `block_hosts` and proxy credentials pause every
-request at the `Request` stage. A `subscribe()` stream pauses every request
+By default a rule layer pauses for each rule its URL pattern, at the
+`Response` stage for `modify_response` and at the `Request` stage for the
+others; `block_hosts` and proxy credentials pause every request at the
+`Request` stage. A `subscribe()` stream pauses every request
 at the `Request` stage. Choose the patterns yourself with builder
 modifiers:
 

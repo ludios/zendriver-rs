@@ -20,8 +20,8 @@ need; skip the rest.
 - `browser_intercept_add_rule` — block, redirect, or modify matching requests.
 - `browser_intercept_list_rules` / `browser_intercept_remove_rule` / `browser_intercept_clear_rules`.
 - Use to block trackers/ads (faster, cleaner scrapes), stub endpoints, or fault-inject.
-- Chain multiple interception needs into ONE rule set on the same tab — don't stand up
-  competing interceptors.
+- Rules on one tab compose: a request goes to the rule added last of those that match it
+  (at the stage Chrome paused it at), and older rules, then tracker blocking, get the rest.
 
 ## Live network monitoring
 

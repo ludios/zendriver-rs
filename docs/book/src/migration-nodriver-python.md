@@ -213,7 +213,7 @@ what you use.
 
 | nodriver capability | Rust Cargo feature | What it gates |
 |---------------------|--------------------|---------------|
-| `tab.add_handler(nd.cdp.fetch.RequestPaused, ...)` rewriting | `interception` | `Tab::intercept()` plus the rule builder (`block` / `redirect` / `respond` / `modify_request`) and the `subscribe()` stream. |
+| `tab.add_handler(nd.cdp.fetch.RequestPaused, ...)` rewriting | `interception` | `Tab::intercept()` plus the rule builder (`block` / `redirect` / `respond` / `modify_request` / `modify_response`) and the `subscribe()` stream. |
 | `await tab.expect_request(...)` (where supported) | `expect` | The `expect_request` / `expect_response` / `expect_dialog` / `expect_download` methods on `Tab`. |
 | `await tab.verify_cf()` | `cloudflare` | `Tab::cloudflare()` plus the `CloudflareBypass` driver. Pulls in `interception`. |
 | Chrome auto-download (separate `nodriver` extras) | `fetcher` | `zendriver_fetcher` for downloading Chrome for Testing binaries on demand. |

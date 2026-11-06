@@ -40,9 +40,8 @@
 //! `Page.setInterceptFileChooserDialog { enabled: false }` still runs so a
 //! later *real* file dialog isn't silently swallowed. Implemented via a
 //! [`CancellationToken`] the spawned subscriber task races against
-//! `Page.fileChooserOpened` in a `tokio::select!` — mirrors
-//! `zendriver_interception::actor::run_actor`'s cancel-races-the-event-stream
-//! shape (subscribe before enable; `() = cancel.cancelled() => { disable }`).
+//! `Page.fileChooserOpened` in a `tokio::select!` (subscribe before enable;
+//! `() = cancel.cancelled() => { disable }`).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -278,9 +277,8 @@ async fn handle_event(
 /// `async` (unlike `dialog::register`/most `expect_*` registration) because
 /// `Page.setInterceptFileChooserDialog { enabled: true }` must reach Chrome
 /// before the caller's next line (typically a click) — see the module doc.
-/// Subscribes BEFORE dispatching the enable call (mirrors
-/// `zendriver_interception::actor::run_actor`'s subscribe-before-enable
-/// pattern) so a chooser opened in the round-trip window can't be missed —
+/// Subscribes BEFORE dispatching the enable call so a chooser opened in the
+/// round-trip window can't be missed —
 /// though in practice the enable call is itself awaited before this
 /// function returns, so no chooser can legally open before that point
 /// anyway.

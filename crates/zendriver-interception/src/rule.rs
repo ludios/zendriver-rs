@@ -133,9 +133,11 @@ impl Rule {
         }
     }
 
-    /// The pattern for Chrome to pause the requests this rule acts on: its
-    /// URL pattern (every URL for `BlockHosts`), at the `Response` stage
-    /// for `ModifyResponse` and at the `Request` stage for the others.
+    /// The pattern that has Chrome pause requests for this rule when the
+    /// layer has no explicit ones: its URL pattern (every URL for
+    /// `BlockHosts`), at the `Response` stage for `ModifyResponse` and at
+    /// the `Request` stage for the others (`Block`, `Respond` and
+    /// `BlockHosts` could act at either).
     pub(crate) fn pattern(&self) -> RequestPattern {
         let url = match self {
             Self::Block { pattern }

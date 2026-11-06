@@ -3152,8 +3152,9 @@ impl Tab {
     /// [`InterceptBuilder`](zendriver_interception::InterceptBuilder) for a
     /// layer of this tab's interception.
     ///
-    /// Chain rule registration (`.block(...)` / `.redirect(...)` /
-    /// `.respond(...)` / `.modify_request(...)`) and optional CDP
+    /// Chain rule registration (`.block(...)` / `.block_hosts(...)` /
+    /// `.redirect(...)` / `.respond(...)` / `.modify_request(...)` /
+    /// `.modify_response(...)`) and optional CDP
     /// `RequestPattern` filters (`.pattern(...)` / `.at_request()` /
     /// `.at_response()` / `.resource(...)`), then await
     /// [`start`](zendriver_interception::InterceptBuilder::start) to have
@@ -3166,8 +3167,8 @@ impl Tab {
     /// stream you drive manually.
     ///
     /// Each `start` or `subscribe` adds a layer, and the tab's layers
-    /// compose: a later one takes precedence for the requests it pauses
-    /// and has a rule for, and the others keep working. The browser's own
+    /// compose: a later one takes precedence for the requests it takes,
+    /// and the older ones get the rest. The browser's own
     /// tracker blocking and proxy credentials are the oldest layer. See
     /// [`zendriver_interception::interceptor`] for the details.
     ///

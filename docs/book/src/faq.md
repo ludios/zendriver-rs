@@ -195,7 +195,7 @@ Two paths:
   `tab.intercept().subscribe()` stream that auto-`continue_()`s and logs
   each `PausedRequest`.
 - **Modify** — use [`Interception`](./interception.md)'s rule API
-  (block / redirect / respond / modify_request).
+  (block / redirect / respond / modify_request / modify_response).
 
 There's no Playwright-style "trace viewer" output; assemble the data
 you want from those streams.

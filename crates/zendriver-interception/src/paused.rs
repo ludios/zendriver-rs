@@ -172,7 +172,9 @@ impl PausedRequest {
     /// `Fetch.continueResponse` once the upstream response headers have
     /// arrived. Called on a `Request`-stage `PausedRequest` (where
     /// [`response`](Self::response) is `None`), it returns
-    /// [`InterceptionError::WrongStage`] without dispatching anything; use
+    /// [`InterceptionError::WrongStage`] without dispatching
+    /// `continueResponse` (the request, dropped unreleased, is then
+    /// continued unchanged); use
     /// [`respond`](Self::respond) to serve a synthetic response at the
     /// `Request` stage instead.
     ///

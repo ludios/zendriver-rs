@@ -96,7 +96,7 @@ intents:
   no race with fast responses.
 - **Modification** → [`Tab::intercept`] from the `interception`
   feature. A declarative rule builder (`block` / `redirect` /
-  `respond` / `modify_request`) or a `subscribe()` stream for
+  `respond` / `modify_request` / `modify_response`) or a `subscribe()` stream for
   callback-style control.
 
 Direct CDP-event handlers are still available via
