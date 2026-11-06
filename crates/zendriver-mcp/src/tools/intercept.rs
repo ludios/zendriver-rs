@@ -104,7 +104,8 @@ pub enum InterceptAction {
         /// Headers to merge over the request's originals. CDP's
         /// `continueRequest.headers` is a full replacement, so the closure
         /// rebuilds the header list from the intercepted request and
-        /// overlays these entries (case-insensitive on names).
+        /// overlays these entries (case-insensitive on names). Empty (the
+        /// default) leaves the headers alone.
         #[serde(default)]
         headers: BTreeMap<String, String>,
         /// Replace the request URL. Omit to keep the original.
@@ -694,13 +695,20 @@ impl ModifyRequestOverlay {
     /// Chrome reported it and overlay the caller's entries by
     /// case-insensitive name match. Case-insensitive: HTTP header names are
     /// case-insensitive per RFC 7230, and Chrome's emission casing isn't
-    /// stable across versions. `url` / `method` / `post_data` are passed
-    /// straight through — `None` leaves Chrome's original untouched.
+    /// stable across versions. With no header overlay, the headers are left
+    /// alone: the reported ones aren't all that Chrome sends. `url` /
+    /// `method` / `post_data` are passed straight through — `None` leaves
+    /// Chrome's original untouched.
     fn build(&self, original_headers: &[(String, String)]) -> RequestOverrides {
+        let headers = if self.headers.is_empty() {
+            None
+        } else {
+            Some(merge_header_list(original_headers, &self.headers))
+        };
         RequestOverrides {
             url: self.url.clone(),
             method: self.method.clone(),
-            headers: Some(merge_header_list(original_headers, &self.headers)),
+            headers,
             post_data: self.post_data.clone().map(String::into_bytes),
         }
     }
@@ -1064,18 +1072,20 @@ mod tests {
         );
     }
 
-    /// When `url` / `method` / `post_data` are all `None` (the pre-existing
-    /// headers-only shape), the resulting `RequestOverrides` must leave them
-    /// `None` too — no accidental empty-string overrides.
+    /// When `headers` is empty and `url` / `method` / `post_data` are all
+    /// `None`, the resulting `RequestOverrides` must leave them all `None`
+    /// too: no accidental overrides (not even of the headers with the ones
+    /// Chrome reported).
     #[test]
-    fn modify_request_overlay_omits_absent_scalar_overrides() {
+    fn modify_request_overlay_omits_absent_overrides() {
         let snapshot = ModifyRequestOverlay {
             headers: BTreeMap::new(),
             url: None,
             method: None,
             post_data: None,
         };
-        let ov = snapshot.build(&[]);
+        let ov = snapshot.build(&[("Host".to_string(), "example.com".to_string())]);
+        assert!(ov.headers.is_none());
         assert!(ov.url.is_none());
         assert!(ov.method.is_none());
         assert!(ov.post_data.is_none());

@@ -119,7 +119,7 @@ $defs:
         type: object
         properties:
           headers:
-            description: "Headers to merge over the request's originals. CDP's\n`continueRequest.headers` is a full replacement, so the closure\nrebuilds the header list from the intercepted request and\noverlays these entries (case-insensitive on names)."
+            description: "Headers to merge over the request's originals. CDP's\n`continueRequest.headers` is a full replacement, so the closure\nrebuilds the header list from the intercepted request and\noverlays these entries (case-insensitive on names). Empty (the\ndefault) leaves the headers alone."
             type: object
             additionalProperties:
               type: string
