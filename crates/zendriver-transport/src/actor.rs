@@ -458,14 +458,23 @@ pub(crate) async fn run_actor<S>(
     } else {
         "connection shut down"
     };
-    // A genuine ws death (not a caller-requested `shutdown()` and not a
-    // `reconnect()` — both cancel via `shutdown.cancelled()`, which never
-    // sets `DISCONNECTED_CODE`) gets exactly one `Disconnected` on the
-    // accounted bus, gated the same as the per-event mirroring above.
-    if drain_code == crate::connection::DISCONNECTED_CODE && accounted.tx.receiver_count() > 0 {
-        let _ = accounted.tx.send(AccountedRawEvent::Disconnected {
-            generation: accounted.generation,
-        });
+    // Announce the end on the accounted bus, gated the same as the per-event
+    // mirroring above: a ws death as `Disconnected`, and a stop while the ws
+    // was alive as `Shutdown`. But an actor that a `reconnect()` replaced
+    // announces nothing: `Reconnected` already said that its generation
+    // ended. A reconnect bumps the connection's generation before it cancels
+    // this actor, and the cancellation orders the bump before this load.
+    let generation = accounted.generation;
+    let replaced_by_reconnect = weak_inner.upgrade().is_some_and(|inner| {
+        inner.generation.load(std::sync::atomic::Ordering::Relaxed) != generation
+    });
+    if !replaced_by_reconnect && accounted.tx.receiver_count() > 0 {
+        let end = if drain_code == crate::connection::DISCONNECTED_CODE {
+            AccountedRawEvent::Disconnected { generation }
+        } else {
+            AccountedRawEvent::Shutdown { generation }
+        };
+        let _ = accounted.tx.send(end);
     }
     for (_id, reply) in pending.drain() {
         let _ = reply.send(Err(CdpRpcError {

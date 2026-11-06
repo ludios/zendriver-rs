@@ -1266,7 +1266,11 @@ async fn run(
                 Some(AccountedRawEvent::Lagged { missed, .. }) => mux.recover(missed).await,
                 // A reconnect gives the connection a new socket, where this
                 // session doesn't exist.
-                Some(AccountedRawEvent::Reconnected { .. } | AccountedRawEvent::Disconnected { .. })
+                Some(
+                    AccountedRawEvent::Reconnected { .. }
+                    | AccountedRawEvent::Disconnected { .. }
+                    | AccountedRawEvent::Shutdown { .. },
+                )
                 | None => mux.end(),
             },
         }

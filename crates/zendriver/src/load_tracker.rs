@@ -128,9 +128,8 @@ enum Initial {
 }
 
 /// The changes of frame `frame_id` that `session` receives from now on, in
-/// the order Chrome sent them. Ends when the socket dies, but not on a
-/// clean [`zendriver_transport::Connection::shutdown`], which the event bus
-/// can't tell from a reconnect.
+/// the order Chrome sent them. Ends when the socket dies or the connection
+/// is shut down.
 fn changes(
     session: &SessionHandle,
     frame_id: &str,
@@ -144,26 +143,30 @@ fn changes(
             .connection()
             .subscribe_raw_accounted()
             .take_while(|ev| {
-                let alive = !matches!(ev, AccountedRawEvent::Disconnected { .. });
+                let alive = !matches!(
+                    ev,
+                    AccountedRawEvent::Disconnected { .. } | AccountedRawEvent::Shutdown { .. }
+                );
                 async move { alive }
             })
             .filter_map(move |ev| {
-                let change = match ev {
-                    AccountedRawEvent::Event { event, .. } => {
-                        let ours = event.session_id == session_id
-                            && event.params.get("frameId").and_then(|v| v.as_str())
-                                == Some(&frame_id);
-                        match event.method.as_str() {
-                            "Page.frameStartedLoading" if ours => Some(Change::Started),
-                            "Page.frameStoppedLoading" if ours => Some(Change::Stopped),
-                            _ => None,
+                let change =
+                    match ev {
+                        AccountedRawEvent::Event { event, .. } => {
+                            let ours = event.session_id == session_id
+                                && event.params.get("frameId").and_then(|v| v.as_str())
+                                    == Some(&frame_id);
+                            match event.method.as_str() {
+                                "Page.frameStartedLoading" if ours => Some(Change::Started),
+                                "Page.frameStoppedLoading" if ours => Some(Change::Stopped),
+                                _ => None,
+                            }
                         }
-                    }
-                    AccountedRawEvent::Lagged { .. } | AccountedRawEvent::Reconnected { .. } => {
-                        Some(Change::Lost)
-                    }
-                    AccountedRawEvent::Disconnected { .. } => None,
-                };
+                        AccountedRawEvent::Lagged { .. }
+                        | AccountedRawEvent::Reconnected { .. } => Some(Change::Lost),
+                        AccountedRawEvent::Disconnected { .. }
+                        | AccountedRawEvent::Shutdown { .. } => None,
+                    };
                 async move { change }
             }),
     )

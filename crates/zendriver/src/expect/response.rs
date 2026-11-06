@@ -453,6 +453,26 @@ mod tests {
         conn.shutdown();
     }
 
+    /// The same when the connection is shut down on purpose (as
+    /// `Tab::close` does) instead of dying.
+    #[tokio::test]
+    async fn expect_response_returns_event_stream_incomplete_on_shutdown() {
+        let (_mock, conn) = MockConnection::pair();
+        let session = SessionHandle::new(conn.clone(), "S1");
+
+        let expectation = register(&session, UrlMatcher::from("/api/"));
+
+        conn.shutdown();
+
+        let res = tokio::time::timeout(Duration::from_secs(2), expectation)
+            .await
+            .expect("expectation did not resolve within 2s after shutdown");
+        assert!(
+            matches!(res, Err(ZendriverError::EventStreamIncomplete)),
+            "expected EventStreamIncomplete after shutdown, got {res:?}",
+        );
+    }
+
     /// Register an expectation, then simulate a transport *reconnect*
     /// (`AccountedRawEvent::Reconnected`, via `MockConnection::reconnect`)
     /// before any matching response arrives. Like the disconnect case, the

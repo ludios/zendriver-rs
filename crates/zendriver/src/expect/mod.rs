@@ -43,9 +43,10 @@ use crate::error::{Result, ZendriverError};
 /// Yields `Ok(T)` for every successfully-decoded `method` event on this
 /// session. Yields `Err(`[`ZendriverError::EventStreamIncomplete`]`)` on:
 ///
-/// - [`AccountedRawEvent::Disconnected`] / [`AccountedRawEvent::Reconnected`]
-///   — the watched stream is gone, so the caller can no longer prove the
-///   awaited condition didn't occur just before the boundary.
+/// - [`AccountedRawEvent::Disconnected`] / [`AccountedRawEvent::Shutdown`] /
+///   [`AccountedRawEvent::Reconnected`] — the watched stream is gone, so the
+///   caller can no longer prove the awaited condition didn't occur just
+///   before the boundary.
 /// - [`AccountedRawEvent::Lagged`] — this subscriber missed frames it can't
 ///   recover. There's no way to prove the awaited event wasn't among them,
 ///   so a "no show" (`Timeout`) would be a possibly-wrong claim. Treated the
@@ -91,7 +92,8 @@ where
                 // per-boundary tests so coverage doesn't silently regress.
                 AccountedRawEvent::Lagged { .. }
                 | AccountedRawEvent::Reconnected { .. }
-                | AccountedRawEvent::Disconnected { .. } => {
+                | AccountedRawEvent::Disconnected { .. }
+                | AccountedRawEvent::Shutdown { .. } => {
                     Some(Err(ZendriverError::EventStreamIncomplete))
                 }
             }

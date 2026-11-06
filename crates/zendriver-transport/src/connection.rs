@@ -458,6 +458,10 @@ impl Connection {
     ///             eprintln!("gen {generation} disconnected");
     ///             break;
     ///         }
+    ///         AccountedRawEvent::Shutdown { generation } => {
+    ///             eprintln!("gen {generation} shut down");
+    ///             break;
+    ///         }
     ///     }
     /// }
     /// # }
@@ -509,7 +513,9 @@ impl Connection {
         self.inner.generation.load(Ordering::Relaxed)
     }
 
-    /// Trigger graceful shutdown of the underlying actor.
+    /// Trigger graceful shutdown of the underlying actor. Subscribers of
+    /// [`Connection::subscribe_raw_accounted`] then receive
+    /// [`AccountedRawEvent::Shutdown`], unless the socket died first.
     pub fn shutdown(&self) {
         self.inner
             .shutdown
@@ -594,12 +600,18 @@ impl Connection {
             + Unpin
             + 'static,
     {
+        // Bump the generation BEFORE cancelling the previous actor: once the
+        // actor learns of the cancellation (which orders the bump before it),
+        // it sees that its generation is no longer the current one, so it
+        // knows that a reconnect replaced it, and it announces neither a
+        // `Shutdown` nor a `Disconnected` — a reconnect is announced solely
+        // via `Reconnected` below. `fetch_add` returns the *previous* value,
+        // exactly what `AccountedRawEvent::Reconnected::previous` needs.
+        let previous_generation = self.inner.generation.fetch_add(1, Ordering::Relaxed);
+        let new_generation = previous_generation + 1;
+
         // Cancel the previous actor — its `pending` (all stale by now) drains
-        // and its loop exits. This goes through the `shutdown.cancelled()`
-        // branch of the actor loop (same as `Connection::shutdown`), so it
-        // never sets `DISCONNECTED_CODE` and therefore never emits
-        // `AccountedRawEvent::Disconnected` — a reconnect is announced solely
-        // via `Reconnected` below, not a spurious disconnect.
+        // and its loop exits.
         {
             let guard = self
                 .inner
@@ -609,13 +621,9 @@ impl Connection {
             guard.cancel();
         }
 
-        // Bump the generation and announce the transition on the accounted
-        // bus BEFORE spawning the new actor, so a subscriber never observes
-        // an event tagged with the new generation before `Reconnected`.
-        // `fetch_add` returns the *previous* value, exactly what
-        // `AccountedRawEvent::Reconnected::previous` needs.
-        let previous_generation = self.inner.generation.fetch_add(1, Ordering::Relaxed);
-        let new_generation = previous_generation + 1;
+        // Announce the transition on the accounted bus BEFORE spawning the
+        // new actor, so a subscriber never observes an event tagged with the
+        // new generation before `Reconnected`.
         if self.inner.accounted_tx.receiver_count() > 0 {
             let _ = self
                 .inner
@@ -1867,6 +1875,63 @@ mod tests {
         }
 
         conn.shutdown();
+    }
+
+    /// The next accounted event on `sub`, failing the test after a second.
+    async fn next_accounted(
+        sub: &mut (impl Stream<Item = AccountedRawEvent> + Unpin),
+    ) -> AccountedRawEvent {
+        tokio::time::timeout(std::time::Duration::from_secs(1), sub.next())
+            .await
+            .expect("an accounted event arrived")
+            .expect("the stream is open")
+    }
+
+    #[tokio::test]
+    async fn shutdown_ends_the_generation_with_a_shutdown_event() {
+        let (ws, _inbound, _outbound) = duplex_pair();
+        let conn = spawn_actor(ws);
+        let mut sub = conn.subscribe_raw_accounted();
+
+        conn.shutdown();
+        let ev = next_accounted(&mut sub).await;
+        assert!(
+            matches!(ev, AccountedRawEvent::Shutdown { generation: 1 }),
+            "{ev:?}"
+        );
+    }
+
+    /// The actor that a reconnect replaced announces nothing more: the
+    /// subscriber sees `Reconnected`, then only the new generation's end.
+    #[tokio::test]
+    async fn a_replaced_actor_announces_nothing() {
+        let (ws, _inbound, _outbound) = duplex_pair();
+        let conn = spawn_actor(ws);
+        let mut sub = conn.subscribe_raw_accounted();
+
+        let (ws, _inbound, _outbound) = duplex_pair();
+        conn.reconnect(ws);
+        // Give the replaced actor the time to exit, and to announce
+        // anything it (wrongly) would.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        conn.shutdown();
+
+        let first = next_accounted(&mut sub).await;
+        assert!(
+            matches!(
+                first,
+                AccountedRawEvent::Reconnected {
+                    previous: 1,
+                    generation: 2
+                }
+            ),
+            "{first:?}"
+        );
+        let second = next_accounted(&mut sub).await;
+        assert!(
+            matches!(second, AccountedRawEvent::Shutdown { generation: 2 }),
+            "{second:?}"
+        );
     }
 
     #[tokio::test]

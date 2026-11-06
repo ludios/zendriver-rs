@@ -456,8 +456,10 @@ impl MonitorBuilder {
     ///
     /// The task subscribes to the session's loss-accounted CDP event stream
     /// and runs until the monitor is dropped, [`NetworkMonitor::stop`] is
-    /// called, or — **fail closed** — the underlying transport reports
-    /// [`NetworkDeliveryBoundary::Disconnected`]. In the `Disconnected` case
+    /// called, the tab's connection is shut down (e.g. by [`crate::Tab::close`]),
+    /// or — **fail closed** — the underlying transport reports
+    /// [`NetworkDeliveryBoundary::Disconnected`]. After a shutdown, the stream
+    /// returns `None` with no boundary before it. In the `Disconnected` case
     /// the task emits that boundary event and then ends; the stream returns
     /// `None` on the next poll. There is no automatic reconnect: a consumer
     /// that wants to keep observing across a transport blip must call
@@ -921,8 +923,12 @@ async fn run_monitor(
                         let _ = emit_boundary(&tx, NetworkDeliveryBoundary::Disconnected { generation }).await;
                         return;
                     }
+                    // The connection was shut down on purpose (the tab was
+                    // closed, say), so nothing was lost that a boundary
+                    // should report: just end.
+                    AccountedRawEvent::Shutdown { .. } => return,
                     // Conservative default for any future `AccountedRawEvent`
-                    // variant. `AccountedRawEvent` has exactly the four
+                    // variant. `AccountedRawEvent` has exactly the five
                     // variants above today, so this arm is unreachable until
                     // the transport crate adds one — kept so that addition
                     // is a silent (if degraded) fallback here instead of a
@@ -2312,6 +2318,23 @@ mod tests {
         );
     }
 
+    /// A connection shut down on purpose (as `Tab::close` does) ends the
+    /// monitor stream with no boundary before the end: nothing was lost.
+    #[tokio::test]
+    async fn shutdown_ends_the_monitor_without_a_boundary() {
+        let (mut monitor, _mock, conn) = spawn_monitor(None).await;
+
+        conn.shutdown();
+
+        let next = tokio::time::timeout(Duration::from_secs(2), monitor.next())
+            .await
+            .expect("monitor stream did not end within 2s after shutdown");
+        assert!(
+            next.is_none(),
+            "expected the monitor stream to end after a shutdown, got {next:?}"
+        );
+    }
+
     // `MockConnection::pair()` spawns the connection actor, which requires a
     // tokio runtime — so all tests that construct a `NetworkExchange` are async.
     async fn make_exchange(status: Option<u16>, error: Option<&str>) -> NetworkExchange {
@@ -2404,7 +2427,7 @@ mod tests {
     /// live correlator tests above don't otherwise exercise (`Reconnected`
     /// has no public `MockConnection` injection point; `Unknown` is a
     /// defensive fallback unreachable while `AccountedRawEvent` has exactly
-    /// its current four variants).
+    /// its current five variants).
     #[test]
     fn network_delivery_boundary_variants_construct_and_debug() {
         let variants = [

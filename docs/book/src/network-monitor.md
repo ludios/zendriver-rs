@@ -190,6 +190,9 @@ correlator task returns and the [`NetworkMonitor`] stream ends (`None` on the
 next poll). A consumer that wants to keep observing across a transport blip
 must call `tab.monitor()...start()` again to spawn a fresh correlator.
 
+When the tab's connection is shut down on purpose instead (by `tab.close()`,
+for example), the stream just ends, with no boundary before it.
+
 ### Bounded response bodies
 
 [`NetworkExchange::body`] / [`text`][`NetworkExchange::text`] are unbounded —

@@ -1991,9 +1991,9 @@ impl Tab {
     ///
     /// Under [`IdleOptions::loss_policy`] = [`IdleLossPolicy::Strict`], the
     /// wait additionally races against this tab's connection's accounted
-    /// event stream; the first `Lagged` / `Reconnected` / `Disconnected`
-    /// boundary observed while the wait is in progress aborts it early with
-    /// [`ZendriverError::EventStreamIncomplete`]. Under the default
+    /// event stream; the first `Lagged` / `Reconnected` / `Disconnected` /
+    /// `Shutdown` boundary observed while the wait is in progress aborts it
+    /// early with [`ZendriverError::EventStreamIncomplete`]. Under the default
     /// [`IdleLossPolicy::Lenient`] this extra stream is never subscribed to,
     /// so a Lenient wait costs nothing beyond what the tracker's own
     /// best-effort subscription already pays.
@@ -2106,7 +2106,8 @@ impl Tab {
                     match boundary {
                         AccountedRawEvent::Lagged { .. }
                         | AccountedRawEvent::Reconnected { .. }
-                        | AccountedRawEvent::Disconnected { .. } => {
+                        | AccountedRawEvent::Disconnected { .. }
+                        | AccountedRawEvent::Shutdown { .. } => {
                             // Under `Lenient` this branch is unreachable —
                             // `loss_boundary` is `stream::pending()`, which
                             // never yields. Under `Strict` we can no longer

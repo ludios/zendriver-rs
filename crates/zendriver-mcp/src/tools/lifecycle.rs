@@ -482,11 +482,9 @@ pub struct CloseOutput {
 ///
 /// Resource cleanup ordering (when applicable cargo features are on):
 /// 1. **Expectations**: drain `s.expectations`, calling `.abort()` on each
-///    spawned tokio task. Without this, the task's inner `.matched()`
-///    future keeps a `Network.*` / `Page.*` subscription alive against a
-///    session that's about to disappear, and the task only unwinds when
-///    its `pre_await_timeout_ms` finally fires (up to 60s of orphaned work
-///    per expectation).
+///    spawned tokio task, so that none outlives the close. (Ending the
+///    session's connection would also end each task's inner `.matched()`
+///    future; aborting first doesn't depend on how that connection ends.)
 /// 2. **Interception rules**: `s.rules.clear()` drops every stored
 ///    `InterceptRuleHandle`, whose embedded `InterceptHandle::Drop`
 ///    removes its layer (fire-and-forget, ending in `Fetch.disable`).
@@ -503,10 +501,9 @@ pub async fn close(
 
     #[cfg(feature = "expect")]
     {
-        // Drain + abort: dropping the handle alone leaks the spawned task
-        // until its pre_await_timeout fires. `.abort()` is the only way to
-        // promptly tear down the `.matched()` future the task is parked
-        // on.
+        // Drain + abort, so that no task outlives the close: dropping a
+        // handle alone would leave its task parked on `.matched()` until
+        // the close ends the session's connection.
         for (_, h) in s.expectations.drain() {
             h.task.abort();
         }

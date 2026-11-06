@@ -75,8 +75,7 @@ fn navigated_url(params: &Value) -> Option<String> {
 
 /// The changes of the main frame, whose id is `frame_id`, that `session`
 /// receives from now on, in the order Chrome sent them. Ends when the socket
-/// dies, but not on a clean [`zendriver_transport::Connection::shutdown`],
-/// which the event bus can't tell from a reconnect.
+/// dies or the connection is shut down.
 fn changes(session: &SessionHandle, frame_id: &str) -> Pin<Box<dyn Stream<Item = Change> + Send>> {
     let session_id = session.session_id().map(str::to_owned);
     let frame_id = frame_id.to_owned();
@@ -87,7 +86,10 @@ fn changes(session: &SessionHandle, frame_id: &str) -> Pin<Box<dyn Stream<Item =
             .connection()
             .subscribe_raw_accounted()
             .take_while(|ev| {
-                let alive = !matches!(ev, AccountedRawEvent::Disconnected { .. });
+                let alive = !matches!(
+                    ev,
+                    AccountedRawEvent::Disconnected { .. } | AccountedRawEvent::Shutdown { .. }
+                );
                 async move { alive }
             })
             .filter_map(move |ev| {
@@ -113,9 +115,9 @@ fn changes(session: &SessionHandle, frame_id: &str) -> Pin<Box<dyn Stream<Item =
                             _ => None,
                         }
                     }
-                    AccountedRawEvent::Event { .. } | AccountedRawEvent::Disconnected { .. } => {
-                        None
-                    }
+                    AccountedRawEvent::Event { .. }
+                    | AccountedRawEvent::Disconnected { .. }
+                    | AccountedRawEvent::Shutdown { .. } => None,
                     AccountedRawEvent::Lagged { .. } | AccountedRawEvent::Reconnected { .. } => {
                         Some(Change::Lost)
                     }

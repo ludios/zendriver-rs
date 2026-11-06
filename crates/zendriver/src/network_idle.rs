@@ -89,10 +89,10 @@ pub enum IdleLossPolicy {
     #[default]
     Lenient,
     /// Abort the wait with [`crate::ZendriverError::EventStreamIncomplete`]
-    /// the instant a `Lagged`, `Reconnected`, or `Disconnected` boundary is
-    /// observed on the accounted stream. Once that happens the wait can no
-    /// longer prove nothing relevant to idleness was missed, so it refuses
-    /// to report a possibly-wrong idle rather than guessing.
+    /// the instant a `Lagged`, `Reconnected`, `Disconnected`, or `Shutdown`
+    /// boundary is observed on the accounted stream. Once that happens the
+    /// wait can no longer prove nothing relevant to idleness was missed, so
+    /// it refuses to report a possibly-wrong idle rather than guessing.
     Strict,
 }
 

@@ -1,4 +1,4 @@
-//! `Browser::close` against real Chrome.
+//! `Browser::close` and `Tab::close` against real Chrome.
 
 #![cfg(feature = "integration-tests")]
 #![allow(clippy::panic, clippy::unwrap_used)]
@@ -63,4 +63,31 @@ async fn close_ends_the_waits_on_a_tab() {
         ),
         "{events:?}"
     );
+}
+
+/// `Tab::close` shuts the tab's socket down before Chrome closes the tab,
+/// and that ends what was waiting on the tab: an expectation fails with
+/// `EventStreamIncomplete` instead of waiting out its timeout, and a
+/// monitor's stream ends.
+#[tokio::test]
+async fn tab_close_ends_the_waits_on_the_tab() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.new_tab().await.unwrap();
+    load(&tab, &server.url(SITE_A, "/plain")).await;
+    let expectation = tab.expect_request("never-requested");
+    let monitor = tab.monitor().start().await.unwrap();
+
+    tab.close().await.unwrap();
+    let matched = timeout(PROMPTLY, expectation.matched())
+        .await
+        .expect("the expectation outlived the tab");
+    assert!(
+        matches!(matched, Err(ZendriverError::EventStreamIncomplete)),
+        "{matched:?}"
+    );
+    timeout(PROMPTLY, monitor.collect::<Vec<NetworkEvent>>())
+        .await
+        .expect("the monitor's stream outlived the tab");
+    browser.close().await;
 }
