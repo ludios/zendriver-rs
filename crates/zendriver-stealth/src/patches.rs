@@ -95,26 +95,6 @@ pub fn bootstrap_script_native_webgl(persona: &Persona, identity: &Fingerprint) 
     bootstrap_script_impl(persona, identity, false)
 }
 
-/// Geometry-coherence bootstrap for profiles that apply NO identity spoofing.
-///
-/// `Native` still receives `Emulation.setDeviceMetricsOverride` (see
-/// [`StealthObserver`](crate::StealthObserver)), and that command sets
-/// `window.inner*` and `screen.width`/`height` while being unable to touch
-/// `window.outer*` or `screen.avail*`. The result is a window a real browser cannot
-/// produce: `outerWidth` stays at the OS default (~756 headless) under an `innerWidth`
-/// of 1920, i.e. content wider than the window containing it, and
-/// `availHeight === height`, the kiosk signature. Both are cheap, deterministic,
-/// high-weight bot tells, and both are introduced BY THIS LIBRARY rather than by the
-/// host.
-///
-/// `patches/screen.js` exists to repair exactly that, but it only ever shipped inside
-/// the full identity bootstrap, which `Native` does not receive — so the mode that
-/// spoofs nothing was the one left visibly incoherent.
-///
-/// This emits the `__zdGetter` prelude plus the geometry patch and nothing else. It is
-/// identity-neutral by construction: it reads no persona and no fingerprint, and
-/// repairs an artifact rather than spoofing a device characteristic, so it does not
-/// make `Native` any less native.
 /// Substitute `screen.js`'s inset tokens from a caller's [`ScreenSpec`].
 ///
 /// `None` — or no screen at all — emits `null` for each, which the patch reads
@@ -128,6 +108,22 @@ fn screen_patch(screen: Option<&crate::persona::specs::ScreenSpec>) -> String {
         .replace("ZD_INNER_HEIGHT", &tok(screen.and_then(|s| s.inner_height)))
 }
 
+/// Geometry-coherence bootstrap for profiles that apply NO identity spoofing.
+///
+/// `Native` still receives `Emulation.setDeviceMetricsOverride` (see
+/// [`StealthObserver`](crate::StealthObserver)), and that command sets
+/// `window.inner*` and `screen.width`/`height` while being unable to touch
+/// `window.outer*` or `screen.avail*`. The result is a window a real browser cannot
+/// produce: `outerWidth` stays at the headless default (780 in Chrome 157) under an
+/// `innerWidth` of 1920, i.e. content wider than the window containing it, and
+/// `availHeight === height`, the kiosk signature. Both are cheap, deterministic,
+/// high-weight bot tells, and both are introduced BY THIS LIBRARY rather than by the
+/// host.
+///
+/// This emits the masking prelude (`_native.js`, which replaces
+/// `Function.prototype.toString` so that the patch's getters read as native code)
+/// plus the geometry patch (`screen.js`), and nothing else. It reads no persona and
+/// no fingerprint.
 #[must_use]
 pub fn geometry_bootstrap() -> String {
     geometry_bootstrap_with(None)

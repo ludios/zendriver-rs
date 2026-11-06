@@ -51,8 +51,8 @@ let browser = Browser::builder()
 # Ok(()) }
 ```
 
-The default recommendation. Patches mostly the layer that
-protocol-level fingerprinters see:
+The default recommendation. Everything but the geometry repair below
+is done with launch flags and CDP commands, not page JS:
 
 - **Launch flags** — `--disable-blink-features=AutomationControlled`,
   `--disable-features=IsolateOrigins,site-per-process` (toggleable),
@@ -84,9 +84,9 @@ protocol-level fingerprinters see:
   and replaces `Function.prototype.toString` so that those getters read
   as native code.
 
-Its script replaces no function on `navigator`, WebGL, canvas, or the
-other surfaces that `spoofed()` patches, so a page that checks those
-functions for tampering finds only the ones that Chrome itself defines.
+Apart from those, its script replaces no function: nothing on
+`navigator`, WebGL, canvas, or the other surfaces that only `spoofed()`
+patches.
 Passes most consumer site detectors. Doesn't pass [sannysoft]'s deeper
 Navigator-prototype checks.
 
@@ -296,9 +296,10 @@ identity.
   `bypass_csp = true`, which is normally what you want. If you're
   *testing* a real CSP, override it with `.bypass_csp(false)` (and
   expect the JS bootstrap to fail to install).
-- **Sites that read `Function.prototype.toString` looking for
-  `[native code]` mismatches** — `native()` rather than `spoofed()`,
-  because `spoofed()`'s prototype patches leave detectable
-  fingerprints in the function-source readouts. zendriver's bootstrap
-  papers over the obvious patches, but a determined adversary will
-  still find drift.
+- **Sites that check functions for tampering** (their
+  `Function.prototype.toString` output, or their shape) — `native()`
+  rather than `spoofed()`. Both replace `Function.prototype.toString`,
+  but `native()` replaces only it and the geometry getters, while
+  `spoofed()` also replaces dozens of `navigator`, WebGL, canvas and
+  other functions. zendriver's bootstrap papers over the obvious
+  differences, but a determined adversary will still find drift.

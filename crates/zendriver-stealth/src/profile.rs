@@ -146,11 +146,12 @@ impl StealthProfile {
     /// `Emulation.setDeviceMetricsOverride` sets `window.inner*` and
     /// `screen.width`/`height`, but it can't set `window.outer*` or
     /// `screen.avail*`. So the bootstrap defines getters for the window's
-    /// size and position (`outerWidth`, `innerHeight`, `screenX`, …) and for
-    /// `screen.avail*` and `screen.orientation`. It also replaces
-    /// `Function.prototype.toString`, so that those getters read as native
-    /// code. The bootstrap replaces no function on `navigator`, or on any
-    /// of the other surfaces that [`StealthProfile::spoofed`] patches.
+    /// size and position (`outerWidth`, `innerHeight`, `screenX`, …), for
+    /// `screen.avail*`, and for `screen.orientation.type` and `.angle`. It
+    /// also replaces `Function.prototype.toString`, so that those getters
+    /// read as native code. Apart from those, the bootstrap replaces no
+    /// function: nothing on `navigator`, WebGL, canvas, or the other
+    /// surfaces that only [`StealthProfile::spoofed`] patches.
     ///
     /// ```
     /// use zendriver_stealth::StealthProfile;
@@ -700,7 +701,7 @@ mod profile_tests {
     }
 
     #[test]
-    fn native_profile_has_flags_no_patches() {
+    fn native_profile_has_flags() {
         let p = StealthProfile::native();
         assert_eq!(p.kind, ProfileKind::Native);
         assert!(!p.build_flags().is_empty());

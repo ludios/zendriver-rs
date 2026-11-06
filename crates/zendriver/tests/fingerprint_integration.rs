@@ -51,8 +51,8 @@ const POLL_DELAY: Duration = Duration::from_millis(50);
 
 /// Reads `CANVAS_READ_JS` from a fresh, unspoofed browser (the builder
 /// default, `StealthProfile::native()`). Under `ProfileKind::Native` the
-/// canvas farble patch is never injected at all (the observer only sends the
-/// bootstrap for `ProfileKind::Spoofed`), so this is a genuine native-Chrome
+/// canvas farble patch is never injected at all (only the `ProfileKind::Spoofed`
+/// bootstrap contains it), so this is a genuine native-Chrome
 /// baseline — used by [`poll_until_farbled`] to recognize "farble hasn't
 /// installed yet" instead of mistaking a not-yet-patched read for a
 /// coincidentally-equal farbled one.

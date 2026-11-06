@@ -151,11 +151,12 @@ There's no built-in detector. The pragmatic test:
 
 ## What's the difference between native and spoofed stealth?
 
-- **`StealthProfile::native()`** — patches mostly what fingerprinters see
-  at the protocol level: UA scrub, launch flags, Emulation overrides.
-  Its only JS is a small bootstrap that repairs the window and screen
-  geometry that the Emulation overrides leave incoherent; that script
-  replaces no function on `navigator`. Passes most consumer sites.
+- **`StealthProfile::native()`** — UA scrub, launch flags, and
+  Emulation overrides, plus a small JS bootstrap that repairs the window
+  and screen geometry that the Emulation overrides leave incoherent.
+  That bootstrap also replaces `Function.prototype.toString` (so that
+  its getters read as native code), but no function on `navigator`.
+  Passes most consumer sites.
 - **`StealthProfile::spoofed()`** — `native()` plus Navigator-prototype
   JS patches injected via `Page.addScriptToEvaluateOnNewDocument`.
   Restores `navigator.webdriver` to undefined, fixes `navigator.plugins`

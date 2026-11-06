@@ -9,8 +9,8 @@
 //!
 //! - [`StealthProfile::off`] — no stealth (stock Chrome launch).
 //! - [`StealthProfile::native`] — launch flags + UA scrub + CDP `Emulation`
-//!   overrides. Safe against `Function.prototype.toString` probes; the
-//!   default.
+//!   overrides, plus a small JS bootstrap that repairs the window and screen
+//!   geometry; the default.
 //! - [`StealthProfile::spoofed`] — `native` plus a Navigator-prototype JS
 //!   bootstrap script that passes the [sannysoft][sannysoft] battery.
 //!

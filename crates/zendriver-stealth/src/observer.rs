@@ -4,7 +4,7 @@
 //! `Target.attachedToTarget`, the actor pauses the new target, walks every
 //! observer serially, then releases the debugger via
 //! `Runtime.runIfWaitingForDebugger`. The observer's job is to push every
-//! UA/screen/timezone/locale override and (for spoofed) the bootstrap script
+//! UA/screen/timezone/locale override and (unless `Off`) the bootstrap script
 //! _before_ the debugger releases, so the first script the page runs sees the
 //! patched globals.
 
@@ -285,14 +285,13 @@ impl TargetObserver for StealthObserver {
         // but never sent. `Off` still produces an empty bootstrap and so still sends nothing.
         if !self.bootstrap.is_empty() {
             // Inject into the MAIN world (no `worldName`). The bootstrap's
-            // patches mutate `Navigator.prototype`, `window.chrome`,
-            // `WebGLRenderingContext.prototype`, etc. — every isolated
-            // world gets its own copy of these prototypes, so a patch
-            // applied in a named/isolated world is invisible to the
-            // page's own scripts (and to `evaluate_main`, the surface
-            // detection sites probe). Running the bootstrap in the main
-            // world is the only way these prototype mutations actually
-            // affect the document under test.
+            // patches mutate globals such as `Function.prototype`, `screen`
+            // and (for `Spoofed`) `Navigator.prototype` — every isolated
+            // world gets its own copy of these, so a patch applied in a
+            // named/isolated world is invisible to the page's own scripts
+            // (and to `evaluate_main`, the surface detection sites probe).
+            // Running the bootstrap in the main world is the only way these
+            // mutations actually affect the document under test.
             session
                 .call(
                     "Page.addScriptToEvaluateOnNewDocument",
@@ -331,8 +330,9 @@ mod tests {
     ///
     /// Regression guarded: the top-level param was sent as `ch_platform()`, so every session
     /// reported a `navigator.platform` no real browser emits. It was invisible under `spoofed`,
-    /// whose bootstrap re-patches the property from `platformJs`, but that bootstrap is empty
-    /// for `Off`/`Native` — so `native` profiles shipped the bad value straight through.
+    /// whose bootstrap re-patches the property from `platformJs`, but the `Off`/`Native`
+    /// bootstraps leave `navigator` alone — so `native` profiles shipped the bad value
+    /// straight through.
     fn assert_platform_axes_not_swapped(sent: &serde_json::Value) {
         const JS_SPELLINGS: [&str; 3] = ["Win32", "MacIntel", "Linux x86_64"];
         const CH_SPELLINGS: [&str; 3] = ["Windows", "macOS", "Linux"];
