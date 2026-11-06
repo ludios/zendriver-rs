@@ -1029,7 +1029,7 @@ mod tests {
         let second = tokio::spawn(second.start());
         let id = mock.expect_cmd("Fetch.enable").await;
         for _ in 0..10 {
-            mock.emit_event_for_session("Page.lifecycleEvent", json!({}), "S1")
+            mock.emit_event_for_session("Network.dataReceived", json!({}), "S1")
                 .await;
         }
         mock.reply(id, json!({})).await;
