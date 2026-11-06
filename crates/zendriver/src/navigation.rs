@@ -742,4 +742,15 @@ mod tests {
         let res = tokio::time::timeout(LONG, waiting).await.unwrap();
         assert!(matches!(res, Err(ZendriverError::Navigation(_))), "{res:?}");
     }
+
+    /// And at once when the connection is shut down (as `Tab::close` does
+    /// to a tab that has its own socket).
+    #[tokio::test]
+    async fn the_wait_ends_when_the_connection_is_shut_down() {
+        let (_mock, conn) = MockConnection::pair();
+        let waiting = expect_navigation(&conn);
+        conn.shutdown();
+        let res = tokio::time::timeout(LONG, waiting).await.unwrap();
+        assert!(matches!(res, Err(ZendriverError::Navigation(_))), "{res:?}");
+    }
 }

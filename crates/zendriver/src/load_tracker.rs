@@ -773,4 +773,17 @@ mod tests {
         let res = tracker.wait(LONG).await;
         assert!(matches!(res, Err(ZendriverError::Navigation(_))), "{res:?}");
     }
+
+    /// And when the connection is shut down (as `Tab::close` does to a tab
+    /// that has its own socket).
+    #[tokio::test]
+    async fn wait_ends_when_the_connection_is_shut_down() {
+        let (_mock, conn) = MockConnection::pair();
+        let tracker = LoadTracker::before_navigating(&SessionHandle::new(conn.clone(), "S1"), "F");
+        conn.shutdown();
+        let res = tokio::time::timeout(LONG, tracker.wait(LONG))
+            .await
+            .unwrap();
+        assert!(matches!(res, Err(ZendriverError::Navigation(_))), "{res:?}");
+    }
 }

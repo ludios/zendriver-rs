@@ -4636,26 +4636,13 @@ mod tests {
 
     // --- wait_for_idle IdleLossPolicy (Task 4) --------------------------
 
-    /// Under `IdleLossPolicy::Strict`, a delivery gap on the connection's
-    /// accounted event stream (a lagging broadcast subscriber) observed
-    /// while `wait_for_idle_opts` is waiting must abort the call with
-    /// `ZendriverError::EventStreamIncomplete` — once that happens the wait
-    /// can no longer prove nothing relevant to idleness was missed, so it
-    /// must refuse to report a possibly-wrong idle.
-    ///
-    /// Forces the gap deterministically:
-    /// `MockConnection::pair_with_accounted_capacity(2)` gives the accounted
-    /// bus a 2-slot capacity, so pushing 5 unrelated events (after the
-    /// Strict wait has subscribed) overflows it and the next accounted poll
-    /// reports `Lagged`. R1 is left in-flight throughout — deliberately
-    /// never completed — so the only way this test resolves before its
-    /// outer timeout is via the `Lagged` abort path, not a coincidental
-    /// idle.
-    #[tokio::test]
-    async fn wait_for_idle_opts_strict_aborts_on_lagged_boundary() {
-        let (mut mock, conn) = MockConnection::pair_with_accounted_capacity(2);
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let tab = Tab::new_for_test(sess);
+    /// A tab on `pair`'s connection whose network tracker has the request
+    /// `R1` in flight, never completed, so that an idle wait can't succeed.
+    async fn tab_with_a_request_in_flight(
+        pair: (MockConnection, Connection),
+    ) -> (Tab, MockConnection, Connection) {
+        let (mut mock, conn) = pair;
+        let tab = Tab::new_for_test(SessionHandle::new(conn.clone(), "S1"));
 
         let id_enable =
             tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
@@ -4663,8 +4650,6 @@ mod tests {
                 .expect("tracker did not send Network.enable within 2s");
         mock.reply(id_enable, json!({})).await;
 
-        // Keep a request in flight (never completed) so the only path to
-        // resolution is the Strict abort, not a real idle.
         mock.emit_event_for_session(
             "Network.requestWillBeSent",
             json!({ "requestId": "R1" }),
@@ -4682,19 +4667,49 @@ mod tests {
             1,
             "R1 did not register before wait_for_idle starts",
         );
+        (tab, mock, conn)
+    }
 
-        let fut = tokio::spawn({
-            let t = tab.clone();
-            async move {
-                t.wait_for_idle_opts(IdleOptions {
-                    timeout: Duration::from_secs(5),
-                    quiet_window: Duration::from_millis(200),
-                    max_inflight_age: None,
-                    loss_policy: IdleLossPolicy::Strict,
-                })
-                .await
-            }
-        });
+    /// Spawn `tab.wait_for_idle_opts` with `loss_policy`, a 5s timeout, and
+    /// a 200ms quiet window.
+    fn spawn_idle_wait(
+        tab: &Tab,
+        loss_policy: IdleLossPolicy,
+    ) -> tokio::task::JoinHandle<Result<()>> {
+        let tab = tab.clone();
+        tokio::spawn(async move {
+            tab.wait_for_idle_opts(IdleOptions {
+                timeout: Duration::from_secs(5),
+                quiet_window: Duration::from_millis(200),
+                max_inflight_age: None,
+                loss_policy,
+            })
+            .await
+        })
+    }
+
+    /// Under `IdleLossPolicy::Strict`, a delivery gap on the connection's
+    /// accounted event stream (a lagging broadcast subscriber) observed
+    /// while `wait_for_idle_opts` is waiting must abort the call with
+    /// `ZendriverError::EventStreamIncomplete` — once that happens the wait
+    /// can no longer prove nothing relevant to idleness was missed, so it
+    /// must refuse to report a possibly-wrong idle.
+    ///
+    /// Forces the gap deterministically:
+    /// `MockConnection::pair_with_accounted_capacity(2)` gives the accounted
+    /// bus a 2-slot capacity, so pushing 5 unrelated events (after the
+    /// Strict wait has subscribed) overflows it and the next accounted poll
+    /// reports `Lagged`. R1 is left in-flight throughout — deliberately
+    /// never completed — so the only way this test resolves before its
+    /// outer timeout is via the `Lagged` abort path, not a coincidental
+    /// idle.
+    #[tokio::test]
+    async fn wait_for_idle_opts_strict_aborts_on_lagged_boundary() {
+        // Keep a request in flight (never completed) so the only path to
+        // resolution is the Strict abort, not a real idle.
+        let (tab, mock, conn) =
+            tab_with_a_request_in_flight(MockConnection::pair_with_accounted_capacity(2)).await;
+        let fut = spawn_idle_wait(&tab, IdleLossPolicy::Strict);
 
         // Give the Strict wait a chance to reach its first poll and
         // subscribe via `subscribe_raw_accounted` (a synchronous call made
@@ -4727,41 +4742,9 @@ mod tests {
     /// normally once the request genuinely completes.
     #[tokio::test]
     async fn wait_for_idle_opts_lenient_still_resolves_after_lagged_boundary() {
-        let (mut mock, conn) = MockConnection::pair_with_accounted_capacity(2);
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let tab = Tab::new_for_test(sess);
-
-        let id_enable =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
-                .await
-                .expect("tracker did not send Network.enable within 2s");
-        mock.reply(id_enable, json!({})).await;
-
-        mock.emit_event_for_session(
-            "Network.requestWillBeSent",
-            json!({ "requestId": "R1" }),
-            "S1",
-        )
-        .await;
-        for _ in 0..50 {
-            if tab.inner.network_tracker.in_flight.lock().await.len() == 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        let fut = tokio::spawn({
-            let t = tab.clone();
-            async move {
-                t.wait_for_idle_opts(IdleOptions {
-                    timeout: Duration::from_secs(5),
-                    quiet_window: Duration::from_millis(200),
-                    max_inflight_age: None,
-                    loss_policy: IdleLossPolicy::Lenient,
-                })
-                .await
-            }
-        });
+        let (tab, mock, conn) =
+            tab_with_a_request_in_flight(MockConnection::pair_with_accounted_capacity(2)).await;
+        let fut = spawn_idle_wait(&tab, IdleLossPolicy::Lenient);
 
         tokio::time::sleep(Duration::from_millis(75)).await;
 
@@ -4788,6 +4771,24 @@ mod tests {
             .expect("Lenient must resolve Ok once the request completes, gap notwithstanding");
 
         conn.shutdown();
+    }
+
+    /// Under `IdleLossPolicy::Strict`, the connection's shutdown also ends
+    /// the wait with `EventStreamIncomplete`, rather than at its timeout.
+    #[tokio::test]
+    async fn wait_for_idle_opts_strict_aborts_on_shutdown() {
+        let (tab, _mock, conn) = tab_with_a_request_in_flight(MockConnection::pair()).await;
+        let fut = spawn_idle_wait(&tab, IdleLossPolicy::Strict);
+
+        conn.shutdown();
+
+        let res = tokio::time::timeout(Duration::from_secs(2), fut)
+            .await
+            .expect("wait_for_idle_opts (Strict) did not resolve within 2s after the shutdown");
+        assert!(
+            matches!(res.unwrap(), Err(ZendriverError::EventStreamIncomplete)),
+            "Strict must abort with EventStreamIncomplete on a shutdown",
+        );
     }
 
     // --- Tab::intercept (P5 T7, feature = "interception") -------------
