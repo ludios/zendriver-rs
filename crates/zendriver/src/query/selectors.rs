@@ -951,7 +951,7 @@ async fn describe_backend_id(session: &SessionHandle, object_id: &str) -> Result
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::test_support::{expect, try_expect};
+    use crate::test_support::expect;
     use zendriver_transport::SessionHandle;
     use zendriver_transport::testing::MockConnection;
 
@@ -1079,19 +1079,49 @@ mod tests {
 
         // Enumerating the error object would send `Runtime.getProperties`
         // and wait forever on a reply that this mock never sends.
-        assert!(
-            try_expect(&mut mock, "Runtime.getProperties")
-                .await
-                .is_none(),
-            "the thrown error object must not be enumerated as matches"
-        );
-        let err = fut
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), fut)
             .await
+            .expect("the thrown error object must not be enumerated as matches")
             .unwrap()
             .expect_err("a thrown exception must fail the resolve");
         assert!(
             matches!(&err, ZendriverError::JsException(m) if m == description),
             "got {err:?}"
+        );
+        conn.shutdown();
+    }
+
+    /// Both extractors fail on a thrown exception before sending anything.
+    /// The thrown error object in `result` has an `objectId`, so an
+    /// extractor that took it for its node or array would send
+    /// `DOM.describeNode` or `Runtime.getProperties` and wait forever on a
+    /// reply that this mock never sends.
+    #[tokio::test]
+    async fn the_extractors_fail_on_a_thrown_exception_without_a_cdp_call() {
+        let (_mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let thrown = json!({
+            "type": "object",
+            "subtype": "error",
+            "description": "TypeError: boom",
+            "objectId": "RErr",
+        });
+        let response = json!({ "result": thrown, "exceptionDetails": { "exception": thrown } });
+        let budget = std::time::Duration::from_secs(5);
+
+        let node = tokio::time::timeout(budget, extract_node_ref(&sess, &response))
+            .await
+            .expect("extract_node_ref must not describe the thrown error object");
+        assert!(
+            matches!(&node, Err(ZendriverError::JsException(m)) if m == "TypeError: boom"),
+            "got {node:?}"
+        );
+        let array = tokio::time::timeout(budget, extract_array_refs(&sess, &response))
+            .await
+            .expect("extract_array_refs must not enumerate the thrown error object");
+        assert!(
+            matches!(&array, Err(ZendriverError::JsException(m)) if m == "TypeError: boom"),
+            "got {array:?}"
         );
         conn.shutdown();
     }

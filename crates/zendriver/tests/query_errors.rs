@@ -3,9 +3,10 @@
 //! polling until its timeout and then reporting that nothing matched.
 
 #![cfg(feature = "integration-tests")]
+#![allow(clippy::panic)]
 
 use std::future::Future;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use zendriver::{Browser, ZendriverError};
 use zendriver_testkit::{FixtureServer, SITE_A, launch_for_test, load};
@@ -27,9 +28,9 @@ async fn assert_fails_at_once<T>(
     needle: &str,
     query: impl Future<Output = zendriver::Result<T>>,
 ) {
-    let started = Instant::now();
-    let result = query.await;
-    let elapsed = started.elapsed();
+    let Ok(result) = tokio::time::timeout(AT_ONCE, query).await else {
+        panic!("{name}: still running after {AT_ONCE:?}, so it polled instead of failing at once");
+    };
     match result {
         Err(ZendriverError::JsException(message)) => assert!(
             message.contains(needle),
@@ -38,10 +39,6 @@ async fn assert_fails_at_once<T>(
         Err(e) => panic!("{name}: expected a JsException, got {e:?}"),
         Ok(_) => panic!("{name}: expected a JsException, but the query succeeded"),
     }
-    assert!(
-        elapsed < AT_ONCE,
-        "{name}: failed after {elapsed:?}, so it polled instead of failing at once"
-    );
 }
 
 #[tokio::test]
