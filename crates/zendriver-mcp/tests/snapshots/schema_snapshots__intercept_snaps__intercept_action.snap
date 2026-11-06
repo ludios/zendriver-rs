@@ -6,6 +6,15 @@ $schema: "https://json-schema.org/draft/2020-12/schema"
 title: InterceptAction
 description: "Wire-level interception action. One variant per supported rule kind.\n\nTagged with `kind` so a JSON payload looks like\n`{ \"kind\": \"block\" }` or `{ \"kind\": \"redirect\", \"to\": \"...\" }`, which\nis easier for an agent to construct than a flat field set with mutually\nexclusive shapes."
 oneOf:
+  - description: "Let every matching request go on unchanged: an exception that keeps\nthe matching requests from the entries after this rule."
+    type: object
+    properties:
+      kind:
+        type: string
+        const: continue
+    additionalProperties: false
+    required:
+      - kind
   - description: "Fail every matching request with `BlockedByClient`."
     type: object
     properties:
@@ -15,14 +24,14 @@ oneOf:
     additionalProperties: false
     required:
       - kind
-  - description: "Redirect every match to `to` (verbatim URL replacement)."
+  - description: "Send every matching request to `to` instead, unseen by the page.\n`request` pause only."
     type: object
     properties:
       kind:
         type: string
         const: redirect
       to:
-        description: "Target URL. Sent to Chrome as a string — no expansion of the\nmatched URL is performed; if you need per-request substitution\nuse `modify_request` or the manual stream API."
+        description: "Target URL. Sent to Chrome as a string — no expansion of the\nmatched URL is performed; if you need per-request substitution\nuse `modify_request`."
         type: string
     additionalProperties: false
     required:
@@ -60,7 +69,7 @@ oneOf:
       - kind
       - status
       - body
-  - description: "Continue the request with extra / replaced headers and/or a replaced\nURL / method / body. Any field left `None` keeps Chrome's original."
+  - description: "Continue the request with extra / replaced headers and/or a replaced\nURL / method / body. Any field left `None` keeps Chrome's original.\n`request` pause only."
     type: object
     properties:
       headers:
@@ -79,7 +88,7 @@ oneOf:
           - "null"
         default: ~
       post_data:
-        description: "Replace the request body, as UTF-8 text. Omit to keep the\noriginal. The core [`RequestOverrides::post_data`] field is\n`Vec<u8>`; this is encoded via `String::into_bytes`, so it can't\ncarry a non-UTF-8 body — use the manual stream API for that."
+        description: "Replace the request body, as UTF-8 text. Omit to keep the\noriginal. The core [`RequestOverrides::post_data`] field is\n`Vec<u8>`; this is encoded via `String::into_bytes`, so it can't\ncarry a non-UTF-8 body."
         type:
           - string
           - "null"
@@ -93,7 +102,7 @@ oneOf:
     additionalProperties: false
     required:
       - kind
-  - description: "Continue the *response* with an overridden status and/or headers\n(pauses at the response stage). Other fields are left at Chrome's\noriginals. The body is not rewritten — use `respond` to synthesize a\nwhole response instead."
+  - description: "Continue the *response* with an overridden status and/or headers.\nOther fields are left at Chrome's originals. The body is not\nrewritten — use `respond` to synthesize a whole response instead.\n`response_headers` pause only."
     type: object
     properties:
       headers:

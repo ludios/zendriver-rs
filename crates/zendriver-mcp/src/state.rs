@@ -14,10 +14,6 @@ use zendriver::Browser;
 #[cfg(feature = "expect")]
 pub type ExpectationId = String;
 
-/// Opaque registration id for [`SessionState::rules`].
-#[cfg(feature = "interception")]
-pub type RuleId = String;
-
 /// Opaque handle id for a running monitor in [`SessionState::monitors`].
 #[cfg(feature = "monitor")]
 pub type MonitorId = String;
@@ -170,7 +166,7 @@ pub struct SessionState {
     pub expectations: HashMap<ExpectationId, ExpectationHandle>,
 
     #[cfg(feature = "interception")]
-    pub rules: HashMap<RuleId, InterceptRuleHandle>,
+    pub rules: HashMap<zendriver::interception::RuleId, InterceptRuleHandle>,
 
     #[cfg(feature = "monitor")]
     pub monitors: HashMap<MonitorId, std::sync::Arc<tokio::sync::Mutex<MonitorState>>>,
@@ -202,22 +198,18 @@ pub struct ExpectationHandle {
     pub tab_id: String,
 }
 
-/// One MCP interception rule = one layer of its tab's interception.
+/// One rule that `browser_intercept_add_rule` put in its tab's list.
 ///
-/// Holding the handle is what keeps the rule live: dropping or stopping it
-/// removes the layer, and only that layer. `pattern` + `action_kind`
-/// are kept alongside so `browser_intercept_list_rules` can report back
-/// what each id corresponds to without poking at the handle's internals.
+/// Holding the handle is what keeps the rule in: dropping or stopping it
+/// removes the rule, and only it.
 ///
 /// `tab_id` is the CDP target id of the tab the rule was registered against
 /// (same id space as `zendriver::Tab::target_id` /
 /// `SessionState::current_tab_id`), so `browser_tab_close` can drop this
-/// entry (and, via `Drop`, remove its layer) when its tab closes — see
+/// entry (and, via `Drop`, remove its rule) when its tab closes — see
 /// `crate::tools::tabs::drain_tab_scoped`.
 #[cfg(feature = "interception")]
 pub struct InterceptRuleHandle {
-    pub pattern: String,
-    pub action_kind: &'static str,
     pub handle: zendriver::InterceptHandle,
     pub tab_id: String,
 }

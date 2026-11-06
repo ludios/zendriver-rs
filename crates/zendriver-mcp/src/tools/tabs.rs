@@ -490,6 +490,8 @@ mod tests {
     async fn drain_tab_scoped_reaps_closed_tab_keeps_survivor() {
         use crate::state::{ExpectationHandle, InterceptRuleHandle};
 
+        let rule_id =
+            |id: &str| -> zendriver::interception::RuleId { id.parse().expect("a rule id") };
         let mut s = SessionState::new();
 
         // Expectation on the closed tab: parks forever, so only `.abort()`
@@ -528,19 +530,15 @@ mod tests {
         );
 
         s.rules.insert(
-            "rule-closed".into(),
+            rule_id("1"),
             InterceptRuleHandle {
-                pattern: "*/ads/*".into(),
-                action_kind: "block",
                 handle: zendriver_interception::InterceptHandle::for_tests(),
                 tab_id: "closed-tab-id".into(),
             },
         );
         s.rules.insert(
-            "rule-survivor".into(),
+            rule_id("2"),
             InterceptRuleHandle {
-                pattern: "*/api/*".into(),
-                action_kind: "respond",
                 handle: zendriver_interception::InterceptHandle::for_tests(),
                 tab_id: "other-tab-id".into(),
             },
@@ -557,11 +555,11 @@ mod tests {
             "other tab's expectation must survive"
         );
         assert!(
-            !s.rules.contains_key("rule-closed"),
+            !s.rules.contains_key(&rule_id("1")),
             "closed tab's rule must be drained"
         );
         assert!(
-            s.rules.contains_key("rule-survivor"),
+            s.rules.contains_key(&rule_id("2")),
             "other tab's rule must survive"
         );
 

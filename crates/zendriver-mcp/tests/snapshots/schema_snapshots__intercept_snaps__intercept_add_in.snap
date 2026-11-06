@@ -10,17 +10,57 @@ properties:
   action:
     description: Action to take on matches.
     $ref: "#/$defs/InterceptAction"
+  hosts:
+    description: "Host names: the rule fits a request whose host is one of these or a\nsubdomain of one. Give exactly one of `pattern` and `hosts`."
+    type:
+      - array
+      - "null"
+    default: ~
+    items:
+      type: string
+  label:
+    description: "A name for the rule in `browser_intercept_list_rules` and logs."
+    type:
+      - string
+      - "null"
+    default: ~
   pattern:
-    description: "URL pattern (CDP wildcard syntax — `*` and `?` glob metacharacters).\nMatched against the full request URL, not just the path."
-    type: string
+    description: "URL pattern (CDP wildcard syntax: `*` is any run of characters, `?`\none character or none, `\\` escapes), matched against the full\nrequest URL. Give exactly one of `pattern` and `hosts`."
+    type:
+      - string
+      - "null"
+    default: ~
+  pause:
+    description: "The kind of pause the rule decides. Omit for `response_headers` with\n`modify_response`, `request` with the other actions."
+    anyOf:
+      - $ref: "#/$defs/PauseName"
+      - type: "null"
+    default: ~
+  position:
+    description: "Where the rule goes in the current tab's list: `last` unless this\nrule must take requests from an earlier entry. `first` is ahead of\n`browser.trackers`, so a `first` rule that fits a tracker's request\ndecides it; `continue` or `modify_request` there sends the tracker\nrequest."
+    $ref: "#/$defs/PositionInput"
+  resource_type:
+    description: The resource type the rule fits. Omit for any.
+    anyOf:
+      - $ref: "#/$defs/ResourceTypeName"
+      - type: "null"
 additionalProperties: false
 required:
-  - pattern
   - action
+  - position
 $defs:
   InterceptAction:
     description: "Wire-level interception action. One variant per supported rule kind.\n\nTagged with `kind` so a JSON payload looks like\n`{ \"kind\": \"block\" }` or `{ \"kind\": \"redirect\", \"to\": \"...\" }`, which\nis easier for an agent to construct than a flat field set with mutually\nexclusive shapes."
     oneOf:
+      - description: "Let every matching request go on unchanged: an exception that keeps\nthe matching requests from the entries after this rule."
+        type: object
+        properties:
+          kind:
+            type: string
+            const: continue
+        additionalProperties: false
+        required:
+          - kind
       - description: "Fail every matching request with `BlockedByClient`."
         type: object
         properties:
@@ -30,14 +70,14 @@ $defs:
         additionalProperties: false
         required:
           - kind
-      - description: "Redirect every match to `to` (verbatim URL replacement)."
+      - description: "Send every matching request to `to` instead, unseen by the page.\n`request` pause only."
         type: object
         properties:
           kind:
             type: string
             const: redirect
           to:
-            description: "Target URL. Sent to Chrome as a string — no expansion of the\nmatched URL is performed; if you need per-request substitution\nuse `modify_request` or the manual stream API."
+            description: "Target URL. Sent to Chrome as a string — no expansion of the\nmatched URL is performed; if you need per-request substitution\nuse `modify_request`."
             type: string
         additionalProperties: false
         required:
@@ -75,7 +115,7 @@ $defs:
           - kind
           - status
           - body
-      - description: "Continue the request with extra / replaced headers and/or a replaced\nURL / method / body. Any field left `None` keeps Chrome's original."
+      - description: "Continue the request with extra / replaced headers and/or a replaced\nURL / method / body. Any field left `None` keeps Chrome's original.\n`request` pause only."
         type: object
         properties:
           headers:
@@ -94,7 +134,7 @@ $defs:
               - "null"
             default: ~
           post_data:
-            description: "Replace the request body, as UTF-8 text. Omit to keep the\noriginal. The core [`RequestOverrides::post_data`] field is\n`Vec<u8>`; this is encoded via `String::into_bytes`, so it can't\ncarry a non-UTF-8 body — use the manual stream API for that."
+            description: "Replace the request body, as UTF-8 text. Omit to keep the\noriginal. The core [`RequestOverrides::post_data`] field is\n`Vec<u8>`; this is encoded via `String::into_bytes`, so it can't\ncarry a non-UTF-8 body."
             type:
               - string
               - "null"
@@ -108,7 +148,7 @@ $defs:
         additionalProperties: false
         required:
           - kind
-      - description: "Continue the *response* with an overridden status and/or headers\n(pauses at the response stage). Other fields are left at Chrome's\noriginals. The body is not rewritten — use `respond` to synthesize a\nwhole response instead."
+      - description: "Continue the *response* with an overridden status and/or headers.\nOther fields are left at Chrome's originals. The body is not\nrewritten — use `respond` to synthesize a whole response instead.\n`response_headers` pause only."
         type: object
         properties:
           headers:
@@ -132,3 +172,61 @@ $defs:
         additionalProperties: false
         required:
           - kind
+  PauseName:
+    description: The kind of pause a rule decides.
+    oneOf:
+      - description: Before the request is sent.
+        type: string
+        const: request
+      - description: "Once the response's status and headers arrived (4xx and 5xx\nincluded)."
+        type: string
+        const: response_headers
+      - description: "When the request failed before any status (DNS, connection, ...)."
+        type: string
+        const: response_error
+  PositionInput:
+    description: "Where in the current tab's list a rule goes, in the list as it is at\nthat moment: `\"first\"`, `\"last\"`, `{ \"before\": \"<rule_id>\" }` or\n`{ \"after\": \"<rule_id>\" }`."
+    oneOf:
+      - description: "Ahead of every entry, `browser.trackers` included."
+        type: string
+        const: first
+      - description: Behind every entry.
+        type: string
+        const: last
+      - description: "Just ahead of the entry with this `rule_id`."
+        type: object
+        properties:
+          before:
+            type: string
+        additionalProperties: false
+        required:
+          - before
+      - description: "Just behind the entry with this `rule_id`."
+        type: object
+        properties:
+          after:
+            type: string
+        additionalProperties: false
+        required:
+          - after
+  ResourceTypeName:
+    description: "A Chrome resource type (CDP `Network.ResourceType`). `XHR`, `Fetch`\nand `EventSource` are one type to Chrome: each fits all three."
+    type: string
+    enum:
+      - Document
+      - Stylesheet
+      - Image
+      - Media
+      - Font
+      - Script
+      - TextTrack
+      - XHR
+      - Fetch
+      - EventSource
+      - WebSocket
+      - Manifest
+      - SignedExchange
+      - Ping
+      - CSPViolationReport
+      - Preflight
+      - Other

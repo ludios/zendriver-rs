@@ -866,10 +866,10 @@ impl ZendriverServer {
 #[cfg(feature = "interception")]
 #[tool_router(router = intercept_tool_router, vis = "pub")]
 impl ZendriverServer {
-    /// Install one network-interception rule on the current tab.
+    /// Insert one interception rule into the current tab's ordered list.
     #[tool(
         name = "browser_intercept_add_rule",
-        description = "Install one interception rule on the current tab. `pattern` uses CDP wildcard syntax (`*` / `?`). `action.kind` selects `block` (fail with `BlockedByClient`), `redirect` (URL replacement via `action.to`), `respond` (synthesize a response — `status`, `body`, optional `content_type`, optional `headers`), `modify_request` (overlay extra `headers` onto the request), or `modify_response` (override the response's `status` and/or overlay `headers`). Returns `{ rule_id }` once the rule is in force. One rule per call — chain multiple `add_rule` calls for multiple rules. The tab's interception is one ordered list: the browser's tracker blocking first, then the rules in the order they were added; the first entry that fits a request decides it (`modify_response` fits the response, the others the request). The browser's proxy credentials keep working. Removing a rule (`browser_intercept_remove_rule` / `_clear_rules`) stops only that rule."
+        description = "Insert one interception rule into the current tab's interception, which is one ordered list of entries: the first entry that fits a paused request decides it, and no later entry runs. Give exactly one of `pattern` (CDP wildcard syntax: `*`, `?` for one character or none, `\\` escapes) and `hosts` (fits each host and its subdomains), optionally a `resource_type` (CDP names, e.g. `Document`, `XHR`) and a `label`. `pause` is `request` (default), `response_headers` (default for `modify_response`) or `response_error`. `action.kind` selects `continue` (let the request go on unchanged: an exception ahead of later entries), `block` (fail with `BlockedByClient`), `redirect` (send it to `action.to`; `request` pause only), `respond` (synthesize a response: `status`, `body`, optional `content_type`, optional `headers`), `modify_request` (overlay `headers` and/or replace `url` / `method` / `post_data`; `request` pause only), or `modify_response` (override `status` and/or overlay `headers`; `response_headers` pause only). `position` is required: `last` unless this rule must take requests from an earlier entry; `first` is ahead of the browser's tracker blocking (`browser.trackers`), so a `first` rule that fits a tracker's request decides it, and `continue` or `modify_request` there sends the tracker request; `{ \"before\": rule_id }` / `{ \"after\": rule_id }` place it next to an entry. Returns `{ rule_id, rules }` once the rule is in force, `rules` being the list as `browser_intercept_list_rules` reports it. A request that its deciding rule fails to answer is failed. The browser's proxy credentials are outside the list and keep working."
     )]
     pub async fn browser_intercept_add_rule(
         &self,
@@ -880,43 +880,57 @@ impl ZendriverServer {
             .map(Json)
     }
 
-    /// Remove a previously-installed interception rule.
+    /// Move an entry of the current tab's list.
+    #[tool(
+        name = "browser_intercept_move_rule",
+        description = "Move the entry `rule_id` of the current tab's interception list (a rule of yours, or the browser's `browser.trackers`) to `position` (`first`, `last`, `{ \"before\": rule_id }` or `{ \"after\": rule_id }`), keeping the other entries' order; returns `{ rules }`, the list after the change, once it is in force. Since the first entry that fits a request decides it, moving a rule ahead of another gives it the requests both fit."
+    )]
+    pub async fn browser_intercept_move_rule(
+        &self,
+        Parameters(input): Parameters<intercept::MoveRuleInput>,
+    ) -> Result<Json<intercept::RulesOutput>, ErrorData> {
+        intercept::move_rule(self.state.clone(), input)
+            .await
+            .map(Json)
+    }
+
+    /// Remove an entry of the interception.
     #[tool(
         name = "browser_intercept_remove_rule",
-        description = "Remove the interception rule identified by `rule_id`, leaving the tab's other rules in force; returns once the change is in force. Returns an error if the id is unknown — for an idempotent clear-all use `browser_intercept_clear_rules`."
+        description = "Remove the interception entry `rule_id`: a rule `browser_intercept_add_rule` returned (on any tab), or an entry of the current tab's list, the browser's `browser.trackers` included (which turns tracker blocking off for the tab). The other entries keep their order. Returns `{ rules }`, the current tab's list after the change, once it is in force. Returns an error if the id names no entry; to remove all your rules use `browser_intercept_clear_rules`."
     )]
     pub async fn browser_intercept_remove_rule(
         &self,
         Parameters(input): Parameters<intercept::RemoveRuleInput>,
-    ) -> Result<Json<intercept::RemoveRuleOutput>, ErrorData> {
+    ) -> Result<Json<intercept::RulesOutput>, ErrorData> {
         intercept::remove_rule(self.state.clone(), input)
             .await
             .map(Json)
     }
 
-    /// Enumerate every live interception rule.
+    /// List the current tab's interception entries, in order.
     #[tool(
         name = "browser_intercept_list_rules",
-        description = "Enumerate every live interception rule. Returns `{ rules: [{ rule_id, pattern, action_kind }] }` sorted by `rule_id` for stable output. Empty list (never an error) when no rules are installed."
+        description = "List the current tab's interception entries in the order a paused request walks them (the first that fits decides it): `{ rules: [{ index, rule_id, origin, label?, pause, pattern? | hosts_count + hosts?, resource_type?, action }], proxy_auth: { configured, pause? } }`. `origin` is `agent` for your rules and `browser` for the browser's (`browser.trackers`, for tracker blocking). `include_hosts: true` lists the hosts of host-set entries, not only their count. Empty (never an error) without a browser or a current tab."
     )]
     pub async fn browser_intercept_list_rules(
         &self,
-        Parameters(input): Parameters<EmptyInput>,
+        Parameters(input): Parameters<intercept::ListRulesInput>,
     ) -> Result<Json<intercept::ListRulesOutput>, ErrorData> {
         intercept::list_rules(self.state.clone(), input)
             .await
             .map(Json)
     }
 
-    /// Drop every live interception rule on this session.
+    /// Remove every interception rule the agent added.
     #[tool(
         name = "browser_intercept_clear_rules",
-        description = "Drop every live interception rule on this session; returns once the change is in force. Returns `{ cleared: <count> }`. Idempotent — calling on an empty registry returns `{ cleared: 0 }` rather than erroring."
+        description = "Remove every interception rule you added with `browser_intercept_add_rule`, on every tab; the browser's entries (`browser.trackers`) stay, and to remove one name it in `browser_intercept_remove_rule`. Returns `{ rules }`, the current tab's list after the change, once it is in force. Idempotent: with no rules of yours it changes nothing and is no error."
     )]
     pub async fn browser_intercept_clear_rules(
         &self,
         Parameters(input): Parameters<EmptyInput>,
-    ) -> Result<Json<intercept::ClearRulesOutput>, ErrorData> {
+    ) -> Result<Json<intercept::RulesOutput>, ErrorData> {
         intercept::clear_rules(self.state.clone(), input)
             .await
             .map(Json)

@@ -797,23 +797,21 @@ mod tests {
     async fn close_clears_interception_rules() {
         use crate::state::InterceptRuleHandle;
 
+        let rule_id =
+            |id: &str| -> zendriver::interception::RuleId { id.parse().expect("a rule id") };
         let state = Arc::new(Mutex::new(SessionState::new()));
         {
             let mut s = state.lock().await;
             s.rules.insert(
-                "rule-a".into(),
+                rule_id("1"),
                 InterceptRuleHandle {
-                    pattern: "*/ads/*".into(),
-                    action_kind: "block",
                     handle: zendriver_interception::InterceptHandle::for_tests(),
                     tab_id: "tab-a".into(),
                 },
             );
             s.rules.insert(
-                "rule-b".into(),
+                rule_id("2"),
                 InterceptRuleHandle {
-                    pattern: "*/api/*".into(),
-                    action_kind: "respond",
                     handle: zendriver_interception::InterceptHandle::for_tests(),
                     tab_id: "tab-b".into(),
                 },

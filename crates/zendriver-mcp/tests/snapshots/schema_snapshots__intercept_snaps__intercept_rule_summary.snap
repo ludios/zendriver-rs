@@ -4,19 +4,154 @@ expression: "schema_for! (tools::intercept::RuleSummary)"
 ---
 $schema: "https://json-schema.org/draft/2020-12/schema"
 title: RuleSummary
-description: Description of a single live interception rule.
+description: "One entry of the current tab's list."
 type: object
 properties:
-  action_kind:
-    description: "`\"block\"`, `\"redirect\"`, `\"respond\"`, `\"modify_request\"`, or\n`\"modify_response\"`."
-    type: string
+  action:
+    description: What the entry does with a request it decides.
+    $ref: "#/$defs/ActionSummary"
+  hosts:
+    description: "The hosts, sorted, for a host-set entry, when `include_hosts` asked\nfor them."
+    type:
+      - array
+      - "null"
+    items:
+      type: string
+  hosts_count:
+    description: "The number of hosts the entry fits (each with its subdomains), for a\nhost-set entry."
+    type:
+      - integer
+      - "null"
+    format: uint
+    minimum: 0
+  index:
+    description: "Where the entry is in the list, from 0. A paused request walks the\nlist from index 0, and the first entry that fits it decides it."
+    type: integer
+    format: uint
+    minimum: 0
+  label:
+    description: "The entry's label (`browser.trackers` for tracker blocking), if it\nhas one."
+    type:
+      - string
+      - "null"
+  origin:
+    description: Who put the entry in the list.
+    $ref: "#/$defs/RuleOrigin"
   pattern:
-    description: URL pattern the rule was registered with.
-    type: string
+    description: "The URL pattern the entry fits, for a pattern entry."
+    type:
+      - string
+      - "null"
+  pause:
+    description: The kind of pause the entry fits.
+    $ref: "#/$defs/PauseName"
+  resource_type:
+    description: "The resource type the entry fits, or absent for any."
+    type:
+      - string
+      - "null"
   rule_id:
-    description: "Same id `browser_intercept_add_rule` returned."
+    description: "The entry's id, for `position`, `browser_intercept_move_rule` and\n`browser_intercept_remove_rule`."
     type: string
 required:
+  - index
   - rule_id
-  - pattern
-  - action_kind
+  - origin
+  - pause
+  - action
+$defs:
+  ActionSummary:
+    description: What an entry does with a request it decides.
+    oneOf:
+      - description: Lets it go on unchanged.
+        type: object
+        properties:
+          kind:
+            type: string
+            const: continue
+        required:
+          - kind
+      - description: Fails it.
+        type: object
+        properties:
+          kind:
+            type: string
+            const: block
+          reason:
+            description: "The CDP `Network.ErrorReason` it fails with."
+            type: string
+        required:
+          - kind
+          - reason
+      - description: "Answers it with a response of `status`."
+        type: object
+        properties:
+          kind:
+            type: string
+            const: respond
+          status:
+            description: "The response's HTTP status code."
+            type: integer
+            format: uint16
+            maximum: 65535
+            minimum: 0
+        required:
+          - kind
+          - status
+      - description: "Sends it to `to` instead."
+        type: object
+        properties:
+          kind:
+            type: string
+            const: redirect
+          to:
+            description: The URL it is sent to.
+            type: string
+        required:
+          - kind
+          - to
+      - description: Sends it on with overrides.
+        type: object
+        properties:
+          kind:
+            type: string
+            const: modify_request
+        required:
+          - kind
+      - description: Lets the response go on with overrides.
+        type: object
+        properties:
+          kind:
+            type: string
+            const: modify_response
+        required:
+          - kind
+      - description: "Hands it to a stream of the browser's."
+        type: object
+        properties:
+          kind:
+            type: string
+            const: stream
+        required:
+          - kind
+  PauseName:
+    description: The kind of pause a rule decides.
+    oneOf:
+      - description: Before the request is sent.
+        type: string
+        const: request
+      - description: "Once the response's status and headers arrived (4xx and 5xx\nincluded)."
+        type: string
+        const: response_headers
+      - description: "When the request failed before any status (DNS, connection, ...)."
+        type: string
+        const: response_error
+  RuleOrigin:
+    description: Who put an entry in the list.
+    oneOf:
+      - description: "The browser, for an option of `browser_open` (`browser.trackers`,\nfor tracker blocking)."
+        type: string
+        const: browser
+      - description: "`browser_intercept_add_rule`."
+        type: string
+        const: agent

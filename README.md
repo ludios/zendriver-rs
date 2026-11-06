@@ -62,7 +62,7 @@ Separate binary crate (not a feature on `zendriver`):
 
 | Crate           | Use case                                                                                                                         | Install                                                                                     |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `zendriver-mcp` | Drive a stealth Chrome from any LLM agent — [Model Context Protocol](https://modelcontextprotocol.io/) server, 73 tools, stdio + streamable HTTP | `cargo install zendriver-mcp` ([docs](https://turtiesocks.github.io/zendriver-rs/mcp.html)) |
+| `zendriver-mcp` | Drive a stealth Chrome from any LLM agent — [Model Context Protocol](https://modelcontextprotocol.io/) server, 74 tools, stdio + streamable HTTP | `cargo install zendriver-mcp` ([docs](https://turtiesocks.github.io/zendriver-rs/mcp.html)) |
 
 ## Install
 
@@ -94,7 +94,7 @@ Adds request interception, `expect()` matchers, Cloudflare Turnstile bypass, Imp
 
 ## Drive a stealth browser from your AI agent
 
-`zendriver-mcp` is a **first-class [Model Context Protocol](https://modelcontextprotocol.io/) server** that hands the entire zendriver-rs surface to any LLM client — Claude Desktop, Claude Code, Cursor, or your own agent loop. **73 tools**, two transports (stdio + streamable HTTP), and the same stealth-by-default fingerprinting baked into the lib. Unlike generic browser MCP servers, this one bypasses Cloudflare Turnstile, ships an isolated-world JS eval that survives anti-bot detection, and lets agents persist auth state across sessions.
+`zendriver-mcp` is a **first-class [Model Context Protocol](https://modelcontextprotocol.io/) server** that hands the entire zendriver-rs surface to any LLM client — Claude Desktop, Claude Code, Cursor, or your own agent loop. **74 tools**, two transports (stdio + streamable HTTP), and the same stealth-by-default fingerprinting baked into the lib. Unlike generic browser MCP servers, this one bypasses Cloudflare Turnstile, ships an isolated-world JS eval that survives anti-bot detection, and lets agents persist auth state across sessions.
 
 ```bash
 cargo install zendriver-mcp
@@ -133,7 +133,7 @@ No manual MCP config — the plugin bundles the server plus scraping skills, the
   - `browser_solve_turnstile` — Cloudflare Turnstile bypass without a CAPTCHA-solving service, with the widget's `selectors` and `click_policy` as request fields so an agent can follow Cloudflare's markup changes without waiting on a release
   - `browser_open` `block_trackers` / `tracker_blocklist` — opt-in third-party tracker & fingerprinter host blocking (curated bundled list + bring-your-own file / URL)
   - `browser_solve_datadome` — DataDome device-check / CAPTCHA / block bypass (with `Surface::Webgpu` coherence)
-  - `browser_intercept_*` — block/redirect/respond/modify requests via CDP `Fetch.*`
+  - `browser_intercept_*` — block/redirect/respond/modify requests via CDP `Fetch.*`, as one ordered list per tab that the agent reads and places each rule in (ahead of or behind the tracker blocking)
   - `browser_expect_register / _await` — Playwright-style "wait for response/dialog/download" matchers, split across MCP calls so the agent can act in between
   - `browser_install_chrome` — pull a pinned Chrome-for-Testing build on demand
 - **Actionable errors** — every error carries an `_meta.suggested_next` hint pointing the agent at the right recovery tool (e.g. `ElementNotFound` → "try `browser_html` to inspect")
@@ -160,7 +160,7 @@ Six development phases shipped into the v0.1.0 release. The [mdBook](https://tur
 | Multi-tab                | yes (first-class)       | yes               | yes             | yes             | yes             |
 | Interception             | yes (`Fetch.*` wrapper) | yes (raw)         | no (proxy-only) | partial         | no (proxy-only) |
 | Cloudflare bypass        | yes (`zendriver-cloudflare`) | no           | no              | no              | no              |
-| MCP server for AI agents | yes (`zendriver-mcp`, 73 tools) | no        | no              | no              | no              |
+| MCP server for AI agents | yes (`zendriver-mcp`, 74 tools) | no        | no              | no              | no              |
 | License                  | MIT OR Apache-2.0       | MIT OR Apache-2.0 | Apache-2.0      | MIT             | MIT             |
 | Async runtime            | tokio                   | tokio / async-std | tokio           | sync            | tokio           |
 

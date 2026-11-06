@@ -1,7 +1,7 @@
 # MCP server (`zendriver-mcp`)
 
 `zendriver-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io/)
-server that exposes zendriver-rs through 73 MCP tools (74 with the
+server that exposes zendriver-rs through 74 MCP tools (75 with the
 optional `fingerprints` feature), so any
 MCP-compatible client (Claude Desktop, Claude Code, custom agents) can
 drive a real, stealth-by-default Chrome browser.
@@ -66,7 +66,7 @@ OPTIONS:
 
 ## Tool surface
 
-73 tools across these categories (74 with the optional `fingerprints`
+74 tools across these categories (75 with the optional `fingerprints`
 feature):
 
 | Category               | Tools                                                                                                                       | Count |
@@ -86,7 +86,7 @@ feature):
 | Downloads              | `browser_download / _set_download_path`                                                                                     |     2 |
 | Frames                 | `browser_frame_list / _frame_goto`                                                                                          |     2 |
 | Stealth                | `browser_set_stealth_profile / _set_user_agent`                                                                             |     2 |
-| Interception (gated)   | `browser_intercept_add_rule / _remove_rule / _list_rules / _clear_rules`                                                    |     4 |
+| Interception (gated)   | `browser_intercept_add_rule / _move_rule / _remove_rule / _list_rules / _clear_rules`                                       |     5 |
 | Expect (gated)         | `browser_expect_register / _await / _cancel`                                                                                |     3 |
 | Cloudflare (gated)     | `browser_solve_turnstile`                                                                                                   |     1 |
 | GPU catalogue          | `browser_gpu_devices`                                                                                                       |     1 |
@@ -177,6 +177,32 @@ present in the schema but only takes effect when the `geo` feature is enabled.
   silently serving software rendering. See the
   [GPU backend chapter](gpu-backend.md) for the measured comparison and the
   `--disable-gpu`-alone hang this option exists to avoid.
+
+## `browser_intercept_*` rules
+
+A tab's interception is one ordered list of entries, and the first entry
+that fits a paused request decides it ([Interception](./interception.md)
+has the full procedure). `browser_intercept_list_rules` shows the current
+tab's list in that order: each entry with its `index`, `rule_id`, `origin`
+(`agent` for the agent's rules, `browser` for `browser.trackers`, the
+tracker blocking of `browser_open`'s `block_trackers` /
+`tracker_blocklist`), `pause`, its `pattern` or host set, and `action`.
+Every tool that changes the list returns it, read after the change.
+
+`browser_intercept_add_rule` requires a `position`: `"last"`, `"first"`,
+`{ "before": rule_id }` or `{ "after": rule_id }`. A rule at `last` comes
+after `browser.trackers`, so tracker requests stay blocked whatever the
+rule does; a rule at `first` decides the tracker requests it fits, so a
+`continue` or `modify_request` there sends them. An exception goes ahead
+of the rule it excepts: `respond */api/health` placed `{ "before": <the
+block */api/* rule> }` answers health checks, and the block takes the rest
+of `/api/`.
+
+`browser_intercept_move_rule` and `browser_intercept_remove_rule` take any
+entry's `rule_id`, `browser.trackers` included; `browser_intercept_clear_rules`
+removes only the agent's rules. A request that its deciding rule fails to
+answer (Chrome refused the rule's response, say) is failed rather than
+let through.
 
 ## `browser_monitor_*` options
 

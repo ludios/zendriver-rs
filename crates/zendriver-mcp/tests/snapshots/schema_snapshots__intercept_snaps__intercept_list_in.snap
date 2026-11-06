@@ -1,0 +1,14 @@
+---
+source: crates/zendriver-mcp/tests/schema_snapshots.rs
+expression: "schema_for! (tools::intercept::ListRulesInput)"
+---
+$schema: "https://json-schema.org/draft/2020-12/schema"
+title: ListRulesInput
+description: "Input for `browser_intercept_list_rules`."
+type: object
+properties:
+  include_hosts:
+    description: "List the hosts of host-set entries (`browser.trackers` included),\nnot only their number. Defaults to `false`."
+    type: boolean
+    default: false
+additionalProperties: false

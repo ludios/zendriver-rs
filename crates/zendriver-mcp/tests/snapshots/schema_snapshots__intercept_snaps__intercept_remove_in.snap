@@ -8,7 +8,7 @@ description: "Input for `browser_intercept_remove_rule`."
 type: object
 properties:
   rule_id:
-    description: "Id returned by an earlier `browser_intercept_add_rule` call."
+    description: "The id of the entry to remove: one `browser_intercept_add_rule`\nreturned (on any tab), or one of the current tab's list."
     type: string
 additionalProperties: false
 required:

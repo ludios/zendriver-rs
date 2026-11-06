@@ -1,0 +1,45 @@
+---
+source: crates/zendriver-mcp/tests/schema_snapshots.rs
+expression: "schema_for! (tools::intercept::MoveRuleInput)"
+---
+$schema: "https://json-schema.org/draft/2020-12/schema"
+title: MoveRuleInput
+description: "Input for `browser_intercept_move_rule`."
+type: object
+properties:
+  position:
+    description: "Where it goes, in the list as it is without it."
+    $ref: "#/$defs/PositionInput"
+  rule_id:
+    description: "The id of the entry to move, from the current tab's list."
+    type: string
+additionalProperties: false
+required:
+  - rule_id
+  - position
+$defs:
+  PositionInput:
+    description: "Where in the current tab's list a rule goes, in the list as it is at\nthat moment: `\"first\"`, `\"last\"`, `{ \"before\": \"<rule_id>\" }` or\n`{ \"after\": \"<rule_id>\" }`."
+    oneOf:
+      - description: "Ahead of every entry, `browser.trackers` included."
+        type: string
+        const: first
+      - description: Behind every entry.
+        type: string
+        const: last
+      - description: "Just ahead of the entry with this `rule_id`."
+        type: object
+        properties:
+          before:
+            type: string
+        additionalProperties: false
+        required:
+          - before
+      - description: "Just behind the entry with this `rule_id`."
+        type: object
+        properties:
+          after:
+            type: string
+        additionalProperties: false
+        required:
+          - after

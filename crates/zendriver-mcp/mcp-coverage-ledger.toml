@@ -1078,7 +1078,7 @@ api = "zendriver::BrowserError::ConnectEndpoint"
 excluded = "crate-root re-export of the above variant; same connect-only failure surface"
 
 # ── Per-tab interception multiplexer (one Fetch owner per session) ──────────
-# `Tab::intercept()` now builds one layer of the tab's interception, and
+# `Tab::intercept()` builds rules for the tab's one ordered list, and
 # `start()` / `subscribe()` are async. The `subscribe()` stream type is
 # re-exported for callers that store it.
 [[entry]]
@@ -1121,7 +1121,7 @@ excluded = "re-export of the zendriver-interception crate for its generic names 
 
 [[entry]]
 api = "zendriver::tab::Tab::interceptor"
-covered = "browser_intercept_add_rule / browser_intercept_list_rules / browser_intercept_remove_rule"
+covered = "browser_intercept_add_rule (insert) / browser_intercept_move_rule (move_rule) / browser_intercept_remove_rule (remove) / browser_intercept_list_rules (snapshot) / browser_intercept_clear_rules"
 
 [[entry]]
 api = "zendriver::tab::Tab::tracker_blocking"

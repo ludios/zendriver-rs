@@ -252,11 +252,12 @@ mod intercept_snaps {
     schema_snap!(intercept_action, tools::intercept::InterceptAction);
     schema_snap!(intercept_add_in, tools::intercept::AddRuleInput);
     schema_snap!(intercept_add_out, tools::intercept::AddRuleOutput);
+    schema_snap!(intercept_move_in, tools::intercept::MoveRuleInput);
     schema_snap!(intercept_remove_in, tools::intercept::RemoveRuleInput);
-    schema_snap!(intercept_remove_out, tools::intercept::RemoveRuleOutput);
+    schema_snap!(intercept_rules_out, tools::intercept::RulesOutput);
+    schema_snap!(intercept_list_in, tools::intercept::ListRulesInput);
     schema_snap!(intercept_list_out, tools::intercept::ListRulesOutput);
     schema_snap!(intercept_rule_summary, tools::intercept::RuleSummary);
-    schema_snap!(intercept_clear_out, tools::intercept::ClearRulesOutput);
 }
 
 // ---------- expect (feature-gated) ----------------------------------------

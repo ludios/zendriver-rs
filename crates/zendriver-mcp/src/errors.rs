@@ -35,8 +35,9 @@ pub enum McpServerError {
     #[error("Expectation `{0}` not found. Did you call `browser_expect_register` first?")]
     ExpectationNotFound(String),
 
-    /// `browser_intercept_remove_rule` was passed an unknown id.
-    #[error("Intercept rule `{0}` not found.")]
+    /// A `browser_intercept_*` tool was passed an id that names no entry
+    /// (of the current tab's list, or added by `browser_intercept_add_rule`).
+    #[error("Intercept rule `{0}` not found. Use `browser_intercept_list_rules` to read the ids.")]
     RuleNotFound(String),
 
     /// `browser_open` was called after a shutdown signal, which has closed
@@ -62,7 +63,7 @@ pub fn map_error(err: impl Into<McpServerError>) -> ErrorData {
         McpServerError::ExpectationNotFound(_) => {
             (err.to_string(), Some("browser_expect_register"))
         }
-        McpServerError::RuleNotFound(_) => (err.to_string(), Some("browser_intercept_add_rule")),
+        McpServerError::RuleNotFound(_) => (err.to_string(), Some("browser_intercept_list_rules")),
         McpServerError::ShuttingDown => (err.to_string(), None),
         McpServerError::Zendriver(ze) => map_zendriver(ze),
     };

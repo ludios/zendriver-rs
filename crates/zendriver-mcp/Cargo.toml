@@ -22,7 +22,7 @@ path = "src/lib.rs"
 
 [features]
 default = ["interception", "expect", "cloudflare", "imperva", "datadome", "fetcher", "monitor", "tracker-blocking"]
-interception  = ["zendriver/interception", "dep:uuid"]
+interception  = ["zendriver/interception"]
 tracker-blocking  = ["zendriver/tracker-blocking"]
 expect        = ["zendriver/expect", "dep:uuid"]
 monitor       = ["zendriver/monitor", "dep:uuid", "dep:futures"]
