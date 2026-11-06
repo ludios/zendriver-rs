@@ -287,7 +287,13 @@ macro_rules! predicate_methods {
                 .push(TextPred::Contains(sub.into(), true));
             self
         }
-        /// Match elements whose trimmed text equals `exact` (post-filter).
+        /// Match elements whose text equals `exact` (post-filter), after
+        /// both are folded the way XPath `normalize-space()` folds them:
+        /// each run of spaces, tabs, CRs and LFs becomes one space, and a
+        /// space at either end is dropped. Other characters are kept,
+        /// U+00A0 (`&nbsp;`) included, so `text_equals("OK")` doesn't match
+        /// `<b>&nbsp;OK</b>`: for that, use `text("OK")`, or put the
+        /// character in `exact`.
         #[must_use]
         pub fn text_equals(mut self, exact: &str) -> Self {
             self.predicates
