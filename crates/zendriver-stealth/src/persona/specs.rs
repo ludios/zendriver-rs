@@ -116,11 +116,14 @@ impl UaMetadata {
 /// The screen that stealth presents: under `native()`, the screen a headless
 /// Chrome gets at launch (`--screen-info`); under `spoofed()`, the screen of
 /// `Emulation.setDeviceMetricsOverride` and of the bootstrap's geometry patch.
-/// See `StealthProfile::screen`. Sizes are in CSS pixels. Under `native()`,
-/// each of `width`, `height` and the work area's (`avail_*`) width and height,
-/// times `device_pixel_ratio`, must be a whole number of physical pixels
-/// (e.g. 1536x864 at 1.25 is 1920x1080), or the launch fails: Chrome takes
-/// the screen in physical pixels, and would round it.
+/// See `StealthProfile::screen`. Sizes are in CSS pixels.
+///
+/// When `native()` launches a headless Chrome, `device_pixel_ratio` must be
+/// a multiple of 0.25 from 1 (as Windows' scaling steps and macOS's 2x are),
+/// and each of `width`, `height` and the work area's width and height, times
+/// `device_pixel_ratio`, must be a whole number of physical pixels (e.g.
+/// 1536x864 at 1.25 is 1920x1080), or the launch fails: Chrome takes the
+/// screen in physical pixels, and would otherwise report a different one.
 ///
 /// Whole-value at [`Persona::overlay`](super::Persona::overlay) — composing
 /// two personas has the higher-priority persona's screen win outright when

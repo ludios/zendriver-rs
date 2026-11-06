@@ -101,7 +101,10 @@ async fn a_configured_screen_reaches_chrome() {
 }
 
 /// At a fractional ratio, the sizes are exact as long as they are whole
-/// physical pixels (1536x864 at 1.25 is 1920x1080).
+/// physical pixels: 1536x864 at 1.25 is 1920x1080, and 2192x1232 at 1.75
+/// (with the default taskbar of 48, which is 84 physical pixels) is
+/// 3836x2156. At 1.75, Chrome's rounding would make the taskbar 49, and a
+/// window 1596 wide 1597, without zendriver making up for it.
 #[tokio::test]
 async fn a_screen_at_a_fractional_ratio_reaches_chrome_exactly() {
     let builder = with_screen(
@@ -110,6 +113,17 @@ async fn a_screen_at_a_fractional_ratio_reaches_chrome_exactly() {
     );
     for seen in geometry_of_first_tab_and_new_window(builder).await {
         assert_fills_work_area(&seen, [1536, 864], [1536, 824], 1.25);
+    }
+    let builder = with_screen(r#""width": 2192, "height": 1232, "device_pixel_ratio": 1.75"#);
+    for seen in geometry_of_first_tab_and_new_window(builder).await {
+        assert_fills_work_area(&seen, [2192, 1232], [2192, 1184], 1.75);
+    }
+    let builder = with_screen(
+        r#""width": 1600, "height": 896, "device_pixel_ratio": 1.75,
+           "avail_width": 1596, "avail_height": 848"#,
+    );
+    for seen in geometry_of_first_tab_and_new_window(builder).await {
+        assert_fills_work_area(&seen, [1600, 896], [1596, 848], 1.75);
     }
 }
 
