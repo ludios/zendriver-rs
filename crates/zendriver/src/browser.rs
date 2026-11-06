@@ -2367,11 +2367,24 @@ impl TargetObserver for TabRegistrar {
 
                 // Before the target runs (the observer chain resumes it
                 // after this), so the page's first request is intercepted.
+                // Bounded, like the dial above, to stay well under the
+                // observer timeout, whose expiry detaches the target.
                 #[cfg(feature = "interception")]
                 {
-                    if let Err(e) = browser.start_browser_intercept(&tab).await {
+                    const INTERCEPT_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+                    let started = tokio::time::timeout(
+                        INTERCEPT_BUDGET,
+                        browser.start_browser_intercept(&tab),
+                    )
+                    .await;
+                    let error = match started {
+                        Ok(Ok(())) => None,
+                        Ok(Err(e)) => Some(e.to_string()),
+                        Err(_) => Some(format!("no reply within {INTERCEPT_BUDGET:?}")),
+                    };
+                    if let Some(error) = error {
                         warn!(
-                            error = %e,
+                            %error,
                             target_id = %session.target_info.target_id,
                             "could not start the tab's tracker blocking / proxy credentials"
                         );
@@ -3107,9 +3120,11 @@ pub(crate) async fn finish_connect(
             main_tab,
             default_context_id,
             // Take ownership of the child only now, once every CDP round-trip
-            // has succeeded. Until this point `guard_handshake` owns the
-            // cleanup: if the budget expires mid-handshake the child is still
-            // in the slot and gets killed there.
+            // that can fail the handshake has succeeded. Until this point
+            // `guard_handshake` owns the cleanup: if the budget expires
+            // mid-handshake the child is still in the slot and gets killed
+            // there. (If it expires later, during the main tab's
+            // interception, dropping this `BrowserInner` kills the child.)
             child: tokio::sync::Mutex::new(
                 child
                     .lock()
@@ -3147,9 +3162,11 @@ pub(crate) async fn finish_connect(
 
     // The main tab's tracker blocking and proxy credentials, in force
     // before the caller gets the browser. (The registrar starts them for
-    // every later tab.)
+    // every later tab.) A failure is only logged, as on a later tab.
     #[cfg(feature = "interception")]
-    inner.start_browser_intercept(&inner.main_tab).await?;
+    if let Err(e) = inner.start_browser_intercept(&inner.main_tab).await {
+        warn!(error = %e, "could not start the main tab's tracker blocking / proxy credentials");
+    }
 
     Ok(inner)
 }
@@ -6588,12 +6605,12 @@ mod tests {
             .collect();
         assert_eq!(enables.len(), 1, "{methods:?}");
         assert_eq!(enables[0]["handleAuthRequests"], true);
-        let enabled = methods.iter().position(|m| *m == "Fetch.enable");
-        let resumed = methods
-            .iter()
-            .position(|m| *m == "Runtime.runIfWaitingForDebugger");
+        let position = |method: &str| {
+            let at = methods.iter().position(|m| *m == method);
+            at.unwrap_or_else(|| panic!("no {method}: {methods:?}"))
+        };
         assert!(
-            enabled < resumed,
+            position("Fetch.enable") < position("Runtime.runIfWaitingForDebugger"),
             "resumed before Fetch.enable: {methods:?}"
         );
 
