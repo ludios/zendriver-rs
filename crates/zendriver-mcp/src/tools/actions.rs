@@ -35,6 +35,7 @@
 //! don't need yet.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rmcp::ErrorData;
 use schemars::JsonSchema;
@@ -205,18 +206,40 @@ pub struct ClickInput {
     /// a single call). Default: `1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub click_count: Option<u32>,
-    /// When `true`, wait for the navigation the click starts: the reply
-    /// comes once the new page has loaded (30 s limit), so a snapshot shows
-    /// that page. Fails if the click starts no navigation. Default: `false`.
+    /// When `true`, wait for the next navigation of the page after the
+    /// click, armed before it: the reply comes once the new document has
+    /// loaded, so a snapshot shows it. A navigation that stays in the
+    /// document (`pushState`, a fragment) ends the wait at once; one that
+    /// fails is an error; none within `navigation_timeout_ms` is a timeout.
+    /// Default: `false`.
     #[serde(default)]
     pub wait_for_navigation: bool,
+    /// How many milliseconds `wait_for_navigation` waits. Default: 30000.
+    #[serde(default = "default_navigation_timeout_ms")]
+    pub navigation_timeout_ms: u64,
     /// When `true`, include the trimmed page HTML in the response.
     #[serde(default)]
     pub return_snapshot: bool,
 }
 
-/// Wait for the navigation that an action started, if `armed` was set up
-/// before the action.
+const fn default_navigation_timeout_ms() -> u64 {
+    30_000
+}
+
+/// Arm a wait for the next navigation of `tab`'s main frame, if `wait`,
+/// giving up after `timeout_ms` milliseconds. To call before the action.
+fn arm_navigation(
+    tab: &zendriver::Tab,
+    wait: bool,
+    timeout_ms: u64,
+) -> Option<NavigationExpectation> {
+    wait.then(|| {
+        tab.expect_navigation()
+            .timeout(Duration::from_millis(timeout_ms))
+    })
+}
+
+/// Wait for the navigation that `armed` was set up for, if any.
 async fn await_navigation(armed: Option<NavigationExpectation>) -> Result<(), ErrorData> {
     if let Some(navigation) = armed {
         navigation
@@ -244,10 +267,12 @@ pub async fn click(
         click_count: input.click_count.unwrap_or(1),
         ..Default::default()
     };
-    let navigation = input.wait_for_navigation.then(|| tab.expect_navigation());
+    let navigation = arm_navigation(&tab, input.wait_for_navigation, input.navigation_timeout_ms);
     el.click_with(opts)
         .await
         .map_err(|e| map_error(McpServerError::from(e)))?;
+    // Other tools go on while the page loads.
+    drop(s);
     await_navigation(navigation).await?;
     ok_with_snapshot(&tab, input.return_snapshot).await
 }
@@ -370,12 +395,17 @@ pub struct PressInput {
     /// `["ctrl"]` + `key: "a"` for select-all). Default none.
     #[serde(default)]
     pub modifiers: Vec<ModifierArg>,
-    /// When `true`, wait for the navigation the key press starts (Enter in
-    /// a form, say): the reply comes once the new page has loaded (30 s
-    /// limit), so a snapshot shows that page. Fails if the key press starts
-    /// no navigation. Default: `false`.
+    /// When `true`, wait for the next navigation of the page after the key
+    /// press (Enter in a form, say), armed before it: the reply comes once
+    /// the new document has loaded, so a snapshot shows it. A navigation
+    /// that stays in the document (`pushState`, a fragment) ends the wait at
+    /// once; one that fails is an error; none within `navigation_timeout_ms`
+    /// is a timeout. Default: `false`.
     #[serde(default)]
     pub wait_for_navigation: bool,
+    /// How many milliseconds `wait_for_navigation` waits. Default: 30000.
+    #[serde(default = "default_navigation_timeout_ms")]
+    pub navigation_timeout_ms: u64,
     /// When `true`, include the trimmed page HTML in the response.
     #[serde(default)]
     pub return_snapshot: bool,
@@ -394,7 +424,7 @@ pub async fn press(
     let s = state.lock().await;
     let tab = current_tab(&s).await?;
     let el = resolve(&tab, &input.selector).await?;
-    let navigation = input.wait_for_navigation.then(|| tab.expect_navigation());
+    let navigation = arm_navigation(&tab, input.wait_for_navigation, input.navigation_timeout_ms);
     if mods.is_empty() {
         el.press(key)
             .await
@@ -404,6 +434,8 @@ pub async fn press(
             .await
             .map_err(|e| map_error(McpServerError::from(e)))?;
     }
+    // Other tools go on while the page loads.
+    drop(s);
     await_navigation(navigation).await?;
     ok_with_snapshot(&tab, input.return_snapshot).await
 }
@@ -718,6 +750,7 @@ mod tests {
                 button: None,
                 click_count: None,
                 wait_for_navigation: false,
+                navigation_timeout_ms: default_navigation_timeout_ms(),
                 return_snapshot: false,
             },
         )
@@ -782,6 +815,7 @@ mod tests {
                 key: "Enter".into(),
                 modifiers: Vec::new(),
                 wait_for_navigation: false,
+                navigation_timeout_ms: default_navigation_timeout_ms(),
                 return_snapshot: false,
             },
         )

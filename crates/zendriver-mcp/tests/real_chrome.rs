@@ -338,10 +338,15 @@ async fn click_with_wait_for_navigation_reports_the_page_it_leads_to() {
     let start = fixtures.url("127.0.0.1", "/plain?link=/slow-load%3Ffresh%3D1");
     open_at(&mut server, json!({}), &start).await;
     let since = fixtures.requests_to("/slow-resource").len();
-    server
+    let reply = server
         .call(
             "browser_click",
-            json!({ "css": "#link", "wait_for_navigation": true, "timeout_ms": FIND_WITHIN_MS }),
+            json!({
+                "css": "#link",
+                "wait_for_navigation": true,
+                "return_snapshot": true,
+                "timeout_ms": FIND_WITHIN_MS,
+            }),
         )
         .await;
     let returned = Instant::now();
@@ -349,6 +354,11 @@ async fn click_with_wait_for_navigation_reports_the_page_it_leads_to() {
         .last_responded_at_after("/slow-resource", since)
         .expect("browser_click returned before the page's slow resource was answered");
     assert_not_before(returned, answered, "browser_click: the slow resource");
+    let snapshot = reply["snapshot"].as_str().expect("a snapshot");
+    assert!(
+        snapshot.contains("Slow load"),
+        "snapshot of the old page: {snapshot}"
+    );
     let state = server
         .call(
             "browser_evaluate",
@@ -358,15 +368,57 @@ async fn click_with_wait_for_navigation_reports_the_page_it_leads_to() {
     assert_eq!(state["value"], format!("{slow} complete"));
 }
 
+/// `browser_press` with `wait_for_navigation`: Enter submits the form, and
+/// the reply describes the result page.
+#[tokio::test]
+async fn press_with_wait_for_navigation_reports_the_page_it_leads_to() {
+    let fixtures = FixtureServer::start().await;
+    let mut server = McpServer::start(Transport::Stdio).await;
+    open_at(&mut server, json!({}), &fixtures.url("127.0.0.1", "/form")).await;
+    server
+        .call(
+            "browser_type",
+            json!({ "css": "#q", "text": "hello", "timeout_ms": FIND_WITHIN_MS }),
+        )
+        .await;
+    let reply = server
+        .call(
+            "browser_press",
+            json!({
+                "css": "#q",
+                "key": "Enter",
+                "wait_for_navigation": true,
+                "return_snapshot": true,
+                "timeout_ms": FIND_WITHIN_MS,
+            }),
+        )
+        .await;
+    let snapshot = reply["snapshot"].as_str().expect("a snapshot");
+    assert!(
+        snapshot.contains("Form result"),
+        "snapshot of the old page: {snapshot}"
+    );
+    let state = server
+        .call(
+            "browser_evaluate",
+            json!({ "expression": "location.href + ' ' + document.readyState" }),
+        )
+        .await;
+    let url = fixtures.url("127.0.0.1", "/form-result?q=hello");
+    assert_eq!(state["value"], format!("{url} complete"));
+}
+
 /// `browser_wait_for_url` after a click: it skips the `/hop` page on the way
 /// and reports the page at the URL.
 #[tokio::test]
 async fn wait_for_url_reports_the_page_at_the_url() {
     let fixtures = FixtureServer::start().await;
     let mut server = McpServer::start(Transport::Stdio).await;
+    // The destination is encoded within the hop's URL, so that the pattern
+    // can't match the hop.
     let start = fixtures.url(
         "127.0.0.1",
-        "/plain?link=/hop%3Fto%3D/plain%3Ftitle%3DFinal",
+        "/plain?link=/hop%3Fto%3D%252Fplain%253Ftitle%253DFinal",
     );
     open_at(&mut server, json!({}), &start).await;
     server

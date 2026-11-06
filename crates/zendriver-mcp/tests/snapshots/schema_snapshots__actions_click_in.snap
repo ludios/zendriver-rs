@@ -32,6 +32,12 @@ properties:
     type:
       - string
       - "null"
+  navigation_timeout_ms:
+    description: "How many milliseconds `wait_for_navigation` waits. Default: 30000."
+    type: integer
+    format: uint64
+    default: 30000
+    minimum: 0
   nth:
     type:
       - integer
@@ -80,7 +86,7 @@ properties:
     type: boolean
     default: true
   wait_for_navigation:
-    description: "When `true`, wait for the navigation the click starts: the reply\ncomes once the new page has loaded (30 s limit), so a snapshot shows\nthat page. Fails if the click starts no navigation. Default: `false`."
+    description: "When `true`, wait for the next navigation of the page after the\nclick, armed before it: the reply comes once the new document has\nloaded, so a snapshot shows it. A navigation that stays in the\ndocument (`pushState`, a fragment) ends the wait at once; one that\nfails is an error; none within `navigation_timeout_ms` is a timeout.\nDefault: `false`."
     type: boolean
     default: false
   xpath:

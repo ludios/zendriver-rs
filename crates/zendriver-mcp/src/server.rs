@@ -370,10 +370,11 @@ impl ZendriverServer {
 
     // ---------- actions --------------------------------------------------
 
-    /// Click an element with realistic Bezier-path cursor approach.
+    /// Click an element with realistic Bezier-path cursor approach, and
+    /// with `wait_for_navigation`, wait for the page it leads to.
     #[tool(
         name = "browser_click",
-        description = "Click an element (realistic Bezier-path cursor + full actionability gate). Set `button` to `middle` / `right` for non-primary buttons or `click_count: 2` for a double-click. `wait_for_navigation: true` waits for the navigation the click starts, so the reply comes once the new page has loaded. `return_snapshot: true` includes the post-click trimmed page HTML."
+        description = "Click an element (realistic Bezier-path cursor + full actionability gate). Set `button` to `middle` / `right` for non-primary buttons or `click_count: 2` for a double-click. `wait_for_navigation: true` waits (up to `navigation_timeout_ms`) for the next navigation after the click, so the reply comes once the new document has loaded; a `pushState` or fragment change ends the wait at once. `return_snapshot: true` includes the post-click trimmed page HTML."
     )]
     pub async fn browser_click(
         &self,
@@ -420,10 +421,11 @@ impl ZendriverServer {
             .map(Json)
     }
 
-    /// Focus an element + dispatch a single keystroke.
+    /// Focus an element + dispatch a single keystroke, and with
+    /// `wait_for_navigation`, wait for the page it leads to.
     #[tool(
         name = "browser_press",
-        description = "Focus an element + dispatch a single keystroke. `key` accepts a special-key name (Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Space, Home, End, PageUp, PageDown, F1..F12, etc., case-insensitive) OR a single character (typed as `Key::Char`). `modifiers` (e.g. `[\"ctrl\"]`) holds modifier keys for a chord. `wait_for_navigation: true` waits for the navigation the key starts (Enter in a form), so the reply comes once the new page has loaded. For multi-step shortcuts use `browser_key_sequence`."
+        description = "Focus an element + dispatch a single keystroke. `key` accepts a special-key name (Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Space, Home, End, PageUp, PageDown, F1..F12, etc., case-insensitive) OR a single character (typed as `Key::Char`). `modifiers` (e.g. `[\"ctrl\"]`) holds modifier keys for a chord. `wait_for_navigation: true` waits (up to `navigation_timeout_ms`) for the next navigation after the key press (Enter in a form), so the reply comes once the new document has loaded; a `pushState` or fragment change ends the wait at once. For multi-step shortcuts use `browser_key_sequence`."
     )]
     pub async fn browser_press(
         &self,
@@ -831,7 +833,7 @@ impl ZendriverServer {
     /// Wait until the tab is at a matching URL and that page has loaded.
     #[tool(
         name = "browser_wait_for_url",
-        description = "Wait until the current tab's URL contains `url_substr` or matches `url_regex`, and the page there has loaded. Returns at once if it already does. Pages at other URLs on the way are skipped, so this waits out a login that bounces through another site. Safe to call after the click or key press that navigates. `timeout_ms` defaults to 30000; raise it for a login done by hand."
+        description = "Wait until the current tab's URL contains `url_substr` or matches `url_regex`, and the page there has loaded. Returns at once if it already does. Pages at other URLs on the way are skipped, so this waits out a login that bounces through another site. Safe to call after the click or key press that navigates, as long as the tab stays at the destination. A navigation to a matching URL that fails is an error. `timeout_ms` defaults to 30000; raise it for a login done by hand."
     )]
     pub async fn browser_wait_for_url(
         &self,

@@ -31,8 +31,9 @@ need; skip the rest.
 ## Event-waiting (expect)
 
 - `browser_expect_register` → `browser_expect_await` (`browser_expect_cancel` to drop) —
-  wait for a specific navigation/request/response/download instead of a blind sleep. Ideal
-  for "click submit, then wait for the POST to complete".
+  wait for a specific request/response/download/dialog/file chooser instead of a blind
+  sleep. Ideal for "click submit, then wait for the POST to complete". For a navigation, use
+  `wait_for_navigation: true` on `browser_click` / `browser_press`, or `browser_wait_for_url`.
 
 ## Tabs & frames
 

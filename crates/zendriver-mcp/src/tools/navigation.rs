@@ -2,9 +2,9 @@
 //! `_wait_for_idle`, `_wait_for_load`, `_wait_for_url`.
 //!
 //! All of them share the [`crate::tools::common::current_tab`] helper
-//! and (for the URL-changing variants) a [`NavOutput`] return type that
-//! reports the post-navigation `url` + `title` plus an optional rendered
-//! HTML snapshot.
+//! and (those that navigate or wait for a page) a [`NavOutput`] return type
+//! that reports the page's `url` + `title` plus an optional rendered HTML
+//! snapshot.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -295,18 +295,19 @@ pub async fn bypass_insecure_warning(
 
 /// Input for `browser_wait_for_url`. Exactly one of `url_substr` /
 /// `url_regex` must be set.
-#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WaitForUrlInput {
-    /// Wait for a URL that contains this text (the fragment included).
+    /// Wait for a URL that contains this text (the fragment included). Must
+    /// not be empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_substr: Option<String>,
     /// Wait for a URL that this regex matches (`regex` crate syntax; anchor
     /// it with `^` and `$` for an exact URL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_regex: Option<String>,
-    /// Give up after this long. Default: 30000. A login done by hand may
-    /// need more.
+    /// Give up after this many milliseconds. Default: 30000. A login done by
+    /// hand may need more.
     #[serde(default = "default_url_wait_ms")]
     pub timeout_ms: u64,
     /// When `true`, include the trimmed page HTML in the response.
@@ -321,6 +322,10 @@ const fn default_url_wait_ms() -> u64 {
 /// The [`UrlMatcher`] that `input` asks for.
 fn url_matcher(input: &WaitForUrlInput) -> Result<UrlMatcher, ErrorData> {
     match (&input.url_substr, &input.url_regex) {
+        (Some(substr), None) if substr.is_empty() => Err(ErrorData::invalid_params(
+            "url_substr is empty, which every URL contains",
+            None,
+        )),
         (Some(substr), None) => Ok(UrlMatcher::Substring(substr.clone())),
         (None, Some(re)) => regex::Regex::new(re)
             .map(UrlMatcher::Regex)
@@ -334,18 +339,23 @@ fn url_matcher(input: &WaitForUrlInput) -> Result<UrlMatcher, ErrorData> {
 
 /// Wait until the tab is at a URL matching the input, and the page there
 /// has loaded; then report that page. The session's lock is released while
-/// waiting, which can take minutes.
+/// waiting, which can take minutes, so another tool may navigate the tab
+/// again before the title and the snapshot are read: the URL reported is
+/// the one the wait ended on.
 pub async fn wait_for_url(
     state: Arc<Mutex<SessionState>>,
     input: WaitForUrlInput,
 ) -> Result<NavOutput, ErrorData> {
     let matcher = url_matcher(&input)?;
     let tab = current_tab(&*state.lock().await).await?;
-    tab.wait_for_url(matcher)
+    let reached = tab
+        .wait_for_url(matcher)
         .timeout(Duration::from_millis(input.timeout_ms))
         .await
         .map_err(|e| map_error(McpServerError::from(e)))?;
-    nav_output(&tab, input.return_snapshot).await
+    let mut output = nav_output(&tab, input.return_snapshot).await?;
+    output.url = reached.url.to_string();
+    Ok(output)
 }
 
 // ---------- browser_wait_for_idle -----------------------------------------
@@ -496,5 +506,49 @@ mod tests {
         assert!(err.message.contains("browser_open"));
         let data = err.data.as_ref().expect("data populated");
         assert_eq!(data["suggested_next"], "browser_open");
+    }
+
+    /// A `WaitForUrlInput` with `url_substr` and `url_regex` as given, and
+    /// the defaults otherwise.
+    fn wait_for_url_input(url_substr: Option<&str>, url_regex: Option<&str>) -> WaitForUrlInput {
+        WaitForUrlInput {
+            url_substr: url_substr.map(str::to_owned),
+            url_regex: url_regex.map(str::to_owned),
+            timeout_ms: default_url_wait_ms(),
+            return_snapshot: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_for_url_with_no_browser_suggests_browser_open() {
+        let state = Arc::new(Mutex::new(SessionState::new()));
+        let err = wait_for_url(state, wait_for_url_input(Some("/x"), None))
+            .await
+            .expect_err("must error without an open browser");
+        assert!(err.message.contains("browser_open"));
+        let data = err.data.as_ref().expect("data populated");
+        assert_eq!(data["suggested_next"], "browser_open");
+    }
+
+    #[test]
+    fn wait_for_url_takes_one_matcher_that_matches_something() {
+        let substr = url_matcher(&wait_for_url_input(Some("/x"), None)).expect("a substring");
+        assert!(matches!(substr, UrlMatcher::Substring(s) if s == "/x"));
+        let re = url_matcher(&wait_for_url_input(None, Some("^https://x/$"))).expect("a regex");
+        assert!(matches!(re, UrlMatcher::Regex(re) if re.is_match("https://x/")));
+        let rejected = [
+            (Some(""), None, "empty"),
+            (None, Some("("), "invalid url_regex"),
+            (None, None, "exactly one"),
+            (Some("/x"), Some("x"), "exactly one"),
+        ];
+        for (substr, re, says) in rejected {
+            let err = url_matcher(&wait_for_url_input(substr, re)).expect_err("rejected");
+            assert!(
+                err.message.contains(says),
+                "{substr:?} {re:?}: {}",
+                err.message
+            );
+        }
     }
 }

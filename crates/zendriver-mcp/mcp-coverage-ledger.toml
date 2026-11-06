@@ -1130,3 +1130,7 @@ covered = "browser_intercept_add_rule (insert) / browser_intercept_move_rule (mo
 [[entry]]
 api = "zendriver::tab::Tab::tracker_blocking"
 covered = "browser_intercept_list_rules (the browser.trackers entry)"
+
+[[entry]]
+api = "zendriver::Navigation::same_document"
+excluded = "no agent-facing value: an MCP reply describes the page, and agents re-find elements rather than keep handles across a wait"

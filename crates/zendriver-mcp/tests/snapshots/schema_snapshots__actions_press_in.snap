@@ -29,6 +29,12 @@ properties:
     default: []
     items:
       $ref: "#/$defs/ModifierArg"
+  navigation_timeout_ms:
+    description: "How many milliseconds `wait_for_navigation` waits. Default: 30000."
+    type: integer
+    format: uint64
+    default: 30000
+    minimum: 0
   nth:
     type:
       - integer
@@ -77,7 +83,7 @@ properties:
     type: boolean
     default: true
   wait_for_navigation:
-    description: "When `true`, wait for the navigation the key press starts (Enter in\na form, say): the reply comes once the new page has loaded (30 s\nlimit), so a snapshot shows that page. Fails if the key press starts\nno navigation. Default: `false`."
+    description: "When `true`, wait for the next navigation of the page after the key\npress (Enter in a form, say), armed before it: the reply comes once\nthe new document has loaded, so a snapshot shows it. A navigation\nthat stays in the document (`pushState`, a fragment) ends the wait at\nonce; one that fails is an error; none within `navigation_timeout_ms`\nis a timeout. Default: `false`."
     type: boolean
     default: false
   xpath:

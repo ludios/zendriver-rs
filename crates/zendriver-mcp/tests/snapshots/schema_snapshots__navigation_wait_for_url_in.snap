@@ -12,7 +12,7 @@ properties:
     type: boolean
     default: false
   timeout_ms:
-    description: "Give up after this long. Default: 30000. A login done by hand may\nneed more."
+    description: "Give up after this many milliseconds. Default: 30000. A login done by\nhand may need more."
     type: integer
     format: uint64
     default: 30000
@@ -23,7 +23,7 @@ properties:
       - string
       - "null"
   url_substr:
-    description: Wait for a URL that contains this text (the fragment included).
+    description: "Wait for a URL that contains this text (the fragment included). Must\nnot be empty."
     type:
       - string
       - "null"
