@@ -1,9 +1,10 @@
 //! CDP-style URL pattern matching.
 //!
-//! Compiles a CDP wildcard pattern (`*` matches any sequence, `?` matches a
-//! single character) into a [`regex::Regex`]. All other regex metacharacters
-//! in the input are escaped so the user-facing surface stays the simple CDP
-//! syntax used by `Fetch.RequestPattern.urlPattern`.
+//! Compiles a CDP wildcard pattern (`*` matches any sequence, `?` matches
+//! zero or one character, `\` makes the next character literal) into a
+//! [`regex::Regex`]. All other regex metacharacters in the input are escaped
+//! so the user-facing surface stays the simple CDP syntax used by
+//! `Fetch.RequestPattern.urlPattern`, with the meaning Chrome gives it.
 
 use regex::Regex;
 
@@ -25,8 +26,9 @@ impl UrlPattern {
     /// Compile a CDP-style URL pattern.
     ///
     /// `*` matches any sequence of characters (including empty), `?` matches
-    /// exactly one character, and every other regex metacharacter is escaped
-    /// so the user sees the simple wildcard surface.
+    /// zero or one character, `\` makes the next character literal (so `\*`
+    /// matches a `*`), and every other character matches itself: what Chrome
+    /// gives a `Fetch.RequestPattern`'s `urlPattern` (`base::MatchPattern`).
     ///
     /// Returns [`InterceptionError::InvalidPattern`] if the resulting regex
     /// fails to compile.
@@ -55,16 +57,23 @@ impl UrlPattern {
 
 /// Convert a CDP wildcard pattern into an anchored regex source.
 ///
-/// `*` → `.*`, `?` → `.`, all other regex metacharacters are escaped via
-/// [`regex::escape`]. The result is anchored at both ends so `matches`
-/// behaves as a full-URL match.
+/// `*` → `.*`, `?` → `.?`, `\c` → a literal `c` (a trailing `\` is
+/// dropped, as Chrome drops it), and all other regex metacharacters are
+/// escaped via [`regex::escape`]. The result is anchored at both ends so
+/// `matches` behaves as a full-URL match.
 fn compile_to_regex(pattern: &str) -> String {
     let mut out = String::with_capacity(pattern.len() + 4);
     out.push('^');
-    for ch in pattern.chars() {
+    let mut chars = pattern.chars();
+    while let Some(ch) = chars.next() {
         match ch {
             '*' => out.push_str(".*"),
-            '?' => out.push('.'),
+            '?' => out.push_str(".?"),
+            '\\' => {
+                if let Some(literal) = chars.next() {
+                    out.push_str(&regex::escape(&literal.to_string()));
+                }
+            }
             other => out.push_str(&regex::escape(&other.to_string())),
         }
     }
@@ -92,6 +101,20 @@ mod tests {
         assert!(p.matches("https://api.example.com/foo"));
         assert!(p.matches("ws://cdn.example.com/socket"));
         assert!(!p.matches("https://example.org/foo"));
+    }
+
+    /// As in Chrome's `base::MatchPattern`: `?` matches zero or one
+    /// character, and `\` makes the next character literal.
+    #[test]
+    fn question_mark_and_backslash_match_as_in_chrome() {
+        let p = UrlPattern::new("https://a.test/x?.js").unwrap();
+        assert!(p.matches("https://a.test/x.js"));
+        assert!(p.matches("https://a.test/x1.js"));
+        assert!(!p.matches("https://a.test/x12.js"));
+
+        let p = UrlPattern::new(r"https://a.test/\*\?").unwrap();
+        assert!(p.matches("https://a.test/*?"));
+        assert!(!p.matches("https://a.test/ab"));
     }
 
     #[test]

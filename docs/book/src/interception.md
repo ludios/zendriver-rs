@@ -32,8 +32,9 @@ intercepted.
 
 The rule methods chain on the builder and dispatch the matching
 terminal action automatically when the URL pattern fires. Patterns use
-CDP wildcard syntax (`*` matches any characters; `?` matches any single
-character).
+CDP wildcard syntax, with Chrome's meaning: `*` matches any characters, `?`
+matches zero or one character, and `\` makes the next character literal
+(`\*` matches a `*`).
 
 | Method | Action | Use case |
 |--------|--------|----------|

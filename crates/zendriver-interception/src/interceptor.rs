@@ -276,9 +276,23 @@ impl Filter {
             && self
                 .pattern
                 .resource_type
-                .is_none_or(|t| t == resource_type)
+                .is_none_or(|t| covers(t, resource_type))
             && self.url.matches(url)
     }
+}
+
+/// Whether a pattern for `pattern`-type requests covers one of `actual`
+/// type. Chrome pauses XHR, Fetch and EventSource requests alike for a
+/// pattern naming any of the three (they are one type to its loader; see
+/// `AddInterceptedResourceType` in Chromium's `fetch_handler.cc`).
+fn covers(pattern: ResourceType, actual: ResourceType) -> bool {
+    let xhr_like = |t| {
+        matches!(
+            t,
+            ResourceType::XHR | ResourceType::Fetch | ResourceType::EventSource
+        )
+    };
+    pattern == actual || (xhr_like(pattern) && xhr_like(actual))
 }
 
 /// What a handle asks of the multiplexer.
@@ -935,6 +949,31 @@ mod tests {
                 |(m, p)| m == "Fetch.enable" && p["patterns"] == json!([{ "urlPattern": "*" }])
             ),
             "{sent:?}"
+        );
+        conn.shutdown();
+    }
+
+    /// A layer whose pattern names XHR requests considers a `fetch()`'s too:
+    /// Chrome pauses both for it.
+    #[tokio::test]
+    async fn an_xhr_pattern_covers_fetch_requests() {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let builder = InterceptBuilder::new(&interceptor)
+            .pattern("*")
+            .resource(ResourceType::XHR)
+            .block("*")
+            .unwrap();
+        let (_handle, _) = applied(&mut mock, builder.start()).await;
+        pause(
+            &mock,
+            "R1",
+            "https://x.test/api",
+            json!({ "resourceType": "Fetch" }),
+        )
+        .await;
+        assert_eq!(
+            answered(&mut mock, "Fetch.failRequest").await["requestId"],
+            "R1"
         );
         conn.shutdown();
     }
