@@ -212,9 +212,9 @@ On timeout the future resolves to
 The subscriber task is canceled before the error returns, so there's no
 leaked listener.
 
-If the connection to Chrome drops, reconnects, or is shut down (as closing
-the tab does, for a tab that has its own socket), or a broadcast subscriber
-falls behind while an expectation is waiting, the future instead resolves to
+If the connection to Chrome drops, reconnects, or is shut down, or the tab
+closes, or a broadcast subscriber falls behind while an expectation is
+waiting, the future instead resolves to
 [`ZendriverError::EventStreamIncomplete`](https://docs.rs/zendriver/latest/zendriver/enum.ZendriverError.html#variant.EventStreamIncomplete)
 — distinct from `Timeout` because the awaited event may in fact have fired,
 but the delivery gap means it can no longer be confirmed either way. Treat it

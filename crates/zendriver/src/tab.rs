@@ -428,8 +428,9 @@ pub struct IdleOptions {
     /// tab non-idle until `timeout`.
     pub max_inflight_age: Option<Duration>,
     /// How the wait reacts to a CDP event-stream delivery gap or end (a
-    /// lagging broadcast subscriber, a reconnect, the WebSocket dying, or
-    /// the connection being shut down) observed during the wait. Default: [`IdleLossPolicy::Lenient`] — a gap is
+    /// lagging broadcast subscriber, a reconnect, the WebSocket dying, the
+    /// connection being shut down, or the tab closing) observed during the
+    /// wait. Default: [`IdleLossPolicy::Lenient`] — a gap is
     /// tolerated and the call still resolves best-effort, matching every
     /// prior release's behavior. Opt into [`IdleLossPolicy::Strict`] to fail
     /// loudly with [`ZendriverError::EventStreamIncomplete`] instead of
@@ -1066,9 +1067,9 @@ impl Tab {
     /// # Errors
     ///
     /// Returns [`ZendriverError::Timeout`] when the main frame is still
-    /// loading after 30s; [`ZendriverError::Navigation`] if the tab's
-    /// connection closes first, whether Chrome exited or zendriver shut it
-    /// down, as closing the tab does.
+    /// loading after 30s; [`ZendriverError::Navigation`] if the tab is
+    /// closed or its connection closes first (because Chrome exited, or
+    /// zendriver shut the connection down).
     ///
     /// # Examples
     ///
@@ -1120,8 +1121,8 @@ impl Tab {
     /// replaced), so the navigation may have happened unseen; and
     /// [`ZendriverError::Navigation`] when the navigation ends on Chrome's
     /// error page because its destination couldn't be reached, or if the
-    /// tab's connection closes first, whether Chrome exited or zendriver
-    /// shut it down, as closing the tab does.
+    /// tab is closed or its connection closes first (because Chrome exited,
+    /// or zendriver shut the connection down).
     ///
     /// # Examples
     ///
@@ -1999,7 +2000,7 @@ impl Tab {
     /// `quiet_window` plus one `IDLE_FALLBACK_TICK` (50ms).
     ///
     /// Under [`IdleOptions::loss_policy`] = [`IdleLossPolicy::Strict`], the
-    /// wait additionally races against this tab's connection's accounted
+    /// wait additionally races against this tab's session's accounted
     /// event stream; the first `Lagged` / `Reconnected` / `Disconnected` /
     /// `Shutdown` boundary observed while the wait is in progress aborts it
     /// early with [`ZendriverError::EventStreamIncomplete`]. Under the default
@@ -2044,19 +2045,17 @@ impl Tab {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut quiet_start: Option<tokio::time::Instant> = None;
 
-        // Under `Strict`, subscribe to this tab's connection's accounted
+        // Under `Strict`, subscribe to this tab's session's accounted
         // event stream for the lifetime of this call so a delivery gap
         // during the wait aborts it instead of silently reporting a
         // possibly-wrong idle. Under `Lenient` we deliberately never call
-        // `subscribe_raw_accounted` — the accounted bus only pays its
+        // `subscribe_accounted` — the accounted bus only pays its
         // per-event clone/send cost when it has a live subscriber, so a
         // Lenient wait stays as cheap as it always was.
         let mut loss_boundary: std::pin::Pin<
             Box<dyn futures::Stream<Item = AccountedRawEvent> + Send>,
         > = match loss_policy {
-            IdleLossPolicy::Strict => {
-                Box::pin(self.session().connection().subscribe_raw_accounted())
-            }
+            IdleLossPolicy::Strict => Box::pin(self.session().subscribe_accounted()),
             IdleLossPolicy::Lenient => Box::pin(futures::stream::pending()),
         };
 
@@ -4715,7 +4714,7 @@ mod tests {
         let fut = spawn_idle_wait(&tab, IdleLossPolicy::Strict);
 
         // Give the Strict wait a chance to reach its first poll and
-        // subscribe via `subscribe_raw_accounted` (a synchronous call made
+        // subscribe via `subscribe_accounted` (a synchronous call made
         // once, before the loop starts) before overflowing the bus.
         tokio::time::sleep(Duration::from_millis(75)).await;
 
@@ -4794,6 +4793,28 @@ mod tests {
         assert!(
             matches!(res.unwrap(), Err(ZendriverError::EventStreamIncomplete)),
             "Strict must abort with EventStreamIncomplete on a shutdown",
+        );
+    }
+
+    /// And so does Chrome's detaching of the tab's session (as `Tab::close`
+    /// makes it do to a tab on the browser's socket).
+    #[tokio::test]
+    async fn wait_for_idle_opts_strict_aborts_on_detach() {
+        let (tab, mock, _conn) = tab_with_a_request_in_flight(MockConnection::pair()).await;
+        let fut = spawn_idle_wait(&tab, IdleLossPolicy::Strict);
+        // Let the wait subscribe first: a wait that starts after the detach
+        // doesn't see it.
+        tokio::time::sleep(Duration::from_millis(75)).await;
+
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S1" }))
+            .await;
+
+        let res = tokio::time::timeout(Duration::from_secs(2), fut)
+            .await
+            .expect("wait_for_idle_opts (Strict) did not resolve within 2s after the detach");
+        assert!(
+            matches!(res.unwrap(), Err(ZendriverError::EventStreamIncomplete)),
+            "Strict must abort with EventStreamIncomplete on a detach",
         );
     }
 

@@ -473,6 +473,27 @@ mod tests {
         );
     }
 
+    /// The same when Chrome detaches the session (as `Tab::close` makes it
+    /// do to a tab on the browser's socket).
+    #[tokio::test]
+    async fn expect_response_returns_event_stream_incomplete_on_detach() {
+        let (mock, conn) = MockConnection::pair();
+        let session = SessionHandle::new(conn, "S1");
+
+        let expectation = register(&session, UrlMatcher::from("/api/"));
+
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S1" }))
+            .await;
+
+        let res = tokio::time::timeout(Duration::from_secs(2), expectation)
+            .await
+            .expect("expectation did not resolve within 2s after the detach");
+        assert!(
+            matches!(res, Err(ZendriverError::EventStreamIncomplete)),
+            "expected EventStreamIncomplete after the detach, got {res:?}",
+        );
+    }
+
     /// Register an expectation, then simulate a transport *reconnect*
     /// (`AccountedRawEvent::Reconnected`, via `MockConnection::reconnect`)
     /// before any matching response arrives. Like the disconnect case, the

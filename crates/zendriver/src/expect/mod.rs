@@ -33,12 +33,10 @@ use crate::error::{Result, ZendriverError};
 
 /// Subscribe to `method`-shaped events scoped to `session`, decoded via
 /// `T`'s [`serde::de::DeserializeOwned`] impl. Backs every `expect_*`
-/// subscriber task — riding [`Connection::subscribe_raw_accounted`]
+/// subscriber task — riding [`SessionHandle::subscribe_accounted`]
 /// (rather than the plain [`SessionHandle::subscribe`]) so a delivery-loss
 /// boundary crossed while a wait is in progress is visible instead of
 /// silently vanishing.
-///
-/// [`Connection::subscribe_raw_accounted`]: zendriver_transport::Connection::subscribe_raw_accounted
 ///
 /// Yields `Ok(T)` for every successfully-decoded `method` event on this
 /// session. Yields `Err(`[`ZendriverError::EventStreamIncomplete`]`)` on:
@@ -46,7 +44,9 @@ use crate::error::{Result, ZendriverError};
 /// - [`AccountedRawEvent::Disconnected`] / [`AccountedRawEvent::Shutdown`] /
 ///   [`AccountedRawEvent::Reconnected`] — the watched stream is gone, so the
 ///   caller can no longer prove the awaited condition didn't occur just
-///   before the boundary.
+///   before the boundary. (A flat session's stream also ends with
+///   `Shutdown` when Chrome detaches the session, as it does when
+///   [`crate::Tab::close`] closes a tab without its own socket.)
 /// - [`AccountedRawEvent::Lagged`] — this subscriber missed frames it can't
 ///   recover. There's no way to prove the awaited event wasn't among them,
 ///   so a "no show" (`Timeout`) would be a possibly-wrong claim. Treated the
@@ -68,35 +68,31 @@ pub(crate) fn watch<T>(
 where
     T: serde::de::DeserializeOwned + Send + 'static,
 {
-    let sid = session.session_id().map(str::to_string);
-    let raw = session.connection().subscribe_raw_accounted();
-    Box::pin(raw.filter_map(move |acc| {
-        let sid = sid.clone();
-        async move {
-            match acc {
-                AccountedRawEvent::Event { event, .. } => {
-                    if event.session_id.as_deref() == sid.as_deref() && event.method == method {
-                        match serde_json::from_value::<T>(event.params) {
-                            Ok(v) => Some(Ok(v)),
-                            Err(_) => Some(Err(ZendriverError::EventStreamIncomplete)),
-                        }
-                    } else {
-                        None
+    let raw = session.subscribe_accounted();
+    Box::pin(raw.filter_map(move |acc| async move {
+        match acc {
+            AccountedRawEvent::Event { event, .. } => {
+                if event.method == method {
+                    match serde_json::from_value::<T>(event.params) {
+                        Ok(v) => Some(Ok(v)),
+                        Err(_) => Some(Err(ZendriverError::EventStreamIncomplete)),
                     }
+                } else {
+                    None
                 }
-                // coverage: `Reconnected` and `Shutdown` share this arm with
-                // `Lagged` / `Disconnected`. Each boundary has its own
-                // end-to-end test
-                // (`expect_response_returns_event_stream_incomplete_on_{reconnect,disconnect,shutdown}`,
-                // plus the `Lagged` capacity harness) — if this arm is ever
-                // split (e.g. reconnect-specific retry semantics), keep those
-                // per-boundary tests so coverage doesn't silently regress.
-                AccountedRawEvent::Lagged { .. }
-                | AccountedRawEvent::Reconnected { .. }
-                | AccountedRawEvent::Disconnected { .. }
-                | AccountedRawEvent::Shutdown { .. } => {
-                    Some(Err(ZendriverError::EventStreamIncomplete))
-                }
+            }
+            // coverage: `Reconnected` and `Shutdown` share this arm with
+            // `Lagged` / `Disconnected`. Each boundary has its own
+            // end-to-end test
+            // (`expect_response_returns_event_stream_incomplete_on_{reconnect,disconnect,shutdown,detach}`,
+            // plus the `Lagged` capacity harness) — if this arm is ever
+            // split (e.g. reconnect-specific retry semantics), keep those
+            // per-boundary tests so coverage doesn't silently regress.
+            AccountedRawEvent::Lagged { .. }
+            | AccountedRawEvent::Reconnected { .. }
+            | AccountedRawEvent::Disconnected { .. }
+            | AccountedRawEvent::Shutdown { .. } => {
+                Some(Err(ZendriverError::EventStreamIncomplete))
             }
         }
     }))

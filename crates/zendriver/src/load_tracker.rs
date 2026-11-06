@@ -128,20 +128,18 @@ enum Initial {
 }
 
 /// The changes of frame `frame_id` that `session` receives from now on, in
-/// the order Chrome sent them. Ends when the socket dies or the connection
-/// is shut down.
+/// the order Chrome sent them. Ends when the socket dies, the connection is
+/// shut down, or Chrome detaches the session.
 fn changes(
     session: &SessionHandle,
     frame_id: &str,
 ) -> impl Stream<Item = Change> + Send + Unpin + use<> {
-    let session_id = session.session_id().map(str::to_owned);
     let frame_id = frame_id.to_owned();
     // One subscription for both methods, so a start and a stop can't swap
     // places on the way here.
     Box::pin(
         session
-            .connection()
-            .subscribe_raw_accounted()
+            .subscribe_accounted()
             .take_while(|ev| {
                 let alive = !matches!(
                     ev,
@@ -153,9 +151,8 @@ fn changes(
                 let change =
                     match ev {
                         AccountedRawEvent::Event { event, .. } => {
-                            let ours = event.session_id == session_id
-                                && event.params.get("frameId").and_then(|v| v.as_str())
-                                    == Some(&frame_id);
+                            let ours = event.params.get("frameId").and_then(|v| v.as_str())
+                                == Some(&frame_id);
                             match event.method.as_str() {
                                 "Page.frameStartedLoading" if ours => Some(Change::Started),
                                 "Page.frameStoppedLoading" if ours => Some(Change::Stopped),
@@ -321,8 +318,8 @@ async fn follow(
 /// # Errors
 ///
 /// [`ZendriverError::Timeout`] if none arrives within `within`;
-/// [`ZendriverError::Navigation`] if the connection ends first (the socket
-/// dies, or the connection is shut down).
+/// [`ZendriverError::Navigation`] if the changes end first (the socket
+/// dies, the connection is shut down, or Chrome detaches the session).
 pub(crate) async fn next_stop(
     session: &SessionHandle,
     frame_id: &str,
@@ -340,15 +337,15 @@ pub(crate) async fn next_stop(
     match tokio::time::timeout(within, stop).await {
         Err(_) => Err(ZendriverError::Timeout(within)),
         Ok(None) => Err(ZendriverError::Navigation(
-            "the page's connection closed while waiting for the frame to load".into(),
+            "the page or its connection closed while waiting for the frame to load".into(),
         )),
         Ok(Some(_)) => Ok(()),
     }
 }
 
 /// Follows whether one frame is loading, in a task that runs until the
-/// tracker is dropped or the connection ends (the socket dies, or the
-/// connection is shut down).
+/// tracker is dropped or the changes end (the socket dies, the connection
+/// is shut down, or Chrome detaches the session).
 #[derive(Debug)]
 pub(crate) struct LoadTracker {
     loading: watch::Receiver<bool>,
@@ -412,13 +409,13 @@ impl LoadTracker {
     /// # Errors
     ///
     /// [`ZendriverError::Timeout`] if it is still loading after `within`;
-    /// [`ZendriverError::Navigation`] if the connection ends first (the
-    /// socket dies, or the connection is shut down).
+    /// [`ZendriverError::Navigation`] if the changes end first (the socket
+    /// dies, the connection is shut down, or Chrome detaches the session).
     pub(crate) async fn wait(mut self, within: Duration) -> Result<()> {
         match tokio::time::timeout(within, self.loading.wait_for(|loading| !loading)).await {
             Err(_) => Err(ZendriverError::Timeout(within)),
             Ok(Err(_)) => Err(ZendriverError::Navigation(
-                "the page's connection closed while waiting for it to load".into(),
+                "the page or its connection closed while waiting for it to load".into(),
             )),
             Ok(Ok(_)) => Ok(()),
         }
@@ -784,6 +781,20 @@ mod tests {
         let (_mock, conn) = MockConnection::pair();
         let tracker = LoadTracker::before_navigating(&SessionHandle::new(conn.clone(), "S1"), "F");
         conn.shutdown();
+        let res = tokio::time::timeout(LONG, tracker.wait(LONG))
+            .await
+            .unwrap();
+        assert!(matches!(res, Err(ZendriverError::Navigation(_))), "{res:?}");
+    }
+
+    /// And when Chrome detaches the session (as `Tab::close` makes it do to
+    /// a tab on the browser's socket).
+    #[tokio::test]
+    async fn wait_ends_when_chrome_detaches_the_session() {
+        let (mock, conn) = MockConnection::pair();
+        let tracker = LoadTracker::before_navigating(&SessionHandle::new(conn, "S1"), "F");
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S1" }))
+            .await;
         let res = tokio::time::timeout(LONG, tracker.wait(LONG))
             .await
             .unwrap();

@@ -93,16 +93,14 @@ fn navigated_url(params: &Value) -> Option<String> {
 
 /// The changes of the main frame, whose id is `frame_id`, that `session`
 /// receives from now on, in the order Chrome sent them. Ends when the socket
-/// dies or the connection is shut down.
+/// dies, the connection is shut down, or Chrome detaches the session.
 fn changes(session: &SessionHandle, frame_id: &str) -> Pin<Box<dyn Stream<Item = Change> + Send>> {
-    let session_id = session.session_id().map(str::to_owned);
     let frame_id = frame_id.to_owned();
     // One subscription for every method, so the events can't swap places
     // on the way here.
     Box::pin(
         session
-            .connection()
-            .subscribe_raw_accounted()
+            .subscribe_accounted()
             .take_while(|ev| {
                 let alive = !matches!(
                     ev,
@@ -111,39 +109,37 @@ fn changes(session: &SessionHandle, frame_id: &str) -> Pin<Box<dyn Stream<Item =
                 async move { alive }
             })
             .filter_map(move |ev| {
-                let change = match ev {
-                    AccountedRawEvent::Event { event, .. } if event.session_id == session_id => {
-                        let params = &event.params;
-                        match event.method.as_str() {
-                            "Page.frameNavigated" if params["frame"]["id"] == frame_id => {
-                                let failed = params["frame"]["unreachableUrl"].as_str();
-                                match failed.filter(|url| !url.is_empty()) {
-                                    Some(url) => Some(Change::ErrorPage {
-                                        url: url.to_owned(),
-                                    }),
-                                    None => {
-                                        navigated_url(params).map(|url| Change::NewDocument { url })
+                let change =
+                    match ev {
+                        AccountedRawEvent::Event { event, .. } => {
+                            let params = &event.params;
+                            match event.method.as_str() {
+                                "Page.frameNavigated" if params["frame"]["id"] == frame_id => {
+                                    let failed = params["frame"]["unreachableUrl"].as_str();
+                                    match failed.filter(|url| !url.is_empty()) {
+                                        Some(url) => Some(Change::ErrorPage {
+                                            url: url.to_owned(),
+                                        }),
+                                        None => navigated_url(params)
+                                            .map(|url| Change::NewDocument { url }),
                                     }
                                 }
+                                "Page.navigatedWithinDocument" if params["frameId"] == frame_id => {
+                                    params["url"].as_str().map(|url| Change::SameDocument {
+                                        url: url.to_owned(),
+                                    })
+                                }
+                                "Page.frameStoppedLoading" if params["frameId"] == frame_id => {
+                                    Some(Change::Stopped)
+                                }
+                                _ => None,
                             }
-                            "Page.navigatedWithinDocument" if params["frameId"] == frame_id => {
-                                params["url"].as_str().map(|url| Change::SameDocument {
-                                    url: url.to_owned(),
-                                })
-                            }
-                            "Page.frameStoppedLoading" if params["frameId"] == frame_id => {
-                                Some(Change::Stopped)
-                            }
-                            _ => None,
                         }
-                    }
-                    AccountedRawEvent::Event { .. }
-                    | AccountedRawEvent::Disconnected { .. }
-                    | AccountedRawEvent::Shutdown { .. } => None,
-                    AccountedRawEvent::Lagged { .. } | AccountedRawEvent::Reconnected { .. } => {
-                        Some(Change::Lost)
-                    }
-                };
+                        AccountedRawEvent::Disconnected { .. }
+                        | AccountedRawEvent::Shutdown { .. } => None,
+                        AccountedRawEvent::Lagged { .. }
+                        | AccountedRawEvent::Reconnected { .. } => Some(Change::Lost),
+                    };
                 async move { change }
             }),
     )
@@ -331,7 +327,7 @@ async fn wait(
         }
     }
     Err(ZendriverError::Navigation(
-        "the page's connection closed while waiting for a navigation".into(),
+        "the page or its connection closed while waiting for a navigation".into(),
     ))
 }
 
@@ -750,6 +746,18 @@ mod tests {
         let (_mock, conn) = MockConnection::pair();
         let waiting = expect_navigation(&conn);
         conn.shutdown();
+        let res = tokio::time::timeout(LONG, waiting).await.unwrap();
+        assert!(matches!(res, Err(ZendriverError::Navigation(_))), "{res:?}");
+    }
+
+    /// And at once when Chrome detaches the session (as `Tab::close` makes
+    /// it do to a tab on the browser's socket).
+    #[tokio::test]
+    async fn the_wait_ends_when_chrome_detaches_the_session() {
+        let (mock, conn) = MockConnection::pair();
+        let waiting = expect_navigation(&conn);
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S1" }))
+            .await;
         let res = tokio::time::timeout(LONG, waiting).await.unwrap();
         assert!(matches!(res, Err(ZendriverError::Navigation(_))), "{res:?}");
     }

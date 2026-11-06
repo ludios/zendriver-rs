@@ -11,8 +11,8 @@
 //! contract, including its graceful degrade on Chrome versions that don't
 //! support it.
 //!
-//! The correlator subscribes to the connection's loss-accounted event stream
-//! ([`zendriver_transport::Connection::subscribe_raw_accounted`]), so a
+//! The correlator subscribes to the session's loss-accounted event stream
+//! ([`zendriver_transport::SessionHandle::subscribe_accounted`]), so a
 //! delivery gap (a lagging subscriber, a transport reconnect, disconnect, or
 //! shutdown),
 //! a correlation-map eviction past [`MAX_TRACKED`], or an undecodable
@@ -182,13 +182,15 @@ pub enum NetworkDeliveryBoundary {
         generation: u64,
     },
     /// The tab's connection was shut down before the monitor saw its
-    /// WebSocket die. For a tab that has its own socket, that is
-    /// [`crate::Tab::close`], the drop of the tab's last handle, or
-    /// [`crate::Browser::reconnect`] retiring the tab; for a tab on the
-    /// browser's socket, it is [`crate::Browser::close`] or the drop of the
-    /// browser. Like `Disconnected`, it ends the monitor task, and any
-    /// exchange still in flight is dropped. To keep observing after a
-    /// reconnect, start a new monitor on a tab from [`crate::Browser::tabs`].
+    /// WebSocket die, or Chrome detached the tab's session. For a tab that
+    /// has its own socket, that is [`crate::Tab::close`], the drop of the
+    /// tab's last handle, or [`crate::Browser::reconnect`] retiring the tab;
+    /// for a tab on the browser's socket, it is the tab's closing (by
+    /// [`crate::Tab::close`] or otherwise), [`crate::Browser::close`], or the
+    /// drop of the browser. Like `Disconnected`, it ends the monitor task,
+    /// and any exchange still in flight is dropped. To keep observing after
+    /// a reconnect, start a new monitor on a tab from
+    /// [`crate::Browser::tabs`].
     Shutdown {
         /// Generation that was shut down.
         generation: u64,
@@ -553,11 +555,11 @@ type PartialExchange = (MonitoredRequest, Option<MonitoredResponse>);
 /// dropping the exchange. One stream preserves CDP's wire order — this mirrors
 /// [`crate::network_idle`].
 ///
-/// Riding [`zendriver_transport::Connection::subscribe_raw_accounted`]
-/// (rather than the plain `subscribe_raw`) is what makes delivery loss
-/// observable at all: a lag, reconnect, or disconnect is reported as an
-/// explicit [`AccountedRawEvent`] instead of vanishing. See
-/// [`NetworkDeliveryBoundary`] for how each case is handled.
+/// Riding [`SessionHandle::subscribe_accounted`] (rather than the plain
+/// `subscribe_raw`) is what makes delivery loss observable at all: a lag,
+/// reconnect, or disconnect is reported as an explicit [`AccountedRawEvent`]
+/// instead of vanishing. See [`NetworkDeliveryBoundary`] for how each case
+/// is handled.
 async fn run_monitor(
     session: SessionHandle,
     filter: Option<UrlMatcher>,
@@ -565,7 +567,6 @@ async fn run_monitor(
     tx: mpsc::Sender<NetworkEvent>,
     cancel: CancellationToken,
 ) {
-    let session_id = session.session_id().map(str::to_string);
     // Shared across every spawned `streamResourceContent` enable task so an
     // unsupported-Chrome error is logged once for the whole monitor, not once
     // per streamed request (every subsequent call would fail identically).
@@ -585,7 +586,7 @@ async fn run_monitor(
     // ONE subscription, dispatched by method — preserves CDP wire order; a
     // typed `select!` could reorder `loadingFinished` ahead of the matching
     // `requestWillBeSent` and drop the exchange.
-    let mut events = session.connection().subscribe_raw_accounted();
+    let mut events = session.subscribe_accounted();
     let mut partial: HashMap<String, PartialExchange> = HashMap::new();
     // requestId → url, kept so frame/close/SSE events (which omit the URL) can
     // still be matched against `filter`.
@@ -626,9 +627,6 @@ async fn run_monitor(
                 let Some(acc) = next else { return };
                 match acc {
                     AccountedRawEvent::Event { event: ev, .. } => {
-                        if ev.session_id.as_deref() != session_id.as_deref() {
-                            continue;
-                        }
                         match ev.method.as_str() {
                             "Network.requestWillBeSent" => {
                                 let Ok(p) = serde_json::from_value::<RequestWillBeSent>(ev.params) else {
@@ -1323,7 +1321,7 @@ mod tests {
     /// plus the mock (to emit events) and connection (to shut down).
     ///
     /// Crucially, this awaits the correlator's fire-and-forget
-    /// `Network.enable` command before returning. `subscribe_raw_accounted` is
+    /// `Network.enable` command before returning. `subscribe_accounted` reads
     /// a `broadcast` receiver that only sees frames sent after it registers,
     /// and the correlator subscribes *before* issuing `Network.enable` — so
     /// once that command lands the subscription is guaranteed live, and any
@@ -2354,6 +2352,27 @@ mod tests {
         let next = tokio::time::timeout(Duration::from_secs(2), monitor.next())
             .await
             .expect("monitor stream did not end within 2s after Shutdown");
+        assert!(next.is_none(), "expected the stream to end, got {next:?}");
+    }
+
+    /// So does Chrome's detaching of the session (as `Tab::close` makes it
+    /// do to a tab on the browser's socket), while the connection lives on.
+    #[tokio::test]
+    async fn detach_emits_shutdown_boundary_and_ends_monitor_task() {
+        let (mut monitor, mock, _conn) = spawn_monitor(None).await;
+
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": SID }))
+            .await;
+
+        match next_event(&mut monitor).await {
+            NetworkEvent::DeliveryBoundary(NetworkDeliveryBoundary::Shutdown { generation }) => {
+                assert_eq!(generation, 1);
+            }
+            other => panic!("expected DeliveryBoundary::Shutdown, got {other:?}"),
+        }
+        let next = tokio::time::timeout(Duration::from_secs(2), monitor.next())
+            .await
+            .expect("monitor stream did not end within 2s after the detach");
         assert!(next.is_none(), "expected the stream to end, got {next:?}");
     }
 
