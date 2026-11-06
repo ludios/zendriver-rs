@@ -68,10 +68,7 @@ pub async fn resolve(tab: &Tab, sel: &Selector) -> Result<Element, ErrorData> {
     } else {
         builder
     };
-    builder
-        .one()
-        .await
-        .map_err(|e| map_error(McpServerError::from(e)))
+    builder.one().await.map_err(map_resolve_error)
 }
 
 /// Resolve up to `limit` elements by [`Selector`].
@@ -100,14 +97,26 @@ pub async fn resolve_all(
     } else {
         builder
     };
-    let mut all = builder
-        .many_or_empty()
-        .await
-        .map_err(|e| map_error(McpServerError::from(e)))?;
+    let mut all = builder.many_or_empty().await.map_err(map_resolve_error)?;
     if all.len() > limit {
         all.truncate(limit);
     }
     Ok(all)
+}
+
+/// Map an error from running a [`Selector`]'s query. A `JsException` means
+/// that the page threw while running the query, which almost always means
+/// that its `css`, `xpath` or regex is invalid, so it becomes an
+/// `invalid_params` error that says so; any other error goes through
+/// [`map_error`].
+fn map_resolve_error(e: zendriver::ZendriverError) -> ErrorData {
+    if let zendriver::ZendriverError::JsException(m) = &e {
+        let message = format!(
+            "The page threw while running the selector, so its css, xpath or regex is probably invalid: {m}"
+        );
+        return ErrorData::invalid_params(message, None);
+    }
+    map_error(McpServerError::from(e))
 }
 
 /// Apply a [`Selector`]'s chosen kind onto a query builder, returning the

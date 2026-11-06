@@ -74,7 +74,7 @@ properties:
       - string
       - "null"
   text_regex:
-    description: "Regex matched against each element's text, run as a JavaScript\n`RegExp`; a pattern that JavaScript can't parse fails the call with\nits `SyntaxError`. For case-insensitivity, wrap the whole pattern in\na `(?i:…)` group (Chrome 125 or newer); `text_case_insensitive`\ndoesn't apply, and JS rejects a bare `(?i)` prefix."
+    description: "Regex matched against each element's text, run as a JavaScript\n`RegExp`. A pattern that JavaScript can't parse makes the call return\nan `invalid_params` error that quotes JavaScript's `SyntaxError`. For\ncase-insensitivity, wrap the whole pattern in a `(?i:…)` group\n(Chrome 125 or newer); `text_case_insensitive` doesn't apply, and JS\nrejects a bare `(?i)` prefix."
     type:
       - string
       - "null"

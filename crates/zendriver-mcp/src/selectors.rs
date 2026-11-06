@@ -77,10 +77,11 @@ pub struct Selector {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_exact: Option<String>,
     /// Regex matched against each element's text, run as a JavaScript
-    /// `RegExp`; a pattern that JavaScript can't parse fails the call with
-    /// its `SyntaxError`. For case-insensitivity, wrap the whole pattern in
-    /// a `(?i:…)` group (Chrome 125 or newer); `text_case_insensitive`
-    /// doesn't apply, and JS rejects a bare `(?i)` prefix.
+    /// `RegExp`. A pattern that JavaScript can't parse makes the call return
+    /// an `invalid_params` error that quotes JavaScript's `SyntaxError`. For
+    /// case-insensitivity, wrap the whole pattern in a `(?i:…)` group
+    /// (Chrome 125 or newer); `text_case_insensitive` doesn't apply, and JS
+    /// rejects a bare `(?i)` prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_regex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,8 +222,8 @@ impl Selector {
 
     // The `Selector` → `FindBuilder` bridge lives in [`crate::tools::find`]
     // (specifically [`crate::tools::find::resolve`] and `resolve_all`). The
-    // bridge depends on zendriver types (`FindBuilder`, `AriaRole`, `Regex`)
-    // that `selectors.rs` deliberately doesn't pull in — keeping this wire
+    // bridge depends on zendriver types (`FindBuilder`, `AriaRole`) that
+    // `selectors.rs` deliberately doesn't pull in — keeping this wire
     // struct decoupled from CDP-shaped concerns.
 }
 
