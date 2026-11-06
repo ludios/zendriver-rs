@@ -122,7 +122,7 @@ btn.click().await?;
 You can leave any of the *other* tabs inactive, and their handles keep
 working. But `activate` brings the tab to the front of its window, so
 the tab that was in front there becomes a background tab, whose page
-then sees its viewport as its window (see the
+on Linux then sees its viewport as its window (see the
 [concurrency note](#concurrency-note)).
 
 ## Closing tabs
@@ -176,8 +176,8 @@ tab_count = 3
 [`Tab`] is `Clone + Send + Sync`. You can spawn one worker per page and
 drive them in parallel. Open each worker's page with
 [`Browser::new_window()`], so that each page is in front of a window of
-its own. Chrome gives a background tab's page its viewport as its
-window (`screenY` grows by the height of the toolbars, and
+its own. On Linux, Chrome gives a background tab's page its viewport
+as its window (`screenY` grows by the height of the toolbars, and
 `outerHeight` shrinks to `innerHeight`), which a page in front never
 sees: see "Background tabs" at [`Browser::new_tab()`].
 

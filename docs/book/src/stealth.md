@@ -90,11 +90,12 @@ in the page:
   and viewport that agree: by default a 1920x1080 screen, a 1920x1032 window at (0, 0),
   and a 1920x945 viewport (the window minus the browser's toolbars,
   which headless Chrome emulates). That holds for the tab in front of
-  each window. Chrome gives a background tab's page its viewport as its
-  window (by default at (0, 87), with `outerHeight` equal to
-  `innerHeight`), headless or headed, even with no stealth. Chrome
-  without stealth also hides a background tab, but zendriver's focus
-  emulation keeps every tab visible and focused, so a background tab's
+  each window. On Linux, Chrome gives a background tab's page its
+  viewport as its window (by default at (0, 87), with `outerHeight`
+  equal to `innerHeight`), headless or headed, even with no stealth.
+  (Chrome on Windows 11 doesn't; macOS wasn't measured.) Chrome without
+  stealth also hides a background tab, but zendriver's focus emulation
+  keeps every tab visible and focused, so on Linux a background tab's
   page is visible and focused, with a window that Chrome without stealth
   gives only to a hidden page. So open each page that you work in at the
   same time as others with `Browser::new_window`, which puts it in front

@@ -3,8 +3,8 @@
 //! it launches headless Chrome with a screen (`--screen-info`) and windows
 //! that fill its work area (see `StealthObserver::headless_flags`), so
 //! Chrome itself reports geometry that agrees, to the page in front of each
-//! window. A background tab's page sees other geometry, which a test below
-//! pins down.
+//! window. On Linux, a background tab's page sees other geometry, which a
+//! test below pins down.
 
 #![cfg(feature = "integration-tests")]
 
@@ -111,12 +111,13 @@ async fn a_window_keeps_its_geometry_while_others_open() {
     }
 }
 
-/// Chrome gives a background tab's page its viewport as its window: the
-/// window that the page sees starts where the viewport starts, and is as
-/// tall as the viewport. Chrome without stealth does this too, headless or
-/// headed. `Browser::new_tab` says so, and this test fails if Chrome stops
-/// doing it. Once the tab is back in front, its page sees its whole window
-/// again. Measured only on Linux.
+/// On Linux, Chrome gives a background tab's page its viewport as its
+/// window: the window that the page sees starts where the viewport starts,
+/// and is as tall as the viewport. Chrome without stealth does this too,
+/// headless or headed. `Browser::new_tab` says so, and this test fails if
+/// Chrome stops doing it. Once the tab is back in front, its page sees its
+/// whole window again. (On Windows 11, a background tab's page keeps its
+/// whole window.)
 #[tokio::test]
 #[cfg(target_os = "linux")]
 async fn a_background_tab_sees_its_viewport_as_its_window() {

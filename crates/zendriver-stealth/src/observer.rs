@@ -274,9 +274,10 @@ impl StealthObserver {
     /// `--window-size` plus `--window-position=0,0`, which make each window
     /// fill that screen's work area. Chrome then reports a screen, window and
     /// viewport that agree, with no `Emulation.setDeviceMetricsOverride` and
-    /// no JS patch, to the page in front of each window. (Chrome gives a
-    /// background tab's page its viewport as its window.) A headed Chrome
-    /// needs none of these switches, since it reports the real display.
+    /// no JS patch, to the page in front of each window. (On Linux, Chrome
+    /// gives a background tab's page its viewport as its window.) A headed
+    /// Chrome needs none of these switches, since it reports the real
+    /// display.
     ///
     /// # Errors
     /// Returns [`StealthError::InvalidOverride`] for a screen whose
