@@ -628,9 +628,9 @@ pub(crate) enum Command {
     Answered(u64),
 }
 
-/// A session's `Fetch` events, with its connection's reports of lost
-/// events and of the socket's end.
-type FetchEvents = Pin<Box<dyn Stream<Item = AccountedRawEvent> + Send>>;
+/// A session's events, with its connection's reports of lost events and
+/// of the socket's end (see [`session_events`]).
+type SessionEvents = Pin<Box<dyn Stream<Item = AccountedRawEvent> + Send>>;
 
 /// How long the multiplexer remembers having answered a proxy challenge with
 /// the credentials. Chrome repeats a challenge whose credentials the proxy
@@ -706,26 +706,21 @@ fn auth_response(
     })
 }
 
-/// `session`'s `Fetch` events, read from its loss-accounted stream
+/// `session`'s events, read from its loss-accounted stream
 /// ([`SessionHandle::subscribe_accounted`]), which also says when events
-/// were lost, when the socket died or was replaced, and when the session
-/// detached. They end at once when the socket is shut, skipping the events
-/// still queued, since no answer to them could be sent.
-fn fetch_events(session: &SessionHandle) -> FetchEvents {
+/// were lost, and when the socket died. A flat session's stream yields a
+/// `Shutdown` and ends when the session detaches. The returned stream also
+/// ends at once when the socket is shut or replaced (either cancels the
+/// socket's shutdown token), skipping the events still queued, since no
+/// answer to them could be sent.
+fn session_events(session: &SessionHandle) -> SessionEvents {
     let shut = session.connection().shutdown_token().cancelled_owned();
-    let events = session.subscribe_accounted().filter(|ev| {
-        let wanted = match ev {
-            AccountedRawEvent::Event { event, .. } => event.method.starts_with("Fetch."),
-            _ => true,
-        };
-        std::future::ready(wanted)
-    });
-    Box::pin(events.take_until(shut))
+    Box::pin(session.subscribe_accounted().take_until(shut))
 }
 
 /// The next of `events`, or `None` if they ended. Never ready while there
 /// are no events to read.
-async fn next_event(events: &mut Option<FetchEvents>) -> Option<AccountedRawEvent> {
+async fn next_event(events: &mut Option<SessionEvents>) -> Option<AccountedRawEvent> {
     match events {
         Some(events) => events.next().await,
         None => std::future::pending().await,
@@ -881,9 +876,9 @@ struct Mux {
     /// The entries, in the order a paused request walks them.
     slots: Vec<Slot>,
     proxy_auth: Option<ProxyAuth>,
-    /// The session's `Fetch` events, subscribed to while there are entries
-    /// or credentials.
-    events: Option<FetchEvents>,
+    /// The session's events, subscribed to while there are entries or
+    /// credentials.
+    events: Option<SessionEvents>,
     answered: Answered,
     /// The pauses decided and not answered yet, by token.
     held: HashMap<u64, Hold>,
@@ -1123,7 +1118,7 @@ impl Mux {
     /// rollback to settle ([`unsubscribe_if_idle`](Self::unsubscribe_if_idle)).
     async fn apply(&mut self) -> Result<(), InterceptionError> {
         if self.events.is_none() && !self.is_idle() {
-            self.events = Some(fetch_events(&self.session));
+            self.events = Some(session_events(&self.session));
         }
         let held_open = !self.held.is_empty();
         let applied = configure(
