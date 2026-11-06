@@ -12,6 +12,7 @@
 //! the context, with `eventsEnabled: true`; and it remembers what it set.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
@@ -40,6 +41,29 @@ impl DownloadMode {
             DownloadMode::Staging(dir) => dir,
         }
     }
+}
+
+/// Send `Browser.setDownloadBehavior` for `mode` on `conn`, naming browser
+/// context `context` (`None` for the default context).
+async fn send(conn: &Connection, context: Option<&str>, mode: &DownloadMode) -> Result<()> {
+    let behavior = match mode {
+        DownloadMode::Directory(_) => "allow",
+        #[cfg(feature = "expect")]
+        DownloadMode::Staging(_) => "allowAndName",
+    };
+    let mut params = json!({
+        "behavior": behavior,
+        "downloadPath": mode.dir().to_string_lossy(),
+        "eventsEnabled": true,
+    });
+    // Leaving the id out names the default context, whose tabs record no id
+    // (see `BrowserInner::default_context_id`).
+    if let Some(context) = context {
+        params["browserContextId"] = json!(context);
+    }
+    conn.call_raw("Browser.setDownloadBehavior", params, None)
+        .await?;
+    Ok(())
 }
 
 /// The download behavior that zendriver set on each browser context of one
@@ -89,33 +113,22 @@ impl DownloadBehaviors {
         Ok(mode)
     }
 
-    /// Forget every setting. Chrome drops a session's settings when the
-    /// session ends, so this is for when the browser's connection was
-    /// replaced.
-    pub(crate) async fn forget_all(&self) {
-        self.modes.lock().await.clear();
+    /// Forget the setting of browser context `context`, which was disposed.
+    pub(crate) async fn forget(&self, context: &str) {
+        self.modes.lock().await.remove(&Some(context.to_owned()));
     }
-}
 
-/// Send `Browser.setDownloadBehavior` for `mode` on `conn`, naming browser
-/// context `context` (`None` for the default context).
-async fn send(conn: &Connection, context: Option<&str>, mode: &DownloadMode) -> Result<()> {
-    let behavior = match mode {
-        DownloadMode::Directory(_) => "allow",
-        #[cfg(feature = "expect")]
-        DownloadMode::Staging(_) => "allowAndName",
-    };
-    let mut params = json!({
-        "behavior": behavior,
-        "downloadPath": mode.dir().to_string_lossy(),
-        "eventsEnabled": true,
-    });
-    // Leaving the id out names the default context, whose tabs record no id
-    // (see `BrowserInner::default_context_id`).
-    if let Some(context) = context {
-        params["browserContextId"] = json!(context);
+    /// Run `redial`, which replaces the browser's connection, and forget
+    /// every setting if it succeeds: Chrome drops a session's settings when
+    /// the session ends. No setting is sent meanwhile, so none sent on the
+    /// new connection is forgotten.
+    pub(crate) async fn replace_connection<T>(
+        &self,
+        redial: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let mut modes = self.modes.lock().await;
+        let replaced = redial.await?;
+        modes.clear();
+        Ok(replaced)
     }
-    conn.call_raw("Browser.setDownloadBehavior", params, None)
-        .await?;
-    Ok(())
 }

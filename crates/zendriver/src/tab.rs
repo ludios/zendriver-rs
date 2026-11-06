@@ -5753,8 +5753,16 @@ mod tests {
         });
 
         // Next command must be the injection evaluate directly — no second
-        // setDownloadBehavior.
-        let id_eval = mock.expect_cmd("Runtime.evaluate").await;
+        // setDownloadBehavior. (The tab's background tasks send their own
+        // commands meanwhile, which are skipped.)
+        let id_eval = loop {
+            let next = mock.recv_cmd_timeout(Duration::from_secs(2)).await;
+            let (method, id) = next.expect("download_file sent no Runtime.evaluate");
+            assert_ne!(method, "Browser.setDownloadBehavior", "a second setting");
+            if method == "Runtime.evaluate" {
+                break id;
+            }
+        };
         let expr = mock.last_sent()["params"]["expression"]
             .as_str()
             .unwrap_or("")

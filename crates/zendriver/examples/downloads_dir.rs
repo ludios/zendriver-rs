@@ -2,9 +2,11 @@
 //!
 //! Equivalent to the upstream zendriver Python feature request in
 //! cdpdriver/zendriver#88. `BrowserBuilder::downloads_dir(path)` sends
-//! `Browser.setDownloadBehavior {behavior:"allow", downloadPath:...}` at
-//! browser scope right after launch, so every tab — including ones opened
-//! later via `Browser::new_tab` — saves files into the configured directory.
+//! `Browser.setDownloadBehavior {behavior:"allow", downloadPath:...}` for
+//! Chrome's default browser context right after launch, so every tab in it
+//! — including ones opened later via `Browser::new_tab` — saves files into
+//! the configured directory. (Chrome keeps the setting per browser context:
+//! a `BrowserContext`'s tabs need `Tab::set_download_path`.)
 //!
 //! The directory must exist before launch; this example creates a tempdir.
 
@@ -27,8 +29,8 @@ async fn main() -> zendriver::Result<()> {
 
     let tab = browser.main_tab();
     // Navigate somewhere that triggers a download; left to the user. The
-    // browser-scope setDownloadBehavior call already fired in launch, so any
-    // download from any tab lands in `dir`.
+    // setDownloadBehavior call already fired in launch, so any download from
+    // a tab of the default context lands in `dir`.
     tab.goto("https://example.com").await?;
 
     browser.close().await?;

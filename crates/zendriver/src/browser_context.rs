@@ -157,6 +157,7 @@ impl Drop for BrowserContext {
         tokio::spawn(async move {
             #[cfg(feature = "interception")]
             browser.context_proxy_auth.lock().await.remove(&id);
+            browser.download_behaviors.forget(&id).await;
             if let Err(e) = browser.dispose_browser_context(&id).await {
                 tracing::warn!(context_id = %id, error = %e, "BrowserContext dispose failed");
             }

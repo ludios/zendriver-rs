@@ -10,7 +10,11 @@ the default context still share the browser-wide jar, exactly as
 before. The two APIs coexist; existing code that calls
 `browser.new_tab()` is unaffected. `tab.cookies()` reads and writes the
 jar of the tab's own context, while `browser.cookies()` always means the
-default context's jar.
+default context's jar. Downloads work the same way: Chrome keeps one
+download setting per context, so `tab.set_download_path(..)` sets where
+the downloads of every tab of the tab's context go, while
+`browser.set_download_path(..)` and `BrowserBuilder::downloads_dir` set it
+for the default context.
 
 > **When to use it.** Per-request proxy bindings, parallel sessions
 > with different logins under one Chrome process, A/B fingerprint

@@ -4938,11 +4938,13 @@ impl Browser {
         // Re-dial onto the SAME Connection (same event bus, same observer
         // chain). Dials first; only swaps the live socket on success, so a
         // failed reconnect doesn't tear down a connection that might recover.
-        self.inner.conn.redial(&ws_url).await?;
-
-        // Chrome dropped the download settings of the old socket's session
-        // when the session ended.
-        self.inner.download_behaviors.forget_all().await;
+        // On success, forget the download settings: they belonged to the old
+        // socket's session, and Chrome dropped them with it.
+        let redial = async { Ok(self.inner.conn.redial(&ws_url).await?) };
+        self.inner
+            .download_behaviors
+            .replace_connection(redial)
+            .await?;
 
         // Drop the stale tab registry — every entry's session id is invalid
         // now. The re-armed auto-attach below re-populates it from the
