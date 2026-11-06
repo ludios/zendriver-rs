@@ -127,8 +127,9 @@ pub enum ZendriverError {
     #[error("navigation failed: {0}")]
     Navigation(String),
 
-    /// A JS expression raised an exception during evaluation. The string is
-    /// the thrown value's description (for an `Error`, its stack trace).
+    /// A JS expression raised an exception during evaluation. The string
+    /// describes what was thrown: for an `Error`, its stack trace, which
+    /// starts with `Name: message`; for a thrown string, that string.
     ///
     /// A query (`tab.find()` and the like) also fails this way, at once, when
     /// its CSS selector, XPath or regex is invalid: the string is then the
@@ -246,20 +247,27 @@ pub enum ZendriverError {
 }
 
 impl ZendriverError {
-    /// The error for a `Runtime.evaluate` or `Runtime.callFunctionOn` reply
-    /// whose script threw.
+    /// The error for a `Runtime.evaluate` or `Runtime.callFunctionOn` whose
+    /// script threw.
     ///
-    /// `response` is the whole CDP reply (`{ result, exceptionDetails? }`),
-    /// not its `result` field. Returns `None` when `response` has no
-    /// `exceptionDetails`, and otherwise a [`Self::JsException`] holding the
-    /// thrown value's `description` (for an `Error`, its stack trace), or
-    /// `"unknown"` when the thrown value has none.
+    /// `response` is what the command returned (`{ result,
+    /// exceptionDetails? }`), not its `result` field. Returns `None` when
+    /// `response` has no `exceptionDetails`, and otherwise a
+    /// [`Self::JsException`] holding the first of these that exists:
+    /// - the thrown value's `description` (for an `Error`, its stack trace,
+    ///   which starts with `Name: message`; a thrown string has none),
+    /// - the thrown value itself, if it is a string,
+    /// - the `text` of `exceptionDetails` (such as `"Uncaught"`),
+    /// - `"unknown"`.
     pub(crate) fn js_exception_in(response: &serde_json::Value) -> Option<Self> {
         let details = response.get("exceptionDetails")?;
-        let description = details["exception"]["description"].as_str();
-        Some(Self::JsException(
-            description.unwrap_or("unknown").to_string(),
-        ))
+        let exception = &details["exception"];
+        let message = exception["description"]
+            .as_str()
+            .or_else(|| exception["value"].as_str())
+            .or_else(|| details["text"].as_str())
+            .unwrap_or("unknown");
+        Some(Self::JsException(message.to_string()))
     }
 }
 
@@ -462,6 +470,46 @@ pub enum BrowserError {
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// The message of the `JsException` that `js_exception_in` makes of
+    /// `response`, panicking if it makes none.
+    fn js_exception_message(response: serde_json::Value) -> String {
+        match ZendriverError::js_exception_in(&response) {
+            Some(ZendriverError::JsException(m)) => m,
+            other => panic!("expected a JsException, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn js_exception_in_is_none_when_nothing_was_thrown() {
+        let response = json!({ "result": { "type": "number", "value": 1 } });
+        assert!(ZendriverError::js_exception_in(&response).is_none());
+    }
+
+    /// Chrome's replies for `throw new Error("boom")`, `throw "boom"`, and
+    /// `throw undefined`, cut down to the fields that matter.
+    #[test]
+    fn js_exception_in_falls_back_from_description_to_value_to_text() {
+        let error = json!({ "type": "object", "subtype": "error", "description": "Error: boom\n    at <anonymous>:1:7" });
+        let string = json!({ "type": "string", "value": "boom" });
+        let undefined = json!({ "type": "undefined" });
+        for (exception, expected) in [
+            (error, "Error: boom\n    at <anonymous>:1:7"),
+            (string, "boom"),
+            (undefined, "Uncaught"),
+        ] {
+            let response = json!({
+                "result": exception,
+                "exceptionDetails": { "text": "Uncaught", "exception": exception },
+            });
+            assert_eq!(js_exception_message(response), expected);
+        }
+        assert_eq!(
+            js_exception_message(json!({ "exceptionDetails": {} })),
+            "unknown"
+        );
+    }
 
     #[test]
     fn display_for_element_not_found_includes_selector() {
