@@ -15,7 +15,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, trace, warn};
 
-use crate::connection::{Connection, ConnectionInner};
+use crate::connection::{Connection, ConnectionInner, GenerationEnd};
 use crate::frame::{AccountedRawEvent, CdpCommand, CdpInbound, CdpRpcError, RawEvent};
 use crate::observer::{ObserverFailurePolicy, PausedSession, TargetInfo, TargetObserver};
 
@@ -146,7 +146,8 @@ fn socket_death_expected(
 /// [`AccountedRawEvent`] it produces. Mirroring onto `accounted.tx` — the
 /// per-event clone of [`RawEvent`] and the send itself — is gated behind
 /// `accounted.tx.receiver_count() > 0` so a connection with no accounted
-/// subscribers pays nothing beyond the existing `event_tx` broadcast.
+/// subscribers pays nothing per event beyond the existing `event_tx`
+/// broadcast.
 pub(crate) async fn run_actor<S>(
     mut ws: S,
     mut cmd_rx: mpsc::Receiver<OutboundCmd>,
@@ -423,55 +424,26 @@ pub(crate) async fn run_actor<S>(
 
     // End this generation, unless a `reconnect()` replaced this actor: that
     // ended the generation already (with `Reconnected`), and the connection's
-    // state belongs to the new actor now. Under `generation_end`'s lock, which
-    // a reconnect bumps the generation under, so that this actor can't
+    // state belongs to the new actor now. Under `generation_end`'s lock,
+    // which a reconnect switches generations under, so that this actor can't
     // announce its end after the `Reconnected` of a reconnect that replaced
     // it, and a subscription that starts after the announcement still learns
-    // of it (see `Connection::subscribe_raw_accounted`).
+    // of it (see `Connection::subscribe_raw_accounted`). Recorded before
+    // `cmd_rx` drops (when this function returns), so a call that finds the
+    // command channel closed learns why (see `actor_gone_error`).
     if let Some(inner) = weak_inner.upgrade() {
         let mut end = inner
             .generation_end
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if inner.generation.load(std::sync::atomic::Ordering::Relaxed) == accounted.generation {
-            // Latch *why* this actor stopped, so calls that arrive after it is
-            // gone can still tell "Chrome died" from "I closed it". Without
-            // this, only in-flight calls (drained just below with `drain_code`)
-            // ever see `Disconnected`: every later call finds a closed command
-            // channel, whose `SendError` carries no reason, and reports
-            // `Shutdown`.
-            //
-            // The **channel** is what makes the flag trustworthy, not the
-            // atomic ordering. `cmd_rx` is dropped when this function returns,
-            // which is strictly after this store; the drop synchronizes with a
-            // sender observing the channel closed; happens-before is
-            // transitive. So any sender that observes the channel closed
-            // necessarily observes the flag too — there is no window where a
-            // caller sees the death but not its cause, and a `Relaxed` store
-            // would be visible just the same.
-            //
-            // `Release`/`Acquire` is kept anyway (rather than the `Relaxed`
-            // used for the advisory counters on `ConnectionInner`) because it
-            // costs nothing on this once-per-actor-exit path and keeps the flag
-            // correct if a future read path ever reaches it without going
-            // through the channel. Note the pairing only orders *this*
-            // location: adding a second flag would not give an ordering
-            // guarantee between the two.
-            inner.socket_died.store(
-                drain_code == crate::connection::DISCONNECTED_CODE,
-                std::sync::atomic::Ordering::Release,
-            );
-
-            // A ws death is announced as `Disconnected`, a stop while the ws
-            // was alive as `Shutdown`.
-            let generation = accounted.generation;
-            let announcement = if drain_code == crate::connection::DISCONNECTED_CODE {
-                AccountedRawEvent::Disconnected { generation }
+            let ended = if drain_code == crate::connection::DISCONNECTED_CODE {
+                GenerationEnd::SocketDied
             } else {
-                AccountedRawEvent::Shutdown { generation }
+                GenerationEnd::ShutDown
             };
-            *end = Some(announcement.clone());
-            let _ = accounted.tx.send(announcement);
+            *end = Some(ended);
+            let _ = accounted.tx.send(ended.announcement(accounted.generation));
         }
     }
 

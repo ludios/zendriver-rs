@@ -138,18 +138,22 @@ pub enum AccountedRawEvent {
     /// caller-requested
     /// [`Connection::shutdown`](crate::connection::Connection::shutdown) or
     /// a [`Connection::reconnect`](crate::connection::Connection::reconnect).
-    /// Emitted exactly once per generation's genuine death; a shutdown
-    /// produces [`AccountedRawEvent::Shutdown`] instead, and a reconnect
-    /// produces neither.
+    /// Sent once per generation's genuine death, and replayed as the first
+    /// item to each subscription that starts after it; a shutdown produces
+    /// [`AccountedRawEvent::Shutdown`] instead, and a reconnect produces
+    /// neither.
     Disconnected {
         /// Generation whose WebSocket died.
         generation: u64,
     },
-    /// The connection was shut down while its WebSocket was alive, by
+    /// The connection was shut down, by
     /// [`Connection::shutdown`](crate::connection::Connection::shutdown) or
     /// by cancelling its
-    /// [`shutdown_token`](crate::connection::Connection::shutdown_token).
-    /// Emitted once, as the generation's last variant. A
+    /// [`shutdown_token`](crate::connection::Connection::shutdown_token),
+    /// before its actor saw the WebSocket die (if the WebSocket died too,
+    /// at about the same time, the shutdown can win). Sent once, as the
+    /// generation's last variant, and replayed as the first item to each
+    /// subscription that starts after it. A
     /// [`Connection::reconnect`](crate::connection::Connection::reconnect)
     /// also stops the current generation, but produces
     /// [`AccountedRawEvent::Reconnected`] instead.

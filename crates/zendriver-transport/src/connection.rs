@@ -1,6 +1,6 @@
 //! `Connection` — the public handle to the transport actor.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -135,19 +135,21 @@ pub(crate) struct ConnectionInner {
     pub(crate) accounted_tx: broadcast::Sender<AccountedRawEvent>,
     /// Current connection generation, read by [`Connection::connection_generation`].
     /// Starts at 1; bumped by [`Connection::reconnect`] under
-    /// [`generation_end`](Self::generation_end)'s lock, before the previous
-    /// actor is cancelled, which is how that actor tells that it was
+    /// [`generation_end`](Self::generation_end)'s lock, which is how an
+    /// actor, ending its generation under that lock, tells that it was
     /// replaced. `Relaxed` suffices: the reads whose ordering matters hold
     /// that lock; the others are advisory.
     pub(crate) generation: AtomicU64,
-    /// How the current generation ended — the `Disconnected` or `Shutdown`
-    /// that its actor announced — or `None` while that actor runs. The lock
-    /// orders what subscribers must see in order: an actor ends its
-    /// generation under it, [`Connection::reconnect`] starts a new
-    /// generation under it, and [`Connection::subscribe_raw_accounted`]
-    /// subscribes under it, so that a subscriber that comes after an end
-    /// still learns of it.
-    pub(crate) generation_end: Mutex<Option<AccountedRawEvent>>,
+    /// How the current generation ended, or `None` while its actor runs.
+    ///
+    /// The lock is held across each change of the connection's lifecycle,
+    /// so that each is seen whole: an actor ending its generation (it
+    /// records and announces the end), [`Connection::reconnect`] starting a
+    /// new generation, [`Connection::shutdown`], and
+    /// [`Connection::subscribe_raw_accounted`] starting a subscription (which
+    /// replays a past end). It also tells a call that finds the actor gone
+    /// why it is gone; see [`actor_gone_error`].
+    pub(crate) generation_end: Mutex<Option<GenerationEnd>>,
     /// Cancellation token of the *current* actor. Swapped on reconnect: the
     /// old actor is cancelled (its already-dead `pending` drains) and the new
     /// actor gets a fresh token. Each spawned actor owns its own clone, so
@@ -163,21 +165,6 @@ pub(crate) struct ConnectionInner {
     /// `Relaxed` is right: this is an advisory backstop read once per call,
     /// with no ordering relationship to anything else.
     pub(crate) call_timeout_ms: AtomicU64,
-    /// Why the current actor stopped, latched by the actor at exit: `true`
-    /// when the WebSocket died unexpectedly, `false` while it is still running
-    /// or when it stopped for a caller-requested [`Connection::shutdown`] /
-    /// [`Connection::reconnect`].
-    ///
-    /// Exists because a closed command channel is silent about *why* it
-    /// closed. Without this flag `TransportError::Disconnected` is reachable
-    /// only by a call already in flight when the socket died — a microsecond
-    /// window — and every call afterwards reports `Shutdown`, defeating the
-    /// `if let Err(ZendriverError::Disconnected) { browser.reconnect() }`
-    /// recipe that `Browser::reconnect` documents.
-    ///
-    /// Read via [`actor_gone_error`]; see the store in
-    /// [`crate::actor::run_actor`] for the ordering that makes it reliable.
-    pub(crate) socket_died: AtomicBool,
     /// The [`generation`](Self::generation) of the actor whose socket's
     /// death is expected, so that the actor logs the death at debug instead
     /// of error; `0` (no generation) when none is. Set by
@@ -219,7 +206,6 @@ impl std::fmt::Debug for ConnectionInner {
             .field("shutdown", &self.shutdown)
             .field("observer_timeout", &self.observer_timeout)
             .field("call_timeout_ms", &self.call_timeout_ms)
-            .field("socket_died", &self.socket_died)
             .field(
                 "disconnect_expected_generation",
                 &self.disconnect_expected_generation,
@@ -233,17 +219,43 @@ impl std::fmt::Debug for ConnectionInner {
     }
 }
 
+/// How a generation ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GenerationEnd {
+    /// Its WebSocket died.
+    SocketDied,
+    /// It was shut down before its actor saw its WebSocket die.
+    ShutDown,
+}
+
+impl GenerationEnd {
+    /// The announcement, on the accounted bus, that generation `generation`
+    /// ended this way.
+    pub(crate) fn announcement(self, generation: u64) -> AccountedRawEvent {
+        match self {
+            Self::SocketDied => AccountedRawEvent::Disconnected { generation },
+            Self::ShutDown => AccountedRawEvent::Shutdown { generation },
+        }
+    }
+}
+
 /// Which [`TransportError`] to report when the actor is no longer there — to
 /// take a command, or to answer one it already took.
 ///
 /// A closed command channel only says *that* the actor is gone, never why, and
 /// defaulting that to `Shutdown` mislabels a dead browser as a deliberate
-/// close. Consulting the exit reason the actor latched on its way out
-/// ([`ConnectionInner::socket_died`]) keeps `Disconnected` reachable for the
-/// whole time the connection is dead, not just for the calls that happened to
-/// be in flight at the instant it died.
+/// close. Consulting the end the actor recorded on its way out
+/// ([`ConnectionInner::generation_end`]) keeps `Disconnected` reachable for
+/// the whole time the connection is dead, not just for the calls that
+/// happened to be in flight at the instant it died. The actor records the end
+/// before it drops its command channel, so a caller that found the channel
+/// closed finds the end recorded.
 fn actor_gone_error(inner: &ConnectionInner) -> TransportError {
-    if inner.socket_died.load(Ordering::Acquire) {
+    let end = *inner
+        .generation_end
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if end == Some(GenerationEnd::SocketDied) {
         TransportError::Disconnected
     } else {
         TransportError::Shutdown
@@ -448,7 +460,7 @@ impl Connection {
     /// whether this method is ever called. The actor gates the per-event
     /// clone and the send onto this bus behind this stream having at least
     /// one live subscriber, so a connection with no accounted subscribers
-    /// pays nothing beyond what `subscribe_raw` already costs.
+    /// pays nothing per event beyond what `subscribe_raw` already costs.
     ///
     /// # Examples
     ///
@@ -493,27 +505,24 @@ impl Connection {
                 .generation_end
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (self.inner.accounted_tx.subscribe(), end.clone())
+            let generation = self.inner.generation.load(Ordering::Relaxed);
+            let past_end = end.map(|end| end.announcement(generation));
+            (self.inner.accounted_tx.subscribe(), past_end)
         };
         let inner = Arc::clone(&self.inner);
         let live = BroadcastStream::new(receiver).filter_map(move |res| {
-            let inner = Arc::clone(&inner);
-            async move {
-                match res {
-                    Ok(ev) => Some(ev),
-                    Err(BroadcastStreamRecvError::Lagged(missed)) => {
-                        Some(AccountedRawEvent::Lagged {
-                            // Read fresh rather than a value captured at
-                            // subscribe time, so a `Lagged` detected after
-                            // a `reconnect()` reports the generation
-                            // active *now*, not the one active when this
-                            // subscriber first subscribed.
-                            generation: inner.generation.load(Ordering::Relaxed),
-                            missed,
-                        })
-                    }
-                }
-            }
+            let ev = match res {
+                Ok(ev) => ev,
+                // Read fresh rather than a value captured at subscribe time,
+                // so a `Lagged` detected after a `reconnect()` reports the
+                // generation active *now*, not the one active when this
+                // subscriber first subscribed.
+                Err(BroadcastStreamRecvError::Lagged(missed)) => AccountedRawEvent::Lagged {
+                    generation: inner.generation.load(Ordering::Relaxed),
+                    missed,
+                },
+            };
+            std::future::ready(Some(ev))
         });
         Box::pin(futures::stream::iter(past_end).chain(live))
     }
@@ -541,9 +550,17 @@ impl Connection {
     /// Trigger graceful shutdown of the underlying actor. Subscribers of
     /// [`Connection::subscribe_raw_accounted`] then receive
     /// [`AccountedRawEvent::Shutdown`], unless the socket's death (announced
-    /// as `Disconnected`) or a concurrent [`Connection::reconnect`] (announced
-    /// as `Reconnected`) ended the current generation first.
+    /// as `Disconnected`) ended the current generation first, or a
+    /// [`Connection::reconnect`] that came right after replaced the actor
+    /// before it stopped (announced as `Reconnected`).
     pub fn shutdown(&self) {
+        // Under `generation_end`'s lock, so that a concurrent reconnect
+        // can't swap a new actor in after this cancels the old one.
+        let _lifecycle = self
+            .inner
+            .generation_end
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.inner
             .shutdown
             .lock()
@@ -627,44 +644,42 @@ impl Connection {
             + Unpin
             + 'static,
     {
-        // Start the new generation: bump the generation, and announce the
-        // transition on the accounted bus. Under `generation_end`'s lock,
-        // which an actor ends its generation under: if the previous actor
-        // already ended its generation, its end comes before `Reconnected`;
-        // if not, it finds its generation replaced and announces nothing — a
-        // reconnect is announced solely via `Reconnected`. Before the
-        // previous actor is cancelled, so that the cancellation can't make
-        // it end its generation as a `Shutdown` first. And before the new
-        // actor is spawned, so a subscriber never observes an event tagged
-        // with the new generation before `Reconnected`.
-        let new_generation = {
-            let mut end = self
-                .inner
-                .generation_end
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let previous = self.inner.generation.fetch_add(1, Ordering::Relaxed);
-            *end = None;
-            let _ = self
-                .inner
-                .accounted_tx
-                .send(AccountedRawEvent::Reconnected {
-                    previous,
-                    generation: previous + 1,
-                });
-            previous + 1
-        };
+        // The whole switch happens under `generation_end`'s lock, which an
+        // actor ends its generation under, and `shutdown()` cancels under: no
+        // other reconnect, shutdown, end, or new subscription can come
+        // between its steps. So the previous actor either ended its
+        // generation before this (its end comes before `Reconnected`), or it
+        // finds its generation replaced and announces nothing — a reconnect
+        // is announced solely via `Reconnected`.
+        let mut end = self
+            .inner
+            .generation_end
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut shutdown = self
+            .inner
+            .shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_generation = self.inner.generation.fetch_add(1, Ordering::Relaxed);
+        let new_generation = previous_generation + 1;
 
         // Cancel the previous actor — its `pending` (all stale by now) drains
-        // and its loop exits.
-        {
-            let guard = self
-                .inner
-                .shutdown
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.cancel();
-        }
+        // and its loop exits — before announcing `Reconnected`, to keep
+        // short the time in which it can still publish its events after that.
+        shutdown.cancel();
+        *end = None;
+
+        // Announce the transition BEFORE spawning the new actor, so a
+        // subscriber that exists now never observes an event tagged with the
+        // new generation before `Reconnected`.
+        let _ = self
+            .inner
+            .accounted_tx
+            .send(AccountedRawEvent::Reconnected {
+                previous: previous_generation,
+                generation: new_generation,
+            });
 
         // Fresh command channel + shutdown token for the new actor; reuse the
         // SAME event buses so existing subscribers keep receiving.
@@ -684,41 +699,14 @@ impl Connection {
             weak_inner,
         ));
 
-        // Swap the routing channel + shutdown token in place. Order doesn't
-        // matter: in-flight `call_raw`s already captured a snapshot sender, and
-        // a `shutdown()` racing this swap either cancels the old token (no-op,
-        // already cancelled) or the new one (intended).
+        // Swap the routing channel + shutdown token in place. In-flight
+        // `call_raw`s already captured a snapshot sender.
         *self
             .inner
             .cmd_tx
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = cmd_tx;
-        *self
-            .inner
-            .shutdown
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = new_shutdown;
-
-        // The connection is live again, so clear the previous actor's exit
-        // reason — otherwise a later clean `shutdown()` would still report
-        // `Disconnected` from the death this reconnect just repaired. The
-        // remaining race is benign and self-limiting: it needs the *new* actor
-        // to also be gone before the flag is ever read, and it only mislabels
-        // which kind of dead the connection is.
-        //
-        // This clear has no *behavioural* observer: `actor_gone_error` is the
-        // only code that branches on `socket_died`, and both paths to it
-        // require the *current* actor to be gone, while every actor exit
-        // re-latches the flag on its way out. It is not unobservable, though —
-        // `ConnectionInner`'s `Debug` prints the flag, and `Connection` is
-        // `Debug` and public via `Browser::cdp()`, so `{:?}` surfaces it
-        // without the actor being gone.
-        // Do not add a read path that does not depend on the current actor
-        // being gone (a `Connection::is_disconnected()` accessor is the obvious
-        // temptation) without revisiting this: such a reader could observe the
-        // flag while an actor is still running, and the ordering argument above
-        // would no longer cover it.
-        self.inner.socket_died.store(false, Ordering::Release);
+        *shutdown = new_shutdown;
     }
 
     /// Dial `ws_url` afresh (re-applying the P-A A4 [`WebSocketConfig`] max-size
@@ -929,7 +917,6 @@ where
         shutdown: Mutex::new(shutdown.clone()),
         observer_timeout,
         call_timeout_ms: AtomicU64::new(DEFAULT_CALL_TIMEOUT.as_millis() as u64),
-        socket_died: AtomicBool::new(false),
         disconnect_expected_generation: AtomicU64::new(0),
         swept_total: AtomicU64::new(0),
         // Retain the observer chain so `reconnect` can re-spawn the actor with
@@ -1228,7 +1215,7 @@ mod tests {
     }
 
     /// `Browser::reconnect`'s own rustdoc tells callers to key recovery off
-    /// `Disconnected`. Before the actor latched its exit reason, that variant
+    /// `Disconnected`. Before the actor recorded how it ended, that variant
     /// was reachable only by a call already in flight at the instant the
     /// socket died: every call afterwards found a closed command channel —
     /// which says nothing about *why* it closed — and reported `Shutdown`, so
@@ -1266,8 +1253,8 @@ mod tests {
         }
     }
 
-    /// A caller-requested shutdown must stay `Shutdown` even though the latch
-    /// now exists — the whole point is telling the two deaths apart.
+    /// A caller-requested shutdown must stay `Shutdown` even though the actor
+    /// records how it ended — the whole point is telling the two deaths apart.
     #[tokio::test]
     async fn calls_made_after_a_clean_shutdown_still_report_shutdown() {
         let f = connection_with_one_call_in_flight().await;
@@ -1312,7 +1299,6 @@ mod tests {
             shutdown: Mutex::new(CancellationToken::new()),
             observer_timeout: DEFAULT_OBSERVER_TIMEOUT,
             call_timeout_ms: AtomicU64::new(DEFAULT_CALL_TIMEOUT.as_millis() as u64),
-            socket_died: AtomicBool::new(false),
             disconnect_expected_generation: AtomicU64::new(0),
             swept_total: AtomicU64::new(0),
             observers: Vec::new(),
