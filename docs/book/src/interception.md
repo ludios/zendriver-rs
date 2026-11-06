@@ -59,7 +59,9 @@ request walks it. In full (from [`zendriver::interception`]):
 
 With [tracker blocking](#tracker--fingerprinter-blocklist) on, a tab's list
 starts with the entry `browser.trackers`. A rule at `Last` comes after it,
-so tracker requests stay blocked whatever the rule does; a rule at `First`
+so tracker requests stay blocked whatever the rule does (but a request the
+rule sends to a tracker host, with `RewriteUrl` or `ModifyRequest`, isn't
+checked again: rule 6); a rule at `First`
 decides the tracker requests it fits ahead of it, so `allow` or
 `modify_request` there lets them through, visibly so in the call and in
 [`snapshot`].

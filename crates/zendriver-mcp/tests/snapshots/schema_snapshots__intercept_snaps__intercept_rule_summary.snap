@@ -126,7 +126,7 @@ $defs:
             const: modify_response
         required:
           - kind
-      - description: "Hands it to a stream of the browser's."
+      - description: "Hands it to a stream (`Interceptor::subscribe`, from code embedding\nthe server), whose reader answers it."
         type: object
         properties:
           kind:

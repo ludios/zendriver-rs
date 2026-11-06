@@ -4,7 +4,7 @@ expression: "schema_for! (tools::intercept::RulesOutput)"
 ---
 $schema: "https://json-schema.org/draft/2020-12/schema"
 title: RulesOutput
-description: The list of every tool that changes it.
+description: "Output of `browser_intercept_move_rule`, `_remove_rule` and\n`_clear_rules`."
 type: object
 properties:
   rules:
@@ -81,7 +81,7 @@ $defs:
             const: modify_response
         required:
           - kind
-      - description: "Hands it to a stream of the browser's."
+      - description: "Hands it to a stream (`Interceptor::subscribe`, from code embedding\nthe server), whose reader answers it."
         type: object
         properties:
           kind:

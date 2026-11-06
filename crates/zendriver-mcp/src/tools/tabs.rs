@@ -250,11 +250,10 @@ pub struct TabCloseOutput {
 /// `tab_id` matches it: expectation tasks are `.abort()`ed (a bare
 /// `JoinHandle` drop only detaches, it does not cancel), and rule handles
 /// are simply dropped from the map — `InterceptRuleHandle::handle`'s `Drop`
-/// impl removes the rule's layer from the tab's interception. Without this,
+/// impl removes the rule from the tab's list. Without this,
 /// both kinds of handle would otherwise keep running (the expectation's
 /// spawned task holding its `.matched()` future open until
-/// `pre_await_timeout_ms` fires; the rule's layer staying in the tab's
-/// interception) until either the agent explicitly calls
+/// `pre_await_timeout_ms` fires; the rule staying in the tab's list) until either the agent explicitly calls
 /// `browser_expect_cancel` / `browser_intercept_remove_rule`, or the whole
 /// browser is torn down via `browser_close` (which also drains both
 /// registries — see `crate::tools::lifecycle::close`).
@@ -326,8 +325,8 @@ pub async fn close(
 ///   closure explicitly `.abort()`s each removed entry's task before
 ///   returning `false`.
 /// - `rules`: the removed value's `handle` field is a
-///   `zendriver::InterceptHandle`, whose `Drop` impl removes the rule's
-///   layer. A plain `retain` (letting the removed values drop) is
+///   `zendriver::InterceptHandle`, whose `Drop` impl removes the rule from
+///   its tab's list. A plain `retain` (letting the removed values drop) is
 ///   therefore enough — no explicit teardown call needed.
 ///
 /// Not currently called for `SessionState::monitors`: `MonitorState` has no
@@ -483,7 +482,7 @@ mod tests {
     /// `drain_tab_scoped` must reap only the closed tab's entries: an
     /// expectation's spawned `task` is `.abort()`ed (dropping a `JoinHandle`
     /// alone detaches rather than cancels), while a rule's `InterceptHandle`
-    /// removes its layer on `Drop` — so a plain `retain` suffices for rules. A
+    /// removes its rule on `Drop` — so a plain `retain` suffices for rules. A
     /// survivor on a different `tab_id` must remain in both maps untouched.
     #[cfg(all(feature = "expect", feature = "interception"))]
     #[tokio::test]

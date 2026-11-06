@@ -31,7 +31,7 @@ oneOf:
         type: string
         const: redirect
       to:
-        description: "Target URL. Sent to Chrome as a string — no expansion of the\nmatched URL is performed; if you need per-request substitution\nuse `modify_request`."
+        description: "Target URL, sent as it is: nothing of the matched URL is\nsubstituted into it."
         type: string
     additionalProperties: false
     required:

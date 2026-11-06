@@ -192,8 +192,10 @@ Every tool that changes the list returns it, read after the change.
 `browser_intercept_add_rule` requires a `position`: `"last"`, `"first"`,
 `{ "before": rule_id }` or `{ "after": rule_id }`. A rule at `last` comes
 after `browser.trackers`, so tracker requests stay blocked whatever the
-rule does; a rule at `first` decides the tracker requests it fits, so a
-`continue` or `modify_request` there sends them. An exception goes ahead
+rule does (but a request the rule sends to a tracker host, with
+`redirect` or `modify_request`, isn't checked again); a rule at `first`
+decides the tracker requests it fits, so a `continue` or `modify_request`
+there sends them. An exception goes ahead
 of the rule it excepts: `respond */api/health` placed `{ "before": <the
 block */api/* rule> }` answers health checks, and the block takes the rest
 of `/api/`.

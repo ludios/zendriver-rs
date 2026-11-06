@@ -487,9 +487,10 @@ pub struct CloseOutput {
 ///    future; aborting first doesn't depend on how that connection ends.)
 /// 2. **Interception rules**: `s.rules.clear()` drops every stored
 ///    `InterceptRuleHandle`, whose embedded `InterceptHandle::Drop`
-///    removes its layer (fire-and-forget, ending in `Fetch.disable`).
-///    Doing this *before* `Browser::close` gives that `Fetch.disable` a
-///    live transport to land on; nothing waits for it, and Chrome drops the
+///    removes its rule from its tab's list (fire-and-forget; the tab's
+///    `Fetch` configuration is updated, and turned off once nothing is
+///    left). Doing this *before* `Browser::close` gives that change a live
+///    transport to land on; nothing waits for it, and Chrome drops the
 ///    interception with the browser anyway.
 /// 3. **Browser**: only then do we `b.close().await`, which tears down
 ///    the transport and the CDP connection.
@@ -511,10 +512,10 @@ pub async fn close(
 
     #[cfg(feature = "interception")]
     {
-        // `InterceptHandle::Drop` removes the rule's layer (fire-and-
-        // forget, ending in `Fetch.disable`). Doing this before
-        // `Browser::close` gives the `Fetch.disable` a live transport to
-        // land on; doing it after would race a closed connection.
+        // `InterceptHandle::Drop` removes the rule from its tab's list
+        // (fire-and-forget). Doing this before `Browser::close` gives the
+        // `Fetch` change a live transport to land on; doing it after would
+        // race a closed connection.
         s.rules.clear();
     }
 
@@ -723,10 +724,6 @@ mod tests {
         );
     }
 
-    /// `close` clears every entry in `s.rules`. Each
-    /// `InterceptRuleHandle::handle` drop removes its layer (which would
-    /// dispatch `Fetch.disable` against the live transport in a real
-    /// session — here we just verify the map is emptied).
     #[cfg(feature = "geo")]
     #[test]
     fn geo_country_sets_locale_and_languages() {
@@ -789,6 +786,10 @@ mod tests {
         assert!(!profile.native_webgl_enabled());
     }
 
+    /// `close` clears every entry in `s.rules`. Each
+    /// `InterceptRuleHandle::handle` drop removes its rule from its tab's
+    /// list (which, in a real session, updates the tab's `Fetch`
+    /// configuration; here we just verify the map is emptied).
     #[cfg(feature = "interception")]
     #[tokio::test]
     async fn close_clears_interception_rules() {

@@ -77,9 +77,8 @@ pub enum InterceptAction {
     /// Send every matching request to `to` instead, unseen by the page.
     /// `request` pause only.
     Redirect {
-        /// Target URL. Sent to Chrome as a string — no expansion of the
-        /// matched URL is performed; if you need per-request substitution
-        /// use `modify_request`.
+        /// Target URL, sent as it is: nothing of the matched URL is
+        /// substituted into it.
         to: String,
     },
     /// Synthesize a response with the given status / body / headers.
@@ -138,6 +137,18 @@ pub enum InterceptAction {
 }
 
 impl InterceptAction {
+    /// The action's `kind` on the wire.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Continue => "continue",
+            Self::Block => "block",
+            Self::Redirect { .. } => "redirect",
+            Self::Respond { .. } => "respond",
+            Self::ModifyRequest { .. } => "modify_request",
+            Self::ModifyResponse { .. } => "modify_response",
+        }
+    }
+
     /// The core action that does what this one describes.
     fn into_action(self) -> Action {
         match self {
@@ -151,6 +162,7 @@ impl InterceptAction {
                 mut headers,
             } => {
                 if let Some(ct) = content_type {
+                    headers.retain(|name, _| !name.eq_ignore_ascii_case("content-type"));
                     headers.insert("content-type".into(), ct);
                 }
                 Action::Respond {
@@ -210,6 +222,15 @@ pub enum PauseName {
 }
 
 impl PauseName {
+    /// The name on the wire.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::ResponseHeaders => "response_headers",
+            Self::ResponseError => "response_error",
+        }
+    }
+
     fn pause_kind(self) -> PauseKind {
         match self {
             Self::Request => PauseKind::Request,
@@ -227,8 +248,9 @@ impl PauseName {
     }
 }
 
-/// A Chrome resource type (CDP `Network.ResourceType`). `XHR`, `Fetch`
-/// and `EventSource` are one type to Chrome: each fits all three.
+/// A Chrome resource type (CDP `Network.ResourceType`), of those Chrome
+/// can pause by type. `XHR`, `Fetch` and `EventSource` are one type to
+/// Chrome: each fits all three.
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 pub enum ResourceTypeName {
@@ -238,16 +260,11 @@ pub enum ResourceTypeName {
     Media,
     Font,
     Script,
-    TextTrack,
     XHR,
     Fetch,
     EventSource,
-    WebSocket,
-    Manifest,
-    SignedExchange,
     Ping,
     CSPViolationReport,
-    Preflight,
     Other,
 }
 
@@ -260,16 +277,11 @@ impl ResourceTypeName {
             Self::Media => ResourceType::Media,
             Self::Font => ResourceType::Font,
             Self::Script => ResourceType::Script,
-            Self::TextTrack => ResourceType::TextTrack,
             Self::XHR => ResourceType::XHR,
             Self::Fetch => ResourceType::Fetch,
             Self::EventSource => ResourceType::EventSource,
-            Self::WebSocket => ResourceType::WebSocket,
-            Self::Manifest => ResourceType::Manifest,
-            Self::SignedExchange => ResourceType::SignedExchange,
             Self::Ping => ResourceType::Ping,
             Self::CSPViolationReport => ResourceType::CSPViolationReport,
-            Self::Preflight => ResourceType::Preflight,
             Self::Other => ResourceType::Other,
         }
     }
@@ -338,7 +350,8 @@ pub enum ActionSummary {
     ModifyRequest,
     /// Lets the response go on with overrides.
     ModifyResponse,
-    /// Hands it to a stream of the browser's.
+    /// Hands it to a stream (`Interceptor::subscribe`, from code embedding
+    /// the server), whose reader answers it.
     Stream,
 }
 
@@ -444,6 +457,29 @@ pub enum AuthPauseName {
     DocumentsOnly,
 }
 
+/// A matcher for `hosts`, which must be bare host names: a rule for no
+/// host, or for a name no URL has, would fit nothing while pausing every
+/// request (Chrome can't be given a host set).
+fn host_matcher(hosts: Vec<String>) -> Result<HostMatcher, ErrorData> {
+    let bad = |h: &String| {
+        let h = h.trim();
+        h.is_empty()
+            || h.contains(|c: char| {
+                matches!(c, '/' | ':' | '*' | '?' | '#' | '@') || c.is_whitespace()
+            })
+    };
+    if let Some(h) = hosts.iter().find(|h| bad(h)) {
+        return Err(ErrorData::invalid_params(
+            format!("`hosts` takes bare host names (`ads.example`), not `{h}`"),
+            None,
+        ));
+    }
+    if hosts.is_empty() {
+        return Err(ErrorData::invalid_params("`hosts` is empty", None));
+    }
+    Ok(HostMatcher::new(hosts))
+}
+
 /// The id `id` (a `rule_id` string) names, or `RuleNotFound`.
 fn rule_id(id: &str) -> Result<RuleId, ErrorData> {
     id.parse()
@@ -512,7 +548,8 @@ async fn listed_if_open(
     listed(s, &tab, include_hosts).await
 }
 
-/// The list of every tool that changes it.
+/// Output of `browser_intercept_move_rule`, `_remove_rule` and
+/// `_clear_rules`.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RulesOutput {
     /// The current tab's list, read after the change, as
@@ -531,8 +568,9 @@ pub struct AddRuleInput {
     /// request URL. Give exactly one of `pattern` and `hosts`.
     #[serde(default)]
     pub pattern: Option<String>,
-    /// Host names: the rule fits a request whose host is one of these or a
-    /// subdomain of one. Give exactly one of `pattern` and `hosts`.
+    /// Host names (`ads.example`, without scheme, port, path or wildcard):
+    /// the rule fits a request whose host is one of these or a subdomain of
+    /// one. Give exactly one of `pattern` and `hosts`.
     #[serde(default)]
     pub hosts: Option<Vec<String>>,
     /// The resource type the rule fits. Omit for any.
@@ -561,7 +599,7 @@ impl AddRuleInput {
         let at = self.position.position()?;
         let url = match (self.pattern, self.hosts) {
             (Some(glob), None) => Match::url(glob).map_err(intercept_err)?,
-            (None, Some(hosts)) => Match::hosts(Arc::new(HostMatcher::new(hosts))),
+            (None, Some(hosts)) => Match::hosts(Arc::new(host_matcher(hosts)?)),
             _ => {
                 return Err(ErrorData::invalid_params(
                     "give exactly one of `pattern` and `hosts`",
@@ -569,17 +607,27 @@ impl AddRuleInput {
                 ));
             }
         };
-        let modifies_response = matches!(self.action, InterceptAction::ModifyResponse { .. });
+        let kind = self.action.kind();
         let pause = match self.pause {
             Some(pause) => pause,
-            None if modifies_response => PauseName::ResponseHeaders,
+            None if kind == "modify_response" => PauseName::ResponseHeaders,
             None => PauseName::Request,
         };
         let mut when = url.at(pause.pause_kind());
         if let Some(t) = self.resource_type {
             when = when.resource(t.resource_type());
         }
-        let mut rule = Rule::new(when, self.action.into_action()).map_err(intercept_err)?;
+        let rule = Rule::new(when, self.action.into_action());
+        let mut rule = rule.map_err(|e| match e {
+            InterceptionError::MismatchedPause { .. } => ErrorData::invalid_params(
+                format!(
+                    "action `{kind}` can't decide a `{}` pause: `redirect` and `modify_request` need `request`, `modify_response` needs `response_headers`",
+                    pause.name()
+                ),
+                None,
+            ),
+            e => intercept_err(e),
+        })?;
         if let Some(label) = self.label {
             rule = rule.label(label);
         }
@@ -733,13 +781,24 @@ pub async fn remove_rule(
 ) -> Result<RulesOutput, ErrorData> {
     let mut s = state.lock().await;
     let id = rule_id(&input.rule_id)?;
-    if let Some(rule) = s.rules.remove(&id) {
-        if let Err(e) = rule.handle.stop().await {
-            tracing::debug!(error = %e, "browser_intercept_remove_rule: Chrome refused the change");
+    let removed = match s.rules.remove(&id) {
+        Some(rule) => rule.handle.stop().await,
+        None => {
+            // Without a current tab, no list has the entry.
+            let not_found = || map_error(McpServerError::RuleNotFound(input.rule_id.clone()));
+            let tab = current_tab(&s).await.map_err(|_| not_found())?;
+            tab.interceptor().remove(id).await
         }
-    } else {
-        let tab = current_tab(&s).await?;
-        tab.interceptor().remove(id).await.map_err(intercept_err)?;
+    };
+    match removed {
+        Err(InterceptionError::NoSuchRule(_)) => {
+            return Err(map_error(McpServerError::RuleNotFound(input.rule_id)));
+        }
+        // The entry is out of the list anyway.
+        Err(e) => {
+            tracing::debug!(error = %e, "browser_intercept_remove_rule: Chrome refused the change")
+        }
+        Ok(()) => {}
     }
     let rules = listed_if_open(&s, false).await?.rules;
     Ok(RulesOutput { rules })
@@ -839,19 +898,20 @@ mod tests {
         assert!(cleared.rules.is_empty());
     }
 
+    /// An id that isn't one, and one that names no entry, are both
+    /// `RuleNotFound`, with or without a browser.
     #[tokio::test]
     async fn remove_unknown_rule_surfaces_rule_not_found() {
-        let state = Arc::new(Mutex::new(SessionState::new()));
-        let err = remove_rule(
-            state,
-            RemoveRuleInput {
-                rule_id: "nope".into(),
-            },
-        )
-        .await
-        .expect_err("expected RuleNotFound");
-        let data = err.data.as_ref().expect("data populated");
-        assert_eq!(data["suggested_next"], "browser_intercept_list_rules");
+        for id in ["nope", "123456789"] {
+            let state = Arc::new(Mutex::new(SessionState::new()));
+            let input = RemoveRuleInput { rule_id: id.into() };
+            let err = remove_rule(state, input)
+                .await
+                .expect_err("expected RuleNotFound");
+            assert!(err.message.contains(id), "{}", err.message);
+            let data = err.data.as_ref().expect("data populated");
+            assert_eq!(data["suggested_next"], "browser_intercept_list_rules");
+        }
     }
 
     #[tokio::test]
@@ -877,6 +937,18 @@ mod tests {
         let hosts = add(None, Some(vec!["a.test".into()]), InterceptAction::Continue);
         assert!(hosts.into_rule().is_ok());
 
+        for hosts in [
+            vec![],
+            vec!["*.ads.test".into()],
+            vec!["https://ads.test/".into()],
+        ] {
+            assert!(
+                add(None, Some(hosts), InterceptAction::Block)
+                    .into_rule()
+                    .is_err()
+            );
+        }
+
         let mut redirect = add(
             Some("*"),
             None,
@@ -886,7 +958,12 @@ mod tests {
         );
         redirect.pause = Some(PauseName::ResponseHeaders);
         let err = redirect.into_rule().unwrap_err();
-        assert!(err.message.contains("RewriteUrl"), "{}", err.message);
+        assert!(err.message.contains("`redirect`"), "{}", err.message);
+        assert!(
+            err.message.contains("`response_headers`"),
+            "{}",
+            err.message
+        );
 
         let modify = InterceptAction::ModifyResponse {
             status: Some(203),

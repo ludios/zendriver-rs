@@ -17,11 +17,17 @@ need; skip the rest.
 
 ## Network interception & tracker-blocking
 
-- `browser_intercept_add_rule` — block, redirect, or modify matching requests.
-- `browser_intercept_list_rules` / `browser_intercept_remove_rule` / `browser_intercept_clear_rules`.
+- `browser_intercept_add_rule` — continue, block, redirect, respond to, or modify matching
+  requests; it requires a `position` in the tab's list (`"last"` unless the rule must
+  take requests from an entry already there).
+- `browser_intercept_list_rules` / `browser_intercept_move_rule` /
+  `browser_intercept_remove_rule` / `browser_intercept_clear_rules`.
 - Use to block trackers/ads (faster, cleaner scrapes), stub endpoints, or fault-inject.
-- Rules on one tab compose: a request goes to the rule added last of those that match it
-  (at the stage Chrome paused it at), and older rules, then tracker blocking, get the rest.
+- A tab's rules are one ordered list, and the first entry that fits a request decides it.
+  With tracker blocking on, the list starts with `browser.trackers`: a rule at `"last"`
+  comes after it, a rule at `"first"` decides the tracker requests it fits. Put an
+  exception (`respond */api/health`) `{ "before": <rule_id> }` the broad rule
+  (`block */api/*`) it excepts. `list_rules` shows the order.
 
 ## Live network monitoring
 

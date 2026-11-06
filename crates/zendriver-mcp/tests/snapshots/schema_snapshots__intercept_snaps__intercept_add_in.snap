@@ -11,7 +11,7 @@ properties:
     description: Action to take on matches.
     $ref: "#/$defs/InterceptAction"
   hosts:
-    description: "Host names: the rule fits a request whose host is one of these or a\nsubdomain of one. Give exactly one of `pattern` and `hosts`."
+    description: "Host names (`ads.example`, without scheme, port, path or wildcard):\nthe rule fits a request whose host is one of these or a subdomain of\none. Give exactly one of `pattern` and `hosts`."
     type:
       - array
       - "null"
@@ -77,7 +77,7 @@ $defs:
             type: string
             const: redirect
           to:
-            description: "Target URL. Sent to Chrome as a string — no expansion of the\nmatched URL is performed; if you need per-request substitution\nuse `modify_request`."
+            description: "Target URL, sent as it is: nothing of the matched URL is\nsubstituted into it."
             type: string
         additionalProperties: false
         required:
@@ -210,7 +210,7 @@ $defs:
         required:
           - after
   ResourceTypeName:
-    description: "A Chrome resource type (CDP `Network.ResourceType`). `XHR`, `Fetch`\nand `EventSource` are one type to Chrome: each fits all three."
+    description: "A Chrome resource type (CDP `Network.ResourceType`), of those Chrome\ncan pause by type. `XHR`, `Fetch` and `EventSource` are one type to\nChrome: each fits all three."
     type: string
     enum:
       - Document
@@ -219,14 +219,9 @@ $defs:
       - Media
       - Font
       - Script
-      - TextTrack
       - XHR
       - Fetch
       - EventSource
-      - WebSocket
-      - Manifest
-      - SignedExchange
       - Ping
       - CSPViolationReport
-      - Preflight
       - Other
