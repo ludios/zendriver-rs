@@ -43,7 +43,6 @@
 
 #![cfg(feature = "expect")]
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -576,24 +575,22 @@ async fn dialog_to_json(
 /// completed download to `save_to` on the MCP host.
 ///
 /// `MatchedDownload::save_to` waits for completion before copying, so the
-/// reported `saved_path` is a fully-written file.
+/// reported `saved_path` is a fully-written file. Without `save_to`, the
+/// download goes on into `download_dir` (named by its guid in zendriver's
+/// staging directory, which lives as long as the browser).
 async fn download_to_json(m: MatchedDownload, save_to: Option<String>) -> Result<Value, String> {
-    let url = m.url.clone();
-    let suggested_filename = m.suggested_filename.clone();
-    let guid = m.guid.clone();
-    let download_dir = m.download_dir.to_string_lossy().into_owned();
     let saved_path = if let Some(dest) = save_to {
-        m.save_to(PathBuf::from(&dest)).await.map_err(err_to_str)?;
+        m.save_to(&dest).await.map_err(err_to_str)?;
         Some(dest)
     } else {
         None
     };
     Ok(json!({
         "kind": "download",
-        "url": url,
-        "suggested_filename": suggested_filename,
-        "guid": guid,
-        "download_dir": download_dir,
+        "url": m.url(),
+        "suggested_filename": m.suggested_filename(),
+        "guid": m.guid(),
+        "download_dir": m.download_dir().to_string_lossy(),
         "saved_path": saved_path,
     }))
 }

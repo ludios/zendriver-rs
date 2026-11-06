@@ -52,7 +52,6 @@ const COMMANDS: &[(&str, Scope)] = &[
     ("Browser.grantPermissions", B),
     ("Browser.resetPermissions", B),
     ("Browser.setDownloadBehavior", B),
-    ("Browser.setDownloadBehavior", P),
     ("Browser.setWindowBounds", B),
     ("Browser.setWindowBounds", P),
     ("DOM.describeNode", P),
@@ -148,6 +147,7 @@ const NOT_SENT: &[&str] = &["Browser.close"];
 
 /// Every CDP event the library listens for.
 const EVENTS: &[&str] = &[
+    "Browser.downloadProgress",
     "Fetch.authRequired",
     "Fetch.requestPaused",
     "Network.dataReceived",
@@ -160,7 +160,6 @@ const EVENTS: &[&str] = &[
     "Network.webSocketCreated",
     "Network.webSocketFrameReceived",
     "Network.webSocketFrameSent",
-    "Page.downloadProgress",
     "Page.downloadWillBegin",
     "Page.fileChooserOpened",
     "Page.frameAttached",

@@ -2064,6 +2064,10 @@ pub(crate) struct BrowserInner {
     /// The download behavior zendriver set on each browser context. Every
     /// `Browser.setDownloadBehavior` goes through it.
     pub(crate) download_behaviors: crate::download_behavior::DownloadBehaviors,
+    /// The downloads that [`Tab::expect_download`] follows, and where they
+    /// go.
+    #[cfg(feature = "expect")]
+    pub(crate) downloads: crate::expect::download::Downloads,
     pub(crate) child: tokio::sync::Mutex<Option<Child>>,
     /// Windows job object confining Chrome's whole process tree; a zero-sized
     /// no-op elsewhere. Killing the tracked `child` alone is not enough on
@@ -2368,6 +2372,8 @@ pub(crate) fn test_only_inner_with(
             main_tab,
             default_context_id: None,
             download_behaviors: Default::default(),
+            #[cfg(feature = "expect")]
+            downloads: Default::default(),
             child: tokio::sync::Mutex::new(None),
             job: ProcessJob::none(),
             _user_data: None,
@@ -3403,6 +3409,8 @@ pub(crate) async fn finish_connect(
             main_tab,
             default_context_id,
             download_behaviors: Default::default(),
+            #[cfg(feature = "expect")]
+            downloads: Default::default(),
             // Take ownership of the child only now, once every CDP round-trip
             // that can fail the handshake has succeeded. Until this point
             // `guard_handshake` owns the cleanup: if the budget expires
@@ -4588,11 +4596,10 @@ impl Browser {
     ///
     /// This is the runtime counterpart to
     /// [`BrowserBuilder::downloads_dir`](crate::BrowserBuilder::downloads_dir)
-    /// (which sets the same behavior at launch). It is distinct from the
-    /// `expect_download` capture flow ([`Tab::expect_download`]), which uses
-    /// `allowAndName` against a private tempdir to await + save a single
-    /// download; `set_download_path` simply lets downloads land in a known
-    /// directory with their natural names.
+    /// (which sets the same behavior at launch). `set_download_path` simply
+    /// lets downloads land in a known directory with their natural names;
+    /// [`Tab::expect_download`] awaits one, and finds it there (see
+    /// [`Tab::set_download_path`] for how the two combine).
     ///
     /// # Errors
     ///
@@ -4699,21 +4706,23 @@ impl Browser {
     ///    `Target.attachedToTarget` event arrives.
     /// 3. Returns the matching [`Tab`] on success.
     ///
-    /// # Background tabs under `native` stealth
+    /// # Background tabs
     ///
     /// The new tab comes to the front of its window, and the tab that was in
-    /// front becomes a background tab. In a headless launch under
-    /// [`StealthProfile::native`] (the default), a background tab's page
-    /// sees its viewport as its window: `screenY` is the height of the
-    /// browser's toolbars (87 CSS pixels), and `outerHeight` equals
-    /// `innerHeight`. That is because zendriver's stealth keeps every tab
-    /// visible (with `Emulation.setFocusEmulationEnabled`), and Chrome
-    /// detaches a background tab's view from its window, so a background tab
-    /// that is visible gets its view's own bounds as its window's. Real
-    /// Chrome hides a background tab, so its page keeps the values from when
-    /// the tab was last in front. So to work in several pages at the same
-    /// time, open each with [`Browser::new_window`], which puts it in a
-    /// window of its own.
+    /// front becomes a background tab. Chrome gives a background tab's page
+    /// its viewport as its window: `screenY` grows by the height of what is
+    /// above the page in the window (87 CSS pixels in a headless launch, by
+    /// default), and `outerHeight` shrinks to `innerHeight`. Chrome 157 on
+    /// Linux does this both headless and headed, even with no stealth, and
+    /// the page sees its whole window again once its tab is back in front.
+    /// Chrome without stealth also hides a background tab. But under
+    /// [`StealthProfile::native`] (the default), focus emulation
+    /// (`Emulation.setFocusEmulationEnabled`) keeps every tab visible and
+    /// focused, so a background tab's page is visible and focused, with a
+    /// window that Chrome without stealth gives only to a hidden page. So to
+    /// work in several pages at the same time, open each with
+    /// [`Browser::new_window`], which puts it in front of a window of its
+    /// own.
     ///
     /// # Errors
     ///
@@ -4764,8 +4773,8 @@ impl Browser {
     /// `get(new_window=True)`.
     ///
     /// Under [`StealthProfile::native`], open each page that you work in at
-    /// the same time as others this way: [`Browser::new_tab`] says why a
-    /// background tab's page sees the wrong window.
+    /// the same time as others this way, so that each page is in front of
+    /// its window: see "Background tabs" at [`Browser::new_tab`].
     ///
     /// # Errors
     ///

@@ -1162,3 +1162,49 @@ excluded = "no agent-facing value without BrowserBuilder::env, which is excluded
 [[entry]]
 api = "zendriver_stealth::StealthProfile::pointer_blink_settings"
 excluded = "reader of the Blink settings that a stealth profile implies; every headless browser_open on Linux applies them, since MCP offers no off profile"
+
+# ── Downloads followed at browser scope (MatchedDownload's accessors) ──────
+# `MatchedDownload` became opaque: its public fields turned into accessors,
+# `path` stopped waiting (and being async), `save_to` borrows, and `wait`
+# is new. `DownloadProgressState` gained `Unknown` and `#[non_exhaustive]`.
+# MCP's handle is the expectation task (it keeps no `MatchedDownload`), so
+# what it reports comes from `browser_expect_await`'s download event.
+[[entry]]
+api = "zendriver::expect::download::MatchedDownload::url"
+covered = "browser_expect_await (event.url)"
+
+[[entry]]
+api = "zendriver::expect::download::MatchedDownload::suggested_filename"
+covered = "browser_expect_await (event.suggested_filename)"
+
+[[entry]]
+api = "zendriver::expect::download::MatchedDownload::guid"
+covered = "browser_expect_await (event.guid)"
+
+[[entry]]
+api = "zendriver::expect::download::MatchedDownload::download_dir"
+covered = "browser_expect_await (event.download_dir)"
+
+[[entry]]
+api = "zendriver::expect::download::MatchedDownload::save_to"
+covered = "browser_expect_register.save_to"
+
+[[entry]]
+api = "zendriver::expect::download::MatchedDownload::wait"
+covered = "browser_expect_register.save_to (which waits for the download's end before copying)"
+
+[[entry]]
+api = "zendriver::expect::download::MatchedDownload::path"
+excluded = "a check of the completed file that doesn't wait; MCP keeps no download handle to check later (browser_expect_register.save_to waits instead)"
+
+[[entry]]
+api = "zendriver::expect::download::MatchedDownload::state"
+excluded = "a progress snapshot; MCP keeps no download handle to poll"
+
+[[entry]]
+api = "zendriver::expect::download::DownloadProgressState"
+excluded = "the state of MatchedDownload::state, which MCP doesn't expose; a save_to of a download that ended Unknown fails browser_expect_await with EventStreamIncomplete"
+
+[[entry]]
+api = "zendriver::DownloadProgressState"
+excluded = "re-export of zendriver::expect::download::DownloadProgressState (see there)"

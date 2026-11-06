@@ -134,15 +134,12 @@ dialogs. `MatchedDialog::dismiss()` closes without accepting.
 
 ## Downloads
 
-`expect_download` does extra per-tab wiring on its first call: allocates
-a tempdir, dispatches `Browser.setDownloadBehavior { behavior:
-"allowAndName", downloadPath }`, and starts a long-running progress
-subscriber. Subsequent calls reuse the same setup, so the
-per-`expect_download` cost is one CDP event subscription.
+A download outlives its tab in Chrome, so zendriver follows it at browser
+scope: the `MatchedDownload` that `expect_download` resolves with stays
+usable after its tab closes, and `wait` / `save_to` wait for the download
+to end, however long it takes.
 
 ```rust,ignore
-use std::path::PathBuf;
-
 let dl = tab.expect_download().await?;
 
 let link = tab.find().css("a[download]").one().await?;
@@ -150,14 +147,40 @@ link.click().await?;
 
 let matched = dl.await?;
 
-// Wait for completion then copy out of the tempdir to a stable path:
-matched.save_to(PathBuf::from("/tmp/result.pdf")).await?;
+// Closing the tab doesn't stop the download.
+tab.close().await?;
+
+// Wait for completion, then copy the file to a stable path:
+matched.save_to("/tmp/result.pdf").await?;
 ```
 
-The path returned by `MatchedDownload::path().await` points into a
-per-tab tempdir (named by Chrome's CDP `guid`) and is `None` until the
-transfer completes. The tempdir lives as long as the `Tab` does, so call
-`save_to` to copy the file somewhere stable before the tab drops.
+`expect_download` matches the tab's own `Page.downloadWillBegin`, which
+Chrome sends to the tab whose frame (or same-process subframe) started
+the download. A download in a tab that Chrome opened for it (a
+`target=_blank` link to a file) isn't the opener's.
+
+Where the file goes depends on the tab's browser context, since Chrome
+keeps one download setting per context:
+
+- If zendriver hasn't set where the context's downloads go, the first
+  `expect_download` sends them, from then on, into zendriver's staging
+  directory (one per browser), each named by Chrome's CDP `guid`. The
+  directory is deleted once the `Browser` and every `MatchedDownload`
+  from it are dropped, so call `save_to` to keep a file. On a Chrome you
+  `connect`ed to, this takes the downloads of every tab in the context,
+  including ones a person uses, until zendriver disconnects; use a
+  `BrowserContext` to keep them apart.
+- If `set_download_path` (on the tab or the browser) or
+  `BrowserBuilder::downloads_dir` chose a directory, `expect_download`
+  leaves the setting alone: the file goes there under Chrome's name, and
+  the `MatchedDownload` finds it only on Chrome 138 or later, which
+  reports where a completed file is.
+
+`MatchedDownload::path()` doesn't wait: it is `None` until the transfer
+completes. If zendriver may have missed how a download ended (it fell
+behind the browser's events, or the browser's connection ended or was
+replaced), the download's state is `DownloadProgressState::Unknown`, and
+`wait` / `save_to` fail with `EventStreamIncomplete`.
 
 ## File pickers
 

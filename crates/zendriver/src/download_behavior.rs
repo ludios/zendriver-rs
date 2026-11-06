@@ -12,7 +12,7 @@
 //! the context, with `eventsEnabled: true`; and it remembers what it set.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use zendriver_transport::Connection;
@@ -25,6 +25,21 @@ pub(crate) enum DownloadMode {
     /// Into a directory the caller chose, under the names Chrome gives them
     /// (behavior `allow`).
     Directory(PathBuf),
+    /// Into zendriver's staging directory, each named by its guid (behavior
+    /// `allowAndName`), for [`crate::Tab::expect_download`] to hand out.
+    #[cfg(feature = "expect")]
+    Staging(PathBuf),
+}
+
+impl DownloadMode {
+    /// The directory the downloads go into.
+    pub(crate) fn dir(&self) -> &Path {
+        match self {
+            DownloadMode::Directory(dir) => dir,
+            #[cfg(feature = "expect")]
+            DownloadMode::Staging(dir) => dir,
+        }
+    }
 }
 
 /// The download behavior that zendriver set on each browser context of one
@@ -54,24 +69,24 @@ impl DownloadBehaviors {
         Ok(())
     }
 
-    /// Like [`DownloadBehaviors::set`], but only if zendriver set nothing on
-    /// `context` yet; `make_mode` then makes the mode (it may fail, for
-    /// example creating a directory).
-    pub(crate) async fn set_unless_set(
+    /// The mode of `context`, after setting it like [`DownloadBehaviors::set`]
+    /// if zendriver set nothing on `context` yet; `make_mode` then makes the
+    /// mode (it may fail, for example creating a directory).
+    pub(crate) async fn get_or_set(
         &self,
         conn: &Connection,
         context: Option<&str>,
         make_mode: impl FnOnce() -> Result<DownloadMode>,
-    ) -> Result<()> {
+    ) -> Result<DownloadMode> {
         let mut modes = self.modes.lock().await;
         let key = context.map(str::to_owned);
-        if modes.contains_key(&key) {
-            return Ok(());
+        if let Some(mode) = modes.get(&key) {
+            return Ok(mode.clone());
         }
         let mode = make_mode()?;
         send(conn, context, &mode).await?;
-        modes.insert(key, mode);
-        Ok(())
+        modes.insert(key, mode.clone());
+        Ok(mode)
     }
 
     /// Forget every setting. Chrome drops a session's settings when the
@@ -85,10 +100,14 @@ impl DownloadBehaviors {
 /// Send `Browser.setDownloadBehavior` for `mode` on `conn`, naming browser
 /// context `context` (`None` for the default context).
 async fn send(conn: &Connection, context: Option<&str>, mode: &DownloadMode) -> Result<()> {
-    let DownloadMode::Directory(dir) = mode;
+    let behavior = match mode {
+        DownloadMode::Directory(_) => "allow",
+        #[cfg(feature = "expect")]
+        DownloadMode::Staging(_) => "allowAndName",
+    };
     let mut params = json!({
-        "behavior": "allow",
-        "downloadPath": dir.to_string_lossy(),
+        "behavior": behavior,
+        "downloadPath": mode.dir().to_string_lossy(),
         "eventsEnabled": true,
     });
     // Leaving the id out names the default context, whose tabs record no id

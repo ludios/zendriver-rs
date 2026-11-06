@@ -323,20 +323,6 @@ pub(crate) struct TabInner {
     /// here. Subsequent calls return the cached `Frame` clone without
     /// another round-trip.
     pub(crate) main_frame: tokio::sync::OnceCell<Frame>,
-    /// Per-Tab download coordinator. Lazily initialized on the first
-    /// [`Tab::expect_download`] call (gated `expect`) — the constructor
-    /// allocates a tempdir, dispatches `Browser.setDownloadBehavior` once,
-    /// and spawns a long-running `Page.downloadProgress` subscriber. Held
-    /// behind a [`tokio::sync::OnceCell`] so the wiring happens exactly
-    /// once per Tab; subsequent `expect_download` calls reuse the same
-    /// coordinator (and therefore the same tempdir + subscriber).
-    ///
-    /// `Arc` because both the [`Tab`] (via this cell) and the spawned
-    /// progress subscriber task hold references to the same coordinator
-    /// state for the Tab's entire lifetime.
-    #[cfg(feature = "expect")]
-    pub(crate) download_setup:
-        tokio::sync::OnceCell<Arc<crate::expect::download::DownloadCoordinator>>,
     /// Per-Tab frames registry keyed by CDP `frameId`. Populated by the
     /// background subscriber spawned in [`Tab::new`] via
     /// [`crate::frame::lifecycle::run`] which mutates the map in response
@@ -522,8 +508,6 @@ impl Tab {
                 network_tracker,
                 network_cancel,
                 main_frame: tokio::sync::OnceCell::new(),
-                #[cfg(feature = "expect")]
-                download_setup: tokio::sync::OnceCell::new(),
                 frames,
                 frame_lifecycle_cancel,
                 pending_load: tokio::sync::Mutex::new(None),
@@ -2849,12 +2833,15 @@ impl Tab {
     /// must already exist; Chrome writes files there under the names it
     /// would have used in the user's downloads folder.
     ///
-    /// This is distinct from [`Tab::expect_download`]
-    /// (gated by the `expect` feature), which configures `allowAndName`
-    /// against a private tempdir to *capture* a single download for
-    /// `await` + `save_to`. Use `set_download_path` when you just want
-    /// downloads to land in a known directory with their natural names;
-    /// use `expect_download` when you want to await and inspect one.
+    /// Use `set_download_path` when you just want downloads to land in a
+    /// known directory with their natural names; use
+    /// [`Tab::expect_download`] (gated by the `expect` feature) when you
+    /// want to await and inspect one. The two combine: in a context with a
+    /// directory set here, `expect_download` leaves the setting alone, and
+    /// finds the file in that directory (on Chrome 138 or later, which
+    /// reports where a completed file is). In a context without one, the
+    /// first `expect_download` sends the downloads into zendriver's staging
+    /// directory instead, until this is called.
     ///
     /// # Errors
     ///
@@ -2906,7 +2893,10 @@ impl Tab {
     ///
     /// Returns once the injection script has been dispatched — it does **not**
     /// wait for the download to finish. For await/inspect semantics use
-    /// [`Tab::expect_download`] (gated by the `expect` feature).
+    /// [`Tab::expect_download`] (gated by the `expect` feature) before this
+    /// call; if `expect_download` set up the context's downloads, the file
+    /// goes into zendriver's staging directory, named by its guid, and
+    /// `filename` is only the name the `MatchedDownload` suggests.
     ///
     /// # Errors
     ///
@@ -2944,7 +2934,7 @@ impl Tab {
         };
         browser
             .download_behaviors
-            .set_unless_set(
+            .get_or_set(
                 &browser.conn,
                 self.inner.browser_context_id.as_deref(),
                 default_dir,
@@ -3089,29 +3079,52 @@ impl Tab {
     }
 
     /// Register a one-shot expectation for the first `Page.downloadWillBegin`
-    /// on this tab.
+    /// on this tab: the next download from this tab (or one of its
+    /// same-process frames).
     ///
-    /// First call on a Tab also allocates a per-Tab tempdir, dispatches
-    /// `Browser.setDownloadBehavior { behavior: "allowAndName", downloadPath
-    /// }` at browser scope, and spawns a long-running `Page.downloadProgress`
-    /// subscriber. The coordinator is reused across every subsequent
-    /// `expect_download` call on the same tab. `Page.enable` is already on
-    /// per-Tab via P1's `Tab::goto` / the frame lifecycle subscriber, so
-    /// this call does not re-enable.
-    ///
-    /// Returned [`MatchedDownload`](crate::expect::download::MatchedDownload)
-    /// exposes [`path`](crate::expect::download::MatchedDownload::path) /
+    /// The returned [`MatchedDownload`](crate::expect::download::MatchedDownload)
+    /// follows the download to its end through the browser's own
+    /// connection, so it stays usable after this tab closes, and exposes
+    /// [`wait`](crate::expect::download::MatchedDownload::wait) /
+    /// [`path`](crate::expect::download::MatchedDownload::path) /
     /// [`save_to`](crate::expect::download::MatchedDownload::save_to) for
     /// reaching the downloaded bytes once Chrome reports completion.
     ///
+    /// Where the file goes depends on this tab's browser context, since
+    /// Chrome keeps one download setting per context:
+    ///
+    /// - If zendriver hasn't set where the context's downloads go, this
+    ///   sends them, from now on, into zendriver's staging directory (one
+    ///   per browser, deleted once the [`crate::Browser`] and every
+    ///   `MatchedDownload` from it are dropped), each named by its guid. On
+    ///   a Chrome you [`connect`](crate::Browser::connect)ed to, that
+    ///   includes the downloads of every tab in the context, even ones a
+    ///   person uses, until zendriver disconnects; use a
+    ///   [`crate::BrowserContext`] to keep them apart. The staging directory
+    ///   is on the machine zendriver runs on, so a Chrome on another machine
+    ///   can't save into it.
+    /// - If [`Tab::set_download_path`] (or the like) chose a directory, this
+    ///   changes nothing: the file goes there, under the name Chrome gives
+    ///   it, and the `MatchedDownload` finds it only on Chrome 138 or later,
+    ///   which reports where a completed file is.
+    ///
+    /// `Page.enable` is already on per-Tab via P1's `Tab::goto` / the frame
+    /// lifecycle subscriber, so this call does not re-enable.
+    ///
+    /// # Errors
+    ///
+    /// [`ZendriverError::Io`] if the staging directory can't be made;
+    /// [`ZendriverError::Transport`] / `Cdp` if Chrome refuses the setting
+    /// (as for a context Chrome doesn't let a client name, such as the
+    /// Incognito window of a Chrome you connected to), and the
+    /// clean-shutdown [`ZendriverError::Transport`] if the tab's
+    /// [`crate::Browser`] is gone.
+    ///
     /// Gated by the `expect` cargo feature.
     pub async fn expect_download(&self) -> Result<crate::expect::download::DownloadExpectation> {
-        let coord = crate::expect::download::ensure_download_setup(
-            &self.inner.download_setup,
-            self.session(),
-        )
-        .await?;
-        Ok(crate::expect::download::register(self.session(), coord))
+        let browser = self.owning_browser()?;
+        let context = self.inner.browser_context_id.as_deref();
+        crate::expect::download::register(&browser, self.session(), context).await
     }
 
     /// Register a one-shot expectation for the first `Page.fileChooserOpened`
@@ -5423,7 +5436,7 @@ mod tests {
 
     /// [`Tab::set_download_path`] dispatches `Browser.setDownloadBehavior`
     /// with `behavior: "allow"` (keeps suggested filenames — distinct from
-    /// the `expect_download` coordinator's `allowAndName`), the chosen
+    /// `expect_download`'s staging `allowAndName`), the chosen
     /// `downloadPath`, and `eventsEnabled: true`, which every setting must
     /// carry (Chrome turns the browser session's download events off
     /// otherwise). A tab in the default context names no context.

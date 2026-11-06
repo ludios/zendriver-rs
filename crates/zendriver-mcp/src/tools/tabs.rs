@@ -247,7 +247,10 @@ pub struct TabCloseOutput {
 /// `tab_id` of the tab they were registered against (set at
 /// `browser_expect_register` / `browser_intercept_add_rule` time). Once the
 /// closed tab's id is known, [`drain_tab_scoped`] removes every entry whose
-/// `tab_id` matches it: expectation tasks are `.abort()`ed (a bare
+/// `tab_id` matches it, except a download expectation's (whose download goes
+/// on after the tab closes, and its `save_to` with it; an unmatched one ends
+/// by itself, since its tab's events end): expectation tasks are
+/// `.abort()`ed (a bare
 /// `JoinHandle` drop only detaches, it does not cancel), and rule handles
 /// are simply dropped from the map — `InterceptRuleHandle::handle`'s `Drop`
 /// impl removes the rule from the tab's list. Without this,
@@ -338,12 +341,12 @@ pub async fn close(
 fn drain_tab_scoped(s: &mut SessionState, closed_id: &str) {
     #[cfg(feature = "expect")]
     s.expectations.retain(|_, h| {
-        if h.tab_id == closed_id {
-            h.task.abort();
-            false
-        } else {
-            true
+        // A download outlives its tab, and so does saving it.
+        if h.tab_id != closed_id || h.kind == "download" {
+            return true;
         }
+        h.task.abort();
+        false
     });
 
     #[cfg(feature = "interception")]
@@ -483,7 +486,9 @@ mod tests {
     /// expectation's spawned `task` is `.abort()`ed (dropping a `JoinHandle`
     /// alone detaches rather than cancels), while a rule's `InterceptHandle`
     /// removes its rule on `Drop` — so a plain `retain` suffices for rules. A
-    /// survivor on a different `tab_id` must remain in both maps untouched.
+    /// survivor on a different `tab_id` must remain in both maps untouched,
+    /// and so must the closed tab's download expectation, whose download
+    /// (and save) outlives the tab.
     #[cfg(all(feature = "expect", feature = "interception"))]
     #[tokio::test]
     async fn drain_tab_scoped_reaps_closed_tab_keeps_survivor() {
@@ -507,6 +512,23 @@ mod tests {
                 kind: "request",
                 task: task_closed,
                 rx: rx_closed,
+                tab_id: "closed-tab-id".into(),
+            },
+        );
+
+        // A download expectation on the closed tab survives.
+        let (_tx_keep_alive3, rx_download) =
+            tokio::sync::oneshot::channel::<Result<serde_json::Value, String>>();
+        let task_download = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+        });
+        let download_task_check = task_download.abort_handle();
+        s.expectations.insert(
+            "exp-download".into(),
+            ExpectationHandle {
+                kind: "download",
+                task: task_download,
+                rx: rx_download,
                 tab_id: "closed-tab-id".into(),
             },
         );
@@ -554,6 +576,10 @@ mod tests {
             "other tab's expectation must survive"
         );
         assert!(
+            s.expectations.contains_key("exp-download"),
+            "closed tab's download expectation must survive"
+        );
+        assert!(
             !s.rules.contains_key(&rule_id("1")),
             "closed tab's rule must be drained"
         );
@@ -570,6 +596,10 @@ mod tests {
         assert!(
             !survivor_task_check.is_finished(),
             "surviving tab's expectation task should NOT be aborted"
+        );
+        assert!(
+            !download_task_check.is_finished(),
+            "closed tab's download expectation task should NOT be aborted"
         );
     }
 }

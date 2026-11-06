@@ -1292,10 +1292,11 @@ pub type zendriver::expect::dialog::MatchedDialog::Output = T
 impl<V, T> ppv_lite86::types::VZip<V> for zendriver::expect::dialog::MatchedDialog where V: ppv_lite86::types::MultiLane<T>
 pub fn zendriver::expect::dialog::MatchedDialog::vzip(self) -> V
 pub mod zendriver::expect::download
-pub enum zendriver::expect::download::DownloadProgressState
+#[non_exhaustive] pub enum zendriver::expect::download::DownloadProgressState
 pub zendriver::expect::download::DownloadProgressState::Canceled
 pub zendriver::expect::download::DownloadProgressState::Completed
 pub zendriver::expect::download::DownloadProgressState::InProgress
+pub zendriver::expect::download::DownloadProgressState::Unknown
 impl core::clone::Clone for zendriver::expect::download::DownloadProgressState
 pub fn zendriver::expect::download::DownloadProgressState::clone(&self) -> zendriver::expect::download::DownloadProgressState
 impl core::cmp::Eq for zendriver::expect::download::DownloadProgressState
@@ -1449,15 +1450,15 @@ pub type zendriver::expect::download::DownloadState::Output = T
 impl<V, T> ppv_lite86::types::VZip<V> for zendriver::expect::download::DownloadState where V: ppv_lite86::types::MultiLane<T>
 pub fn zendriver::expect::download::DownloadState::vzip(self) -> V
 pub struct zendriver::expect::download::MatchedDownload
-pub zendriver::expect::download::MatchedDownload::download_dir: std::path::PathBuf
-pub zendriver::expect::download::MatchedDownload::guid: alloc::string::String
-pub zendriver::expect::download::MatchedDownload::session: zendriver_transport::session::SessionHandle
-pub zendriver::expect::download::MatchedDownload::state: alloc::sync::Arc<tokio::sync::mutex::Mutex<zendriver::expect::download::DownloadState>>
-pub zendriver::expect::download::MatchedDownload::suggested_filename: alloc::string::String
-pub zendriver::expect::download::MatchedDownload::url: alloc::string::String
 impl zendriver::expect::download::MatchedDownload
-pub async fn zendriver::expect::download::MatchedDownload::path(&self) -> core::option::Option<std::path::PathBuf>
-pub async fn zendriver::expect::download::MatchedDownload::save_to(self, std::path::PathBuf) -> zendriver::error::Result<()>
+pub fn zendriver::expect::download::MatchedDownload::download_dir(&self) -> &std::path::Path
+pub fn zendriver::expect::download::MatchedDownload::guid(&self) -> &str
+pub fn zendriver::expect::download::MatchedDownload::path(&self) -> core::option::Option<std::path::PathBuf>
+pub async fn zendriver::expect::download::MatchedDownload::save_to(&self, impl core::convert::AsRef<std::path::Path>) -> zendriver::error::Result<()>
+pub fn zendriver::expect::download::MatchedDownload::state(&self) -> zendriver::expect::download::DownloadState
+pub fn zendriver::expect::download::MatchedDownload::suggested_filename(&self) -> &str
+pub fn zendriver::expect::download::MatchedDownload::url(&self) -> &str
+pub async fn zendriver::expect::download::MatchedDownload::wait(&self) -> zendriver::error::Result<std::path::PathBuf>
 impl core::clone::Clone for zendriver::expect::download::MatchedDownload
 pub fn zendriver::expect::download::MatchedDownload::clone(&self) -> zendriver::expect::download::MatchedDownload
 impl core::fmt::Debug for zendriver::expect::download::MatchedDownload
@@ -5246,10 +5247,11 @@ impl<T> typenum::type_operators::Same for zendriver::expect::dialog::DialogType
 pub type zendriver::expect::dialog::DialogType::Output = T
 impl<V, T> ppv_lite86::types::VZip<V> for zendriver::expect::dialog::DialogType where V: ppv_lite86::types::MultiLane<T>
 pub fn zendriver::expect::dialog::DialogType::vzip(self) -> V
-pub enum zendriver::DownloadProgressState
+#[non_exhaustive] pub enum zendriver::DownloadProgressState
 pub zendriver::DownloadProgressState::Canceled
 pub zendriver::DownloadProgressState::Completed
 pub zendriver::DownloadProgressState::InProgress
+pub zendriver::DownloadProgressState::Unknown
 impl core::clone::Clone for zendriver::expect::download::DownloadProgressState
 pub fn zendriver::expect::download::DownloadProgressState::clone(&self) -> zendriver::expect::download::DownloadProgressState
 impl core::cmp::Eq for zendriver::expect::download::DownloadProgressState
@@ -7658,15 +7660,15 @@ pub type zendriver::expect::dialog::MatchedDialog::Output = T
 impl<V, T> ppv_lite86::types::VZip<V> for zendriver::expect::dialog::MatchedDialog where V: ppv_lite86::types::MultiLane<T>
 pub fn zendriver::expect::dialog::MatchedDialog::vzip(self) -> V
 pub struct zendriver::MatchedDownload
-pub zendriver::MatchedDownload::download_dir: std::path::PathBuf
-pub zendriver::MatchedDownload::guid: alloc::string::String
-pub zendriver::MatchedDownload::session: zendriver_transport::session::SessionHandle
-pub zendriver::MatchedDownload::state: alloc::sync::Arc<tokio::sync::mutex::Mutex<zendriver::expect::download::DownloadState>>
-pub zendriver::MatchedDownload::suggested_filename: alloc::string::String
-pub zendriver::MatchedDownload::url: alloc::string::String
 impl zendriver::expect::download::MatchedDownload
-pub async fn zendriver::expect::download::MatchedDownload::path(&self) -> core::option::Option<std::path::PathBuf>
-pub async fn zendriver::expect::download::MatchedDownload::save_to(self, std::path::PathBuf) -> zendriver::error::Result<()>
+pub fn zendriver::expect::download::MatchedDownload::download_dir(&self) -> &std::path::Path
+pub fn zendriver::expect::download::MatchedDownload::guid(&self) -> &str
+pub fn zendriver::expect::download::MatchedDownload::path(&self) -> core::option::Option<std::path::PathBuf>
+pub async fn zendriver::expect::download::MatchedDownload::save_to(&self, impl core::convert::AsRef<std::path::Path>) -> zendriver::error::Result<()>
+pub fn zendriver::expect::download::MatchedDownload::state(&self) -> zendriver::expect::download::DownloadState
+pub fn zendriver::expect::download::MatchedDownload::suggested_filename(&self) -> &str
+pub fn zendriver::expect::download::MatchedDownload::url(&self) -> &str
+pub async fn zendriver::expect::download::MatchedDownload::wait(&self) -> zendriver::error::Result<std::path::PathBuf>
 impl core::clone::Clone for zendriver::expect::download::MatchedDownload
 pub fn zendriver::expect::download::MatchedDownload::clone(&self) -> zendriver::expect::download::MatchedDownload
 impl core::fmt::Debug for zendriver::expect::download::MatchedDownload
