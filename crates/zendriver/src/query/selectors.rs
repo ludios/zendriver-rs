@@ -913,7 +913,9 @@ pub(crate) async fn extract_array_refs(
 /// on `scope`'s session so an OOPIF frame's node is read over the frame's
 /// own session. Used only by the cross-scope `include_frames` +
 /// `best_match` path to compare each scope's top candidate and pick the
-/// global closest-length winner. A missing/non-numeric result yields
+/// global closest-length winner. A thrown exception (from a page-defined
+/// `innerText` getter, say) fails with [`ZendriverError::JsException`], as
+/// it does in the query itself. A missing/non-numeric result yields
 /// `usize::MAX` so a scope whose length cannot be read never wins a tie.
 pub(crate) async fn text_len_of(scope: &QueryScope<'_>, node: &RemoteRef) -> Result<usize> {
     let result = scope
@@ -928,6 +930,9 @@ pub(crate) async fn text_len_of(scope: &QueryScope<'_>, node: &RemoteRef) -> Res
             }),
         )
         .await?;
+    if let Some(e) = ZendriverError::js_exception_in(&result) {
+        return Err(e);
+    }
     Ok(result["result"]["value"]
         .as_u64()
         .map_or(usize::MAX, |v| v as usize))
