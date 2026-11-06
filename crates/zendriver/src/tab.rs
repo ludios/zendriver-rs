@@ -34,7 +34,7 @@ use crate::frame::Frame;
 use crate::input::InputController;
 use crate::isolated_world::IsolatedWorldCache;
 use crate::load_tracker::{Destination, LoadTracker};
-use crate::navigation::NavigationExpectation;
+use crate::navigation::{NavigationExpectation, Target};
 use crate::network_idle::IdleLossPolicy;
 use crate::screenshot::ScreenshotBuilder;
 use crate::url_matcher::UrlMatcher;
@@ -1066,10 +1066,9 @@ impl Tab {
     /// # Errors
     ///
     /// Returns [`ZendriverError::Timeout`] when the main frame is still
-    /// loading after 30s; [`ZendriverError::Navigation`] if Chrome closes
-    /// the tab's connection first (for example because Chrome exited). A
-    /// connection that zendriver itself shuts down cleanly doesn't end the
-    /// wait early: it runs to the timeout.
+    /// loading after 30s; [`ZendriverError::Navigation`] if the tab's
+    /// connection closes first, whether Chrome exited or zendriver shut it
+    /// down, as closing the tab does.
     ///
     /// # Examples
     ///
@@ -1119,8 +1118,10 @@ impl Tab {
     /// within the timeout; [`ZendriverError::EventStreamIncomplete`] when
     /// events were lost (the subscriber lagged, or the connection was
     /// replaced), so the navigation may have happened unseen; and
-    /// [`ZendriverError::Navigation`] if Chrome closes the tab's connection
-    /// first.
+    /// [`ZendriverError::Navigation`] when the navigation ends on Chrome's
+    /// error page because its destination couldn't be reached, or if the
+    /// tab's connection closes first, whether Chrome exited or zendriver
+    /// shut it down, as closing the tab does.
     ///
     /// # Examples
     ///
@@ -1138,7 +1139,11 @@ impl Tab {
     /// # Ok(()) }
     /// ```
     pub fn expect_navigation(&self) -> NavigationExpectation {
-        NavigationExpectation::new(&self.inner.session, self.target_id(), None, false)
+        NavigationExpectation::new(
+            &self.inner.session,
+            self.target_id(),
+            Target::NextNavigation,
+        )
     }
 
     /// Wait until the main frame is at a URL matching `pattern`, and the
@@ -1157,9 +1162,10 @@ impl Tab {
     /// Navigations to other URLs in between are skipped, so this can wait
     /// out a login that bounces through another site. Unlike
     /// [`Tab::expect_navigation`], it is safe to call after the action that
-    /// navigates: being at a URL is a state, so nothing can slip past. Mind
-    /// a pattern that the page you start from matches too: the wait ends
-    /// there at once.
+    /// navigates, as long as the tab stays at the destination: being at a
+    /// URL is a state. (A matching page that the tab leaves again before
+    /// the call is missed.) Mind a pattern that the page you start from
+    /// matches too: the wait ends there at once.
     ///
     /// Bounded by a 30 s timeout, which
     /// [`NavigationExpectation::timeout`](crate::NavigationExpectation::timeout)
@@ -1169,8 +1175,11 @@ impl Tab {
     ///
     /// Returns [`ZendriverError::Timeout`] when the tab isn't at a matching,
     /// loaded page within the timeout, and [`ZendriverError::Navigation`]
-    /// if Chrome closes the tab's connection first. Lost events don't end
-    /// the wait: it reads the URL again instead.
+    /// when a navigation to a matching URL ends on Chrome's error page
+    /// because it couldn't be reached, or if the tab's connection closes
+    /// first, whether Chrome exited or zendriver shut it down, as closing
+    /// the tab does. Lost events don't end the wait: it asks the page where
+    /// it is instead, and then reports `same_document` as `false`.
     ///
     /// # Examples
     ///
@@ -1189,8 +1198,8 @@ impl Tab {
     /// # Ok(()) }
     /// ```
     pub fn wait_for_url(&self, pattern: impl Into<UrlMatcher>) -> NavigationExpectation {
-        let to = Some(pattern.into());
-        NavigationExpectation::new(&self.inner.session, self.target_id(), to, true)
+        let target = Target::Url(pattern.into());
+        NavigationExpectation::new(&self.inner.session, self.target_id(), target)
     }
 
     /// Block until the document reaches at least the `until` load milestone.

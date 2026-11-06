@@ -3390,9 +3390,11 @@ pub fn zendriver::navigation::NavigationExpectation::fmt(&self, &mut core::fmt::
 impl core::future::future::Future for zendriver::navigation::NavigationExpectation
 pub type zendriver::navigation::NavigationExpectation::Output = core::result::Result<zendriver::navigation::Navigation, zendriver::error::ZendriverError>
 pub fn zendriver::navigation::NavigationExpectation::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+impl core::ops::drop::Drop for zendriver::navigation::NavigationExpectation
+pub fn zendriver::navigation::NavigationExpectation::drop(&mut self)
 impl core::marker::Freeze for zendriver::navigation::NavigationExpectation
 impl core::marker::Send for zendriver::navigation::NavigationExpectation
-impl !core::marker::Sync for zendriver::navigation::NavigationExpectation
+impl core::marker::Sync for zendriver::navigation::NavigationExpectation
 impl core::marker::Unpin for zendriver::navigation::NavigationExpectation
 impl core::marker::UnsafeUnpin for zendriver::navigation::NavigationExpectation
 impl !core::panic::unwind_safe::RefUnwindSafe for zendriver::navigation::NavigationExpectation
@@ -8041,9 +8043,11 @@ pub fn zendriver::navigation::NavigationExpectation::fmt(&self, &mut core::fmt::
 impl core::future::future::Future for zendriver::navigation::NavigationExpectation
 pub type zendriver::navigation::NavigationExpectation::Output = core::result::Result<zendriver::navigation::Navigation, zendriver::error::ZendriverError>
 pub fn zendriver::navigation::NavigationExpectation::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+impl core::ops::drop::Drop for zendriver::navigation::NavigationExpectation
+pub fn zendriver::navigation::NavigationExpectation::drop(&mut self)
 impl core::marker::Freeze for zendriver::navigation::NavigationExpectation
 impl core::marker::Send for zendriver::navigation::NavigationExpectation
-impl !core::marker::Sync for zendriver::navigation::NavigationExpectation
+impl core::marker::Sync for zendriver::navigation::NavigationExpectation
 impl core::marker::Unpin for zendriver::navigation::NavigationExpectation
 impl core::marker::UnsafeUnpin for zendriver::navigation::NavigationExpectation
 impl !core::panic::unwind_safe::RefUnwindSafe for zendriver::navigation::NavigationExpectation

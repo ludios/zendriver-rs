@@ -233,16 +233,20 @@ async fn redirect(Path(remaining): Path<u32>) -> Response {
     (StatusCode::FOUND, [(header::LOCATION, next)]).into_response()
 }
 
-/// A page that leaves for the URL in `to` once it has loaded: a stop on the
-/// way, which commits and loads like any page before the next one does.
+/// `/hop?to=URL`: a page that leaves for `URL` (default `/plain`) right
+/// after its `load` event, so it commits and loads like any page, and only
+/// then does the next one.
 async fn hop(params: Params) -> Html<String> {
-    let to = json!(params.get("to").map_or("/plain", String::as_str));
+    // JSON is JavaScript here, once `</` can't end the script element.
+    let to = json!(params.get("to").map_or("/plain", String::as_str))
+        .to_string()
+        .replace("</", "<\\/");
     page(
         "Hop",
         "",
         &format!(
             r#"<h1 id="heading">Hop</h1>
-<script>addEventListener('load', () => {{ location.href = {to}; }});</script>"#
+<script>addEventListener('load', () => setTimeout(() => {{ location.href = {to}; }}, 0));</script>"#
         ),
     )
 }
@@ -549,6 +553,7 @@ fn canned_routes() -> Router {
 /// | `/form` | `#form` with input `#q` that GETs `/form-result` on submit (Enter or `#submit`) |
 /// | `/form-result?q=V` | Titled `Form result`; shows `V` in `#q` |
 /// | `/redirect/N` | `N` (at least 1) 302s, then `/plain?title=Redirected` |
+/// | `/hop?to=URL` | Titled `Hop`; leaves for `URL` (default `/plain`) right after its `load` event, so it commits and loads before the next page does |
 /// | `/iframe-same-origin` | `#child` iframe of `/frame-child` on the same origin |
 /// | `/iframe-cross-site` | `#child` iframe of `/frame-child` on the other test site |
 /// | `/frame-child` | `#child-host` showing its host, and `#child-button` |

@@ -1,16 +1,25 @@
-//! Waiting for a navigation of the main frame that zendriver didn't start:
-//! one that a click, a key press or the page's own script starts. The entry
-//! points are [`Tab::expect_navigation`] and [`Tab::wait_for_url`].
+//! Waiting for the main frame to navigate, or to be at a URL. The entry
+//! points are [`Tab::expect_navigation`], for a navigation that a click, a
+//! key press or the page's own script starts, and [`Tab::wait_for_url`],
+//! for a destination, whoever starts the navigation there.
 //!
 //! Chrome announces each navigation of a frame when it commits:
 //! `Page.frameNavigated` when a new document replaces the old one (also on
-//! a reload, and on a back-forward-cache restore), and
-//! `Page.navigatedWithinDocument` when the document stays and only its URL
-//! changes (a fragment, or the History API). A new document then loads
-//! until `Page.frameStoppedLoading`. The events need the Page domain, which
-//! every [`Tab`] enables when it is created. They come from a broadcast
-//! channel that never replays an event sent before subscribing, so an
-//! expectation subscribes when it is created, before the caller acts.
+//! a reload, on a back-forward-cache restore, and for the error page of a
+//! navigation that failed), and `Page.navigatedWithinDocument` when the
+//! document stays and only its URL changes (a fragment, or the History
+//! API). A new document then loads until `Page.frameStoppedLoading`. The
+//! events need the Page domain, which every [`Tab`] enables when it is
+//! created. They come from a broadcast channel that never replays an event
+//! sent before subscribing, so an expectation subscribes when it is
+//! created, before the caller acts, and reads the events in a task of its
+//! own from then on.
+//!
+//! Where the frame is now, and whether its document has loaded, only the
+//! page can say: `Target.getTargetInfo` reports a navigation's URL while
+//! it is still pending, and the URL a failed navigation was to. So a wait
+//! for a URL asks the page for `location.href` and `document.readyState`,
+//! together, in one `Runtime.evaluate`.
 //!
 //! [`Tab`]: crate::Tab
 //! [`Tab::expect_navigation`]: crate::Tab::expect_navigation
@@ -24,16 +33,20 @@ use std::time::Duration;
 
 use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
+use tokio::task::JoinHandle;
 use tokio::time::Sleep;
+use tracing::warn;
 use url::Url;
 use zendriver_transport::{AccountedRawEvent, SessionHandle};
 
 use crate::error::{Result, ZendriverError};
-use crate::load_tracker::LoadTracker;
 use crate::url_matcher::UrlMatcher;
 
 /// How long a [`NavigationExpectation`] waits unless told otherwise.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The scheme of Chrome's error page, shown for a navigation that failed.
+const ERROR_PAGE: &str = "chrome-error://";
 
 /// Where a wait for a navigation ended: the result of
 /// [`Tab::expect_navigation`](crate::Tab::expect_navigation) and
@@ -44,19 +57,24 @@ pub struct Navigation {
     /// The main frame's URL when the wait ended, fragment included.
     pub url: Url,
     /// Whether the document that was there when the wait began is still
-    /// there: the navigation changed only the URL's fragment or the history
-    /// entry (the History API), or, for `wait_for_url`, the tab was already
-    /// at a matching URL. The page's state and its element handles survived
-    /// then. `false` when a new document loaded.
+    /// there, so that the page's state and its element handles survived:
+    /// `true` when every navigation the wait saw stayed in that document
+    /// (a fragment change, or the History API), or when the wait saw no
+    /// navigation because the tab was already at the URL. `false` when a
+    /// new document replaced it, and after lost events, since a
+    /// replacement may have gone unseen then.
     pub same_document: bool,
 }
 
 /// What the events of the main frame say.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Change {
-    /// A navigation committed: the frame is at `url` now. `same_document`
-    /// is as in [`Navigation`].
-    Committed { url: String, same_document: bool },
+    /// A new document committed: the frame is at `url` now, loading it.
+    NewDocument { url: String },
+    /// Chrome's error page committed, for a navigation to `url` that failed.
+    ErrorPage { url: String },
+    /// The document stayed, and its URL changed to `url`.
+    SameDocument { url: String },
     /// The frame finished loading.
     Stopped,
     /// Events may have been missed: the subscriber lagged, or the
@@ -98,15 +116,19 @@ fn changes(session: &SessionHandle, frame_id: &str) -> Pin<Box<dyn Stream<Item =
                         let params = &event.params;
                         match event.method.as_str() {
                             "Page.frameNavigated" if params["frame"]["id"] == frame_id => {
-                                navigated_url(params).map(|url| Change::Committed {
-                                    url,
-                                    same_document: false,
-                                })
+                                let failed = params["frame"]["unreachableUrl"].as_str();
+                                match failed.filter(|url| !url.is_empty()) {
+                                    Some(url) => Some(Change::ErrorPage {
+                                        url: url.to_owned(),
+                                    }),
+                                    None => {
+                                        navigated_url(params).map(|url| Change::NewDocument { url })
+                                    }
+                                }
                             }
                             "Page.navigatedWithinDocument" if params["frameId"] == frame_id => {
-                                params["url"].as_str().map(|url| Change::Committed {
+                                params["url"].as_str().map(|url| Change::SameDocument {
                                     url: url.to_owned(),
-                                    same_document: true,
                                 })
                             }
                             "Page.frameStoppedLoading" if params["frameId"] == frame_id => {
@@ -127,14 +149,6 @@ fn changes(session: &SessionHandle, frame_id: &str) -> Pin<Box<dyn Stream<Item =
     )
 }
 
-/// The main frame's URL now, fragment included, from the browser process.
-async fn current_url(session: &SessionHandle) -> Result<String> {
-    let reply = session.call("Target.getTargetInfo", json!({})).await?;
-    let url = reply["targetInfo"]["url"].as_str();
-    url.map(str::to_owned)
-        .ok_or_else(|| ZendriverError::Navigation("Target.getTargetInfo returned no url".into()))
-}
-
 /// A [`Navigation`] that ended at `url`.
 fn navigation(url: &str, same_document: bool) -> Result<Navigation> {
     let url = Url::parse(url).map_err(|e| {
@@ -143,85 +157,177 @@ fn navigation(url: &str, same_document: bool) -> Result<Navigation> {
     Ok(Navigation { url, same_document })
 }
 
-/// The document that the main frame `frame_id` on `session` shows now, as
-/// the [`Navigation`] a wait can end on without any navigation: `Some` once
-/// it has loaded, if its URL `matches` both before and after the load (the
-/// frame may move on meanwhile).
-async fn current_if_matching(
+/// The error of a navigation to `url` that ended on Chrome's error page.
+fn failed(url: &str) -> ZendriverError {
+    ZendriverError::Navigation(format!("the navigation to {url} failed"))
+}
+
+/// Where the page is and whether it has loaded, as the page itself says:
+/// `location.href` (fragment included) and `document.readyState`. `None`
+/// if the page can't answer, which is logged.
+async fn ask_page(session: &SessionHandle) -> Option<(String, String)> {
+    let params = json!({
+        "expression": "[location.href, document.readyState]",
+        "returnByValue": true,
+    });
+    let reply = session.call("Runtime.evaluate", params).await;
+    let pair = reply.as_ref().ok().and_then(|reply| {
+        let value = &reply["result"]["value"];
+        Some((value[0].as_str()?.to_owned(), value[1].as_str()?.to_owned()))
+    });
+    if pair.is_none() {
+        warn!(
+            ?reply,
+            "the page didn't say where it is; going by the events"
+        );
+    }
+    pair
+}
+
+/// The URL that the failed navigation behind the error page in the main
+/// frame was to, if Chrome tells.
+async fn unreachable_url(session: &SessionHandle) -> Option<String> {
+    let reply = session.call("Page.getFrameTree", json!({})).await.ok()?;
+    let url = reply["frameTree"]["frame"]["unreachableUrl"].as_str()?;
+    (!url.is_empty()).then(|| url.to_owned())
+}
+
+/// What a [`NavigationExpectation`] waits for.
+pub(crate) enum Target {
+    /// The next navigation of the main frame, wherever it leads.
+    NextNavigation,
+    /// The main frame being at a URL matching this, which it may be
+    /// already. Lost events then make the wait ask the page where it is,
+    /// instead of ending.
+    Url(UrlMatcher),
+}
+
+impl Target {
+    /// Whether a navigation to `url`, or being at `url`, is what the wait
+    /// is for.
+    fn matches(&self, url: &str) -> bool {
+        match self {
+            Self::NextNavigation => true,
+            Self::Url(matcher) => matcher.matches(url),
+        }
+    }
+}
+
+/// The main frame, as far as the wait knows.
+#[derive(Default)]
+struct Frame {
+    /// A new document has committed and hasn't finished loading.
+    loading: bool,
+    /// A new document has replaced the one the wait began with, or may
+    /// have, among lost events.
+    replaced: bool,
+    /// The matching URL the frame is at, to report once its document has
+    /// loaded.
+    candidate: Option<String>,
+}
+
+impl Frame {
+    /// The [`Navigation`] to end the wait on, if the frame is at a matching
+    /// URL and has loaded.
+    fn arrived(&mut self) -> Result<Option<Navigation>> {
+        if self.loading {
+            return Ok(None);
+        }
+        let Some(url) = self.candidate.take() else {
+            return Ok(None);
+        };
+        navigation(&url, !self.replaced).map(Some)
+    }
+}
+
+/// Take what the page says about where it is and whether it has loaded
+/// into `frame`, and return the [`Navigation`] to end the wait on, if the
+/// frame is at a URL matching `target` and has loaded. If the page can't
+/// answer, the events alone decide.
+///
+/// # Errors
+///
+/// [`ZendriverError::Navigation`] when the frame shows the error page of a
+/// failed navigation to a matching URL.
+async fn consult_page(
     session: &SessionHandle,
-    frame_id: &str,
-    matches: &impl Fn(&str) -> bool,
+    target: &Target,
+    frame: &mut Frame,
 ) -> Result<Option<Navigation>> {
-    if !matches(&current_url(session).await?) {
-        return Ok(None);
+    let Some((url, ready_state)) = ask_page(session).await else {
+        return frame.arrived();
+    };
+    frame.loading = ready_state != "complete";
+    frame.candidate = None;
+    if url.starts_with(ERROR_PAGE) {
+        return match unreachable_url(session).await {
+            Some(failed_url) if target.matches(&failed_url) => Err(failed(&failed_url)),
+            _ => Ok(None),
+        };
     }
-    // The wait's own timeout bounds this.
-    LoadTracker::current(session, frame_id)
-        .wait(Duration::MAX)
-        .await?;
-    let url = current_url(session).await?;
-    if !matches(&url) {
-        return Ok(None);
-    }
-    navigation(&url, true).map(Some)
+    frame.candidate = target.matches(&url).then_some(url);
+    frame.arrived()
 }
 
-/// What a [`NavigationExpectation`] waits for, fixed when it is created.
-struct Armed {
+/// Wait for `target` on the main frame of `session`, whose `changes` these
+/// are, with no time limit.
+async fn wait(
     session: SessionHandle,
-    frame_id: String,
-    changes: Pin<Box<dyn Stream<Item = Change> + Send>>,
-    /// Only a navigation to a URL matching this counts; `None` for any.
-    to: Option<UrlMatcher>,
-    /// Whether the document the tab shows when the wait begins counts too,
-    /// if its URL matches (`wait_for_url`). Lost events then make the wait
-    /// read the URL again instead of ending.
-    accept_current: bool,
-}
-
-/// Wait as `armed` says, with no time limit.
-async fn wait(armed: Armed) -> Result<Navigation> {
-    let Armed {
-        session,
-        frame_id,
-        mut changes,
-        to,
-        accept_current,
-    } = armed;
-    let matches = |url: &str| to.as_ref().is_none_or(|to| to.matches(url));
-    if accept_current {
-        if let Some(found) = current_if_matching(&session, &frame_id, &matches).await? {
+    mut changes: Pin<Box<dyn Stream<Item = Change> + Send>>,
+    target: Target,
+) -> Result<Navigation> {
+    let asks_page = matches!(target, Target::Url(_));
+    let mut frame = Frame::default();
+    if asks_page {
+        if let Some(found) = consult_page(&session, &target, &mut frame).await? {
             return Ok(found);
         }
     }
-    // The URL of a matching new document that is loading.
-    let mut loading: Option<String> = None;
     while let Some(change) = changes.next().await {
         match change {
-            Change::Committed { url, same_document } => {
-                if !matches(&url) {
-                    loading = None;
-                } else if same_document && loading.is_none() {
-                    return navigation(&url, true);
-                } else {
-                    // A new document; or the loading one changed its URL.
-                    loading = Some(url);
+            Change::NewDocument { url } => {
+                frame.replaced = true;
+                frame.loading = true;
+                frame.candidate = target.matches(&url).then_some(url);
+            }
+            Change::ErrorPage { url } => {
+                frame.replaced = true;
+                frame.loading = true;
+                frame.candidate = None;
+                if target.matches(&url) {
+                    return Err(failed(&url));
                 }
+            }
+            Change::SameDocument { url } => {
+                frame.candidate = target.matches(&url).then_some(url);
             }
             Change::Stopped => {
-                if let Some(url) = loading.take() {
-                    return navigation(&url, false);
-                }
+                frame.loading = false;
             }
             Change::Lost => {
-                if !accept_current {
+                if !asks_page {
                     return Err(ZendriverError::EventStreamIncomplete);
                 }
-                if let Some(found) = current_if_matching(&session, &frame_id, &matches).await? {
+                frame.replaced = true;
+                if let Some(found) = consult_page(&session, &target, &mut frame).await? {
                     return Ok(found);
                 }
-                loading = None;
+                continue;
             }
+        }
+        if frame.loading || frame.candidate.is_none() {
+            continue;
+        }
+        // The events say the frame is at a matching URL and has loaded. For
+        // a URL, the page confirms it, since events queued before it last
+        // answered can be older than that answer.
+        let found = if asks_page {
+            consult_page(&session, &target, &mut frame).await?
+        } else {
+            frame.arrived()?
+        };
+        if let Some(found) = found {
+            return Ok(found);
         }
     }
     Err(ZendriverError::Navigation(
@@ -235,41 +341,32 @@ async fn wait(armed: Armed) -> Result<Navigation> {
 /// [`Navigation`] the wait ended on, or with [`ZendriverError::Timeout`]
 /// after 30 s unless [`NavigationExpectation::timeout`] says otherwise.
 ///
-/// Subscribes to the main frame's events when created, so a navigation
-/// after that can't be missed, however long it takes until the first
-/// `.await`.
+/// Subscribes to the main frame's events when it is created, and reads
+/// them in a task of its own from then on, so a navigation after that can't
+/// be missed, however long it takes until the first `.await`. Dropping it
+/// ends the task.
+#[must_use = "does nothing unless awaited"]
 pub struct NavigationExpectation {
-    wait: Pin<Box<dyn Future<Output = Result<Navigation>> + Send>>,
+    task: JoinHandle<Result<Navigation>>,
     timeout: Duration,
     /// Armed by the first poll, so that [`Self::timeout`] applies.
     sleep: Option<Pin<Box<Sleep>>>,
 }
 
 impl NavigationExpectation {
-    /// Wait for a navigation of the main frame `frame_id` on `session` to a
-    /// URL matching `to` (any URL if `None`); or, when `accept_current`,
-    /// for the frame to be at such a URL, which it may be already.
-    pub(crate) fn new(
-        session: &SessionHandle,
-        frame_id: &str,
-        to: Option<UrlMatcher>,
-        accept_current: bool,
-    ) -> Self {
-        let armed = Armed {
-            session: session.clone(),
-            frame_id: frame_id.to_owned(),
-            changes: changes(session, frame_id),
-            to,
-            accept_current,
-        };
+    /// Wait for `target` on the main frame `frame_id` of `session`.
+    pub(crate) fn new(session: &SessionHandle, frame_id: &str, target: Target) -> Self {
+        let changes = changes(session, frame_id);
         Self {
-            wait: Box::pin(wait(armed)),
+            task: tokio::spawn(wait(session.clone(), changes, target)),
             timeout: DEFAULT_TIMEOUT,
             sleep: None,
         }
     }
 
-    /// Override the default 30 s timeout. Call it before the first `.await`.
+    /// Override the default 30 s timeout. Call it before the first `.await`:
+    /// the clock starts at the first poll, not when the expectation is
+    /// created.
     ///
     /// # Examples
     ///
@@ -300,12 +397,23 @@ impl fmt::Debug for NavigationExpectation {
     }
 }
 
+impl Drop for NavigationExpectation {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 impl Future for NavigationExpectation {
     type Output = Result<Navigation>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Poll::Ready(res) = self.wait.as_mut().poll(cx) {
-            return Poll::Ready(res);
+        if let Poll::Ready(res) = Pin::new(&mut self.task).poll(cx) {
+            // The task only ends by returning, so this is its result.
+            return Poll::Ready(res.unwrap_or_else(|e| {
+                Err(ZendriverError::Navigation(format!(
+                    "the wait for a navigation ended unexpectedly: {e}"
+                )))
+            }));
         }
         let timeout = self.timeout;
         let sleep = self
@@ -359,17 +467,19 @@ mod tests {
         mock.reply(id, reply).await;
     }
 
-    /// Answer the expectation's question about the current URL with `url`.
-    async fn answer_url(mock: &mut MockConnection, url: &str) {
-        let info = json!({ "targetInfo": { "url": url } });
-        answer(mock, "Target.getTargetInfo", info).await;
+    /// Emit the commit of Chrome's error page in frame `F` on session `S1`,
+    /// for a navigation to `url` that failed.
+    async fn error_page(mock: &MockConnection, url: &str) {
+        let frame =
+            json!({ "id": "F", "url": "chrome-error://chromewebdata/", "unreachableUrl": url });
+        mock.emit_event_for_session("Page.frameNavigated", json!({ "frame": frame }), "S1")
+            .await;
     }
 
-    /// Answer the probe of the current document's load state with
-    /// `ready_state`.
-    async fn answer_probe(mock: &mut MockConnection, ready_state: &str) {
-        answer(mock, "Page.enable", json!({})).await;
-        let value = json!({ "result": { "value": ready_state } });
+    /// Answer the wait's question to the page: it is at `url`, and its
+    /// `document.readyState` is `ready_state`.
+    async fn answer_page(mock: &mut MockConnection, url: &str, ready_state: &str) {
+        let value = json!({ "result": { "value": [url, ready_state] } });
         answer(mock, "Runtime.evaluate", value).await;
     }
 
@@ -385,12 +495,13 @@ mod tests {
     }
 
     fn expect_navigation(conn: &Connection) -> NavigationExpectation {
-        NavigationExpectation::new(&SessionHandle::new(conn.clone(), "S1"), "F", None, false)
+        let session = SessionHandle::new(conn.clone(), "S1");
+        NavigationExpectation::new(&session, "F", Target::NextNavigation)
     }
 
     fn wait_for_url(conn: &Connection, pattern: &str) -> NavigationExpectation {
         let session = SessionHandle::new(conn.clone(), "S1");
-        NavigationExpectation::new(&session, "F", Some(pattern.into()), true)
+        NavigationExpectation::new(&session, "F", Target::Url(pattern.into()))
     }
 
     fn reached(url: &str, same_document: bool) -> Navigation {
@@ -456,7 +567,7 @@ mod tests {
     async fn wait_for_url_ends_on_the_first_matching_document_that_loads() {
         let (mut mock, conn) = MockConnection::pair();
         let mut waiting = tokio::spawn(wait_for_url(&conn, "/target"));
-        answer_url(&mut mock, "http://a.test/start").await;
+        answer_page(&mut mock, "http://a.test/start", "complete").await;
         commit(&mock, "http://a.test/other", false).await;
         stop(&mock).await;
         commit(&mock, "http://a.test/target?replaced", false).await;
@@ -466,6 +577,8 @@ mod tests {
         assert!(early.is_err(), "ended on a page at another URL: {early:?}");
         commit(&mock, "http://a.test/target", false).await;
         stop(&mock).await;
+        // The page confirms what the events said.
+        answer_page(&mut mock, "http://a.test/target", "complete").await;
         let found = waiting.await.unwrap().expect("the target loaded");
         assert_eq!(found, reached("http://a.test/target", false));
         conn.shutdown();
@@ -475,15 +588,14 @@ mod tests {
     /// has loaded: at once if it has, else at the page's stop.
     #[tokio::test]
     async fn wait_for_url_ends_on_the_page_already_at_the_url() {
-        for (ready_state, stops) in [("complete", false), ("loading", true)] {
+        for (ready_state, stops) in [("complete", false), ("interactive", true)] {
             let (mut mock, conn) = MockConnection::pair();
             let waiting = tokio::spawn(wait_for_url(&conn, "/target"));
-            answer_url(&mut mock, "http://a.test/target").await;
-            answer_probe(&mut mock, ready_state).await;
+            answer_page(&mut mock, "http://a.test/target", ready_state).await;
             if stops {
                 stop(&mock).await;
+                answer_page(&mut mock, "http://a.test/target", "complete").await;
             }
-            answer_url(&mut mock, "http://a.test/target").await;
             let found = waiting
                 .await
                 .unwrap()
@@ -498,7 +610,8 @@ mod tests {
     }
 
     /// After lost events, `expect_navigation` can't tell whether the
-    /// navigation happened, so it ends; `wait_for_url` reads the URL again.
+    /// navigation happened, so it ends; `wait_for_url` asks the page where
+    /// it is, and no longer vouches for the document.
     #[tokio::test]
     async fn lost_events_end_expect_navigation_and_make_wait_for_url_look_again() {
         let (mut mock, conn) = MockConnection::pair();
@@ -513,17 +626,105 @@ mod tests {
 
         let (mut mock, conn) = MockConnection::pair();
         let waiting = tokio::spawn(wait_for_url(&conn, "/target"));
-        answer_url(&mut mock, "http://a.test/start").await;
+        answer_page(&mut mock, "http://a.test/start", "complete").await;
         delivered(&mock, &conn).await;
         mock.reconnect(&conn);
-        answer_url(&mut mock, "http://a.test/target").await;
-        answer_probe(&mut mock, "complete").await;
-        answer_url(&mut mock, "http://a.test/target").await;
+        answer_page(&mut mock, "http://a.test/target", "complete").await;
         let found = waiting
             .await
             .unwrap()
             .expect("found at the URL after lost events");
-        assert_eq!(found, reached("http://a.test/target", true));
+        assert_eq!(found, reached("http://a.test/target", false));
+        conn.shutdown();
+    }
+
+    /// A URL change within a document that is still loading waits for that
+    /// document's load, though the document committed at a URL that didn't
+    /// match.
+    #[tokio::test]
+    async fn a_url_change_in_a_loading_document_waits_for_its_load() {
+        let (mut mock, conn) = MockConnection::pair();
+        let mut waiting = tokio::spawn(wait_for_url(&conn, "/target"));
+        answer_page(&mut mock, "http://a.test/start", "complete").await;
+        commit(&mock, "http://a.test/app", false).await;
+        commit(&mock, "http://a.test/app/target", true).await;
+        let early = tokio::time::timeout(SHORT, &mut waiting).await;
+        assert!(
+            early.is_err(),
+            "ended before the document loaded: {early:?}"
+        );
+        stop(&mock).await;
+        answer_page(&mut mock, "http://a.test/app/target", "complete").await;
+        let found = waiting.await.unwrap().expect("loaded");
+        assert_eq!(found, reached("http://a.test/app/target", false));
+        conn.shutdown();
+    }
+
+    /// Events queued while the page was asked where it is can be older than
+    /// its answer: the page has the last word.
+    #[tokio::test]
+    async fn wait_for_url_trusts_the_page_over_older_events() {
+        let (mut mock, conn) = MockConnection::pair();
+        let mut waiting = tokio::spawn(wait_for_url(&conn, "/target"));
+        commit(&mock, "http://a.test/target", false).await;
+        stop(&mock).await;
+        // The frame has moved on since those events, the page says, twice:
+        // once asked at the start, once asked to confirm them.
+        answer_page(&mut mock, "http://a.test/final", "complete").await;
+        answer_page(&mut mock, "http://a.test/final", "complete").await;
+        let early = tokio::time::timeout(SHORT, &mut waiting).await;
+        assert!(
+            early.is_err(),
+            "ended on a URL the frame had left: {early:?}"
+        );
+        commit(&mock, "http://a.test/target", false).await;
+        stop(&mock).await;
+        answer_page(&mut mock, "http://a.test/target", "complete").await;
+        let found = waiting.await.unwrap().expect("the target loaded");
+        assert_eq!(found, reached("http://a.test/target", false));
+        conn.shutdown();
+    }
+
+    /// A navigation that ends on Chrome's error page fails the wait for its
+    /// URL, whether the events or the page tell of it; another URL's
+    /// failure is skipped.
+    #[tokio::test]
+    async fn a_failed_navigation_fails_the_wait() {
+        let (mock, conn) = MockConnection::pair();
+        let waiting = expect_navigation(&conn);
+        error_page(&mock, "http://127.0.0.1:9/nope").await;
+        let res = tokio::time::timeout(LONG, waiting).await.unwrap();
+        assert!(
+            matches!(&res, Err(ZendriverError::Navigation(m)) if m.contains("/nope")),
+            "{res:?}"
+        );
+        conn.shutdown();
+
+        let (mut mock, conn) = MockConnection::pair();
+        let mut waiting = tokio::spawn(wait_for_url(&conn, "/target"));
+        answer_page(&mut mock, "http://a.test/start", "complete").await;
+        error_page(&mock, "http://a.test/other").await;
+        let early = tokio::time::timeout(SHORT, &mut waiting).await;
+        assert!(early.is_err(), "ended on another URL's failure: {early:?}");
+        error_page(&mock, "http://a.test/target").await;
+        let res = waiting.await.unwrap();
+        assert!(
+            matches!(&res, Err(ZendriverError::Navigation(m)) if m.contains("/target")),
+            "{res:?}"
+        );
+        conn.shutdown();
+
+        let (mut mock, conn) = MockConnection::pair();
+        let waiting = tokio::spawn(wait_for_url(&conn, "/target"));
+        answer_page(&mut mock, "chrome-error://chromewebdata/", "complete").await;
+        let frame =
+            json!({ "frameTree": { "frame": { "unreachableUrl": "http://a.test/target" } } });
+        answer(&mut mock, "Page.getFrameTree", frame).await;
+        let res = waiting.await.unwrap();
+        assert!(
+            matches!(&res, Err(ZendriverError::Navigation(m)) if m.contains("/target")),
+            "{res:?}"
+        );
         conn.shutdown();
     }
 
