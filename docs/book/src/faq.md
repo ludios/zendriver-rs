@@ -81,6 +81,32 @@ or running a custom-built debug Chrome. The binary needs to support
 `DevTools listening on ws://...` line — every recent stable Chrome /
 Chromium / Edge does.
 
+## How do I set an environment variable for Chrome?
+
+With `.env(key, value)` on the builder. It sets the variable only for the
+Chrome that `launch()` starts (and Chrome's child processes). Chrome still
+inherits the rest of your program's environment, and your program's own
+environment doesn't change.
+
+It's for what Chrome reads only from its environment. For example, to run
+headed Chrome on a Wayland compositor that your program started (such as a
+headless sway), give Chrome the compositor's socket:
+
+```rust,no_run
+# async fn ex() -> zendriver::Result<()> {
+let browser = zendriver::Browser::builder()
+    .headless(false)
+    .arg("--ozone-platform=wayland")
+    .env("WAYLAND_DISPLAY", "/tmp/my-sway/wayland-1")
+    .launch()
+    .await?;
+# Ok(()) }
+```
+
+Chrome has no command-line switch for the Wayland socket. Pass
+`--ozone-platform=wayland` too: without it, Chrome can choose X11 instead
+when `DISPLAY` is also set.
+
 ## Why is my `evaluate()` not seeing `window.foo`?
 
 `tab.evaluate()` runs in an **isolated world** by default — a sandbox

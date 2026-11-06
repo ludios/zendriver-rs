@@ -15,6 +15,7 @@ same shape).
 |-----------|------------|--------------|
 | Launch browser | `await chromium.launch()` | `Browser::builder().launch().await?` |
 | Launch headed | `chromium.launch({ headless: false })` | `Browser::builder().headless(false).launch().await?` |
+| Set an environment variable for Chrome | `chromium.launch({ env: { TZ: "UTC" } })` (Chrome then inherits none of `process.env`) | `Browser::builder().env("TZ", "UTC").launch().await?` (Chrome still inherits the rest of the environment) |
 | Open a tab / page | `await context.newPage()` | `browser.new_tab().await?` |
 | Reuse first tab | `(await context.pages())[0]` | `browser.main_tab()` |
 | Navigate | `await page.goto(url)` | `tab.goto(url).await?` |

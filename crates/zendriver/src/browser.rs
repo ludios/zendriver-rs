@@ -19,6 +19,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock, Weak};
@@ -652,6 +653,10 @@ pub struct BrowserBuilder {
     /// [`BrowserBuilder::force_open_shadow_roots`]. **Detectable.**
     pub(crate) force_open_shadow_roots: bool,
     pub(crate) extra_args: Vec<String>,
+    /// Environment variables set on the Chrome process, in call order, on
+    /// top of the environment that Chrome inherits. See
+    /// [`BrowserBuilder::env`].
+    pub(crate) env: Vec<(OsString, OsString)>,
     pub(crate) stealth: Option<StealthProfile>,
     /// Explicit input-timing profile, decoupled from [`Self::stealth`]. `None`
     /// (the default) falls back to the timing implied by [`Self::stealth`]
@@ -728,6 +733,14 @@ impl std::fmt::Debug for BrowserBuilder {
             .field("expert", &self.expert)
             .field("force_open_shadow_roots", &self.force_open_shadow_roots)
             .field("extra_args", &self.extra_args)
+            .field(
+                "env",
+                &self
+                    .env
+                    .iter()
+                    .map(|(key, _)| format!("{}=<redacted>", key.to_string_lossy()))
+                    .collect::<Vec<_>>(),
+            )
             .field("stealth", &self.stealth)
             .field("input_profile", &self.input_profile)
             .field("persona", &self.persona)
@@ -1291,6 +1304,50 @@ impl BrowserBuilder {
     #[must_use]
     pub fn args(mut self, flags: impl IntoIterator<Item = String>) -> Self {
         self.extra_args.extend(flags);
+        self
+    }
+
+    /// Set the environment variable `key` to `value` for the Chrome process
+    /// that [`BrowserBuilder::launch`] starts, and so for its child
+    /// processes.
+    ///
+    /// Chrome still inherits the rest of this process's environment, and
+    /// this process's own environment is not changed. If several calls set
+    /// the same `key`, the last call wins. [`BrowserBuilder::connect`]
+    /// ignores this, because it starts no process.
+    ///
+    /// Before the launch, the stealth profile may run `chrome --version`
+    /// (to learn Chrome's version) without these variables. So if Chrome
+    /// can't run at all without one of them (such as `LD_LIBRARY_PATH`), set
+    /// it in this process's environment instead; otherwise the stealth
+    /// profile falls back to a fixed version that may not match Chrome's.
+    ///
+    /// Use it for what Chrome reads only from its environment, such as the
+    /// Wayland compositor's socket (`WAYLAND_DISPLAY`) or the time zone
+    /// (`TZ`).
+    ///
+    /// # Panics
+    ///
+    /// If `key` is empty or contains `=`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // Headed Chrome on the Wayland compositor that listens on this socket.
+    /// let builder = zendriver::Browser::builder()
+    ///     .headless(false)
+    ///     .arg("--ozone-platform=wayland")
+    ///     .env("WAYLAND_DISPLAY", "/tmp/my-sway/wayland-1");
+    /// ```
+    #[must_use]
+    pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
+        let key = key.as_ref();
+        assert!(
+            !key.is_empty() && !key.as_encoded_bytes().contains(&b'='),
+            "BrowserBuilder::env: the name of an environment variable must be \
+             non-empty and must not contain '=', but got {key:?}"
+        );
+        self.env.push((key.to_owned(), value.as_ref().to_owned()));
         self
     }
 
@@ -3763,6 +3820,7 @@ impl BrowserBuilder {
         // 6. Spawn chrome + parse WS URL.
         let mut cmd = Command::new(&exe);
         cmd.args(&flags)
+            .envs(self.env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -3958,7 +4016,8 @@ impl BrowserBuilder {
     ///
     /// The spawn-only builder fields — [`BrowserBuilder::executable`],
     /// [`BrowserBuilder::user_data_dir`], [`BrowserBuilder::downloads_dir`],
-    /// and any launch flags ([`BrowserBuilder::arg`] / headless / sandbox /
+    /// [`BrowserBuilder::env`], and any launch flags
+    /// ([`BrowserBuilder::arg`] / headless / sandbox /
     /// channel / lang / user-agent) — are **ignored** on the connect path,
     /// since no process is launched.
     ///
@@ -5138,6 +5197,16 @@ mod tests {
     fn candidate_paths_is_nonempty() {
         let v = candidate_paths_for_channel(Channel::Auto);
         assert!(!v.is_empty());
+    }
+
+    /// An environment variable's value may be a secret, so `Debug` shows
+    /// only its name.
+    #[test]
+    fn debug_shows_env_names_but_not_values() {
+        let builder = BrowserBuilder::new().env("API_KEY", "hunter2");
+        let debug = format!("{builder:?}");
+        assert!(debug.contains("API_KEY=<redacted>"), "{debug}");
+        assert!(!debug.contains("hunter2"), "{debug}");
     }
 
     /// A [`ProcessJob::none`] confines nothing, so it must report that it
