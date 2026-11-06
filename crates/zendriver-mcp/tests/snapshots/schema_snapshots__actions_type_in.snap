@@ -59,6 +59,7 @@ properties:
       - string
       - "null"
   text_regex:
+    description: "Regex matched against each element's text, run as a JavaScript\n`RegExp` (in single-selector mode, it must also parse as a Rust\nregex). For case-insensitivity, wrap the whole pattern in a `(?i:…)`\ngroup (Chrome 125 or newer); `text_case_insensitive` doesn't apply,\nand JS rejects a bare `(?i)` prefix."
     type:
       - string
       - "null"
@@ -104,7 +105,7 @@ $defs:
     type: object
     properties:
       case_insensitive:
-        description: "Compare case-insensitively (CSS `[name=value i]`). Valid only for\n`eq`/`contains`/`starts_with`/`ends_with`, so setting this with\n`has` or `regex` is a validation error: `has` has no value to\ncompare, and a `regex` pattern is made case-insensitive by wrapping\nit in a `(?i:…)` group (JS rejects a bare `(?i)` prefix)."
+        description: "Compare case-insensitively (CSS `[name=value i]`). Valid only for\n`eq`/`contains`/`starts_with`/`ends_with`, so setting this with\n`has` or `regex` is a validation error: `has` has no value to\ncompare, and a `regex` pattern is made case-insensitive by wrapping\nit in a `(?i:…)` group (Chrome 125 or newer; JS rejects a bare\n`(?i)` prefix)."
         type: boolean
         default: false
       name:

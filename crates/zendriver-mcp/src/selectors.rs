@@ -45,7 +45,8 @@ pub struct AttrPredicate {
     /// `eq`/`contains`/`starts_with`/`ends_with`, so setting this with
     /// `has` or `regex` is a validation error: `has` has no value to
     /// compare, and a `regex` pattern is made case-insensitive by wrapping
-    /// it in a `(?i:…)` group (JS rejects a bare `(?i)` prefix).
+    /// it in a `(?i:…)` group (Chrome 125 or newer; JS rejects a bare
+    /// `(?i)` prefix).
     #[serde(default)]
     pub case_insensitive: bool,
 }
@@ -75,6 +76,11 @@ pub struct Selector {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_exact: Option<String>,
+    /// Regex matched against each element's text, run as a JavaScript
+    /// `RegExp` (in single-selector mode, it must also parse as a Rust
+    /// regex). For case-insensitivity, wrap the whole pattern in a `(?i:…)`
+    /// group (Chrome 125 or newer); `text_case_insensitive` doesn't apply,
+    /// and JS rejects a bare `(?i)` prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_regex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -139,7 +145,7 @@ pub enum SelectorError {
     #[error(
         "attribute predicate `{name}` with op `{op:?}` does not support `case_insensitive` \
          (`has` has no value to compare; for `regex`, wrap the pattern in a `(?i:…)` group \
-         instead)"
+         instead, which needs Chrome 125 or newer)"
     )]
     CaseInsensitiveNotApplicable { name: String, op: AttrOp },
 }

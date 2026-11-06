@@ -112,8 +112,9 @@ text | text_exact | text_regex | role`, or bs4-like predicate mode (`tag`
 `AttrPredicate.case_insensitive` does the same for `eq | contains |
 starts_with | ends_with`. It is rejected for `has`, which has no value to
 fold case on, and for `regex`, whose pattern is made case-insensitive by
-wrapping it in a `(?i:…)` group (JavaScript rejects a bare `(?i)` prefix).
-State-changing tools accept
+wrapping it in a `(?i:…)` group (Chrome 125 or newer; JavaScript rejects a
+bare `(?i)` prefix). The same `(?i:…)` group is the only way to make
+`text_regex` case-insensitive. State-changing tools accept
 `return_snapshot: bool` for one-call action + observe. `browser_pdf` /
 `_save_mhtml` / `_download` return a binary-output shape (`{ byte_len,
 saved_path? , base64? }`): bytes go to `save_path` on the MCP host when
