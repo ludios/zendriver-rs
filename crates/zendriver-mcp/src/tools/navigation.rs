@@ -375,7 +375,8 @@ pub struct IdleInput {
     pub max_inflight_age_ms: Option<u64>,
     /// Abort the wait with an error if the underlying event stream loses
     /// delivery continuity (a lagging subscriber, a reconnect, or a dropped
-    /// connection) while waiting. Default `false`: a delivery gap is
+    /// connection) or ends (the tab's connection is shut down, e.g. by
+    /// closing the tab) while waiting. Default `false`: a delivery gap is
     /// tolerated and the wait still resolves on a best-effort basis.
     #[serde(default)]
     pub strict: bool,
@@ -408,7 +409,7 @@ pub struct IdleOutput {
 /// `max_inflight_age_ms`, when set, lets idle resolve even while a stuck /
 /// background request is still open. `strict`, when `true`, fails the call
 /// instead of silently tolerating a delivery gap on the underlying event
-/// stream.
+/// stream, or its end.
 pub async fn wait_for_idle(
     state: Arc<Mutex<SessionState>>,
     input: IdleInput,

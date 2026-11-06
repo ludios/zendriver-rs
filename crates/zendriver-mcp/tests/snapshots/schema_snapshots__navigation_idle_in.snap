@@ -16,7 +16,7 @@ properties:
     default: ~
     minimum: 0
   strict:
-    description: "Abort the wait with an error if the underlying event stream loses\ndelivery continuity (a lagging subscriber, a reconnect, or a dropped\nconnection) while waiting. Default `false`: a delivery gap is\ntolerated and the wait still resolves on a best-effort basis."
+    description: "Abort the wait with an error if the underlying event stream loses\ndelivery continuity (a lagging subscriber, a reconnect, or a dropped\nconnection) or ends (the tab's connection is shut down, e.g. by\nclosing the tab) while waiting. Default `false`: a delivery gap is\ntolerated and the wait still resolves on a best-effort basis."
     type: boolean
     default: false
   timeout_ms:

@@ -482,9 +482,10 @@ pub struct CloseOutput {
 ///
 /// Resource cleanup ordering (when applicable cargo features are on):
 /// 1. **Expectations**: drain `s.expectations`, calling `.abort()` on each
-///    spawned tokio task, so that each stops at once. (Ending the
-///    session's connection would also end each task's inner `.matched()`
-///    future; aborting first doesn't depend on how that connection ends.)
+///    spawned tokio task, so that each is cancelled at its next await.
+///    (Ending the session's connection would also end each task's inner
+///    `.matched()` future; aborting first doesn't depend on how that
+///    connection ends.)
 /// 2. **Interception rules**: `s.rules.clear()` drops every stored
 ///    `InterceptRuleHandle`, whose embedded `InterceptHandle::Drop`
 ///    removes its rule from its tab's list (fire-and-forget; the tab's

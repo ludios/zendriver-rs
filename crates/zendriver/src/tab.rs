@@ -2013,8 +2013,9 @@ impl Tab {
     /// once the outer deadline elapses. Returns
     /// [`ZendriverError::EventStreamIncomplete`] under
     /// [`IdleLossPolicy::Strict`] if a delivery gap, or the event stream's
-    /// end, is observed before the network settles; [`IdleLossPolicy::Lenient`] (the default) never
-    /// returns this variant.
+    /// end, is observed before the network settles — at once, if the tab's
+    /// connection had already ended when the wait began;
+    /// [`IdleLossPolicy::Lenient`] (the default) never returns this variant.
     ///
     /// # Examples
     ///
@@ -4638,6 +4639,8 @@ mod tests {
 
     /// A tab on `pair`'s connection whose network tracker has the request
     /// `R1` in flight, never completed, so that an idle wait can't succeed.
+    /// Returns the tab, and `pair` back, for the test to drive the
+    /// connection with.
     async fn tab_with_a_request_in_flight(
         pair: (MockConnection, Connection),
     ) -> (Tab, MockConnection, Connection) {
@@ -4779,6 +4782,9 @@ mod tests {
     async fn wait_for_idle_opts_strict_aborts_on_shutdown() {
         let (tab, _mock, conn) = tab_with_a_request_in_flight(MockConnection::pair()).await;
         let fut = spawn_idle_wait(&tab, IdleLossPolicy::Strict);
+        // Let the wait subscribe first, so this tests a wait in progress, not
+        // the replay of an end to a wait that starts after it.
+        tokio::time::sleep(Duration::from_millis(75)).await;
 
         conn.shutdown();
 
