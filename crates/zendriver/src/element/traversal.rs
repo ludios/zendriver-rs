@@ -159,7 +159,8 @@ impl Element {
     /// HTMLCollection is materialized via `Array.from`. The returned
     /// elements are tagged with `NthChild(i)` so auto-refresh can re-pick
     /// the same index after a re-render. Empty children yield an empty
-    /// `Vec`, not an error.
+    /// `Vec`, not an error; so does a node that has no `children` at all,
+    /// such as the text node that an XPath `text()` step returns.
     ///
     /// # Examples
     ///
@@ -183,7 +184,7 @@ impl Element {
                     "Runtime.callFunctionOn",
                     json!({
                         "objectId": object_id,
-                        "functionDeclaration": "function(){ return Array.from(this.children); }",
+                        "functionDeclaration": "function(){ return Array.from(this.children || []); }",
                         "arguments": [],
                         "returnByValue": false,
                         "awaitPromise": true,
