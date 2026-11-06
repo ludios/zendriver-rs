@@ -21,11 +21,6 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zendriver::Browser;
 
-/// Short pause after `intercept().start()` so the actor's fire-and-forget
-/// `Fetch.enable` has reached Chrome before we issue a navigation that may
-/// otherwise race past the interception attachment.
-const INTERCEPT_SETTLE: Duration = Duration::from_millis(150);
-
 #[tokio::test]
 #[serial]
 async fn interception_block_rule_prevents_request() {
@@ -64,10 +59,15 @@ async fn interception_block_rule_prevents_request() {
     let browser = Browser::builder().headless(true).launch().await.unwrap();
     let tab = browser.main_tab();
 
-    // Start interception BEFORE the navigation; the actor's `Fetch.enable`
-    // is fire-and-forget so give it a brief moment to land before goto.
-    let _intercept = tab.intercept().block("*/blocked/*").unwrap().start();
-    tokio::time::sleep(INTERCEPT_SETTLE).await;
+    // Start interception BEFORE the navigation; `start()` returns once
+    // Chrome pauses requests.
+    let _intercept = tab
+        .intercept()
+        .block("*/blocked/*")
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
 
     tab.goto(&mock.uri()).await.unwrap();
     tab.wait_for_load().await.unwrap();
@@ -130,8 +130,9 @@ async fn interception_respond_serves_fake_body() {
             body,
         )
         .unwrap()
-        .start();
-    tokio::time::sleep(INTERCEPT_SETTLE).await;
+        .start()
+        .await
+        .unwrap();
 
     tab.goto(&mock.uri()).await.unwrap();
     tab.wait_for_load().await.unwrap();

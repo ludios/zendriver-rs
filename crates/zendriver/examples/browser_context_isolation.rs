@@ -36,8 +36,8 @@ async fn main() -> zendriver::Result<()> {
     // --- context 1 -------------------------------------------------------
     // `.proxy()` auto-splits embedded `user:pass` into per-context proxy
     // credentials and strips them from the `proxyServer` sent to Chrome;
-    // `build()` registers those credentials so the auth actor is installed
-    // automatically on every tab this context opens.
+    // `build()` registers those credentials so every tab this context
+    // opens answers its proxy with them, automatically.
     let ctx1 = browser
         .browser_context()
         .proxy(&proxy)

@@ -36,6 +36,7 @@ pub use zendriver::ImpervaError
 pub use zendriver::ImpervaSurface
 pub use zendriver::InterceptBuilder
 pub use zendriver::InterceptHandle
+pub use zendriver::InterceptStream
 pub use zendriver::InterceptionError
 pub use zendriver::ObserverError
 pub use zendriver::ObserverFailurePolicy
@@ -4485,7 +4486,7 @@ pub async fn zendriver::tab::Tab::window_bounds(&self) -> zendriver::error::Resu
 impl zendriver::tab::Tab
 pub fn zendriver::tab::Tab::imperva(&self) -> zendriver_imperva::bypass::ImpervaBypass<'_>
 impl zendriver::tab::Tab
-pub fn zendriver::tab::Tab::intercept(&self) -> zendriver_interception::builder::InterceptBuilder<'_>
+pub fn zendriver::tab::Tab::intercept(&self) -> zendriver_interception::builder::InterceptBuilder
 impl zendriver::tab::Tab
 pub fn zendriver::tab::Tab::pdf_builder(&self) -> zendriver::pdf::PdfBuilder<'_>
 pub async fn zendriver::tab::Tab::print_to_pdf(&self, impl core::convert::AsRef<std::path::Path>) -> zendriver::error::Result<()>
@@ -8525,7 +8526,7 @@ pub async fn zendriver::tab::Tab::window_bounds(&self) -> zendriver::error::Resu
 impl zendriver::tab::Tab
 pub fn zendriver::tab::Tab::imperva(&self) -> zendriver_imperva::bypass::ImpervaBypass<'_>
 impl zendriver::tab::Tab
-pub fn zendriver::tab::Tab::intercept(&self) -> zendriver_interception::builder::InterceptBuilder<'_>
+pub fn zendriver::tab::Tab::intercept(&self) -> zendriver_interception::builder::InterceptBuilder
 impl zendriver::tab::Tab
 pub fn zendriver::tab::Tab::pdf_builder(&self) -> zendriver::pdf::PdfBuilder<'_>
 pub async fn zendriver::tab::Tab::print_to_pdf(&self, impl core::convert::AsRef<std::path::Path>) -> zendriver::error::Result<()>

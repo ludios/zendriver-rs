@@ -365,6 +365,15 @@ pub(crate) struct TabInner {
     /// only installs a default `cwd/downloads` path when this is still
     /// `false`, so it never clobbers a directory the caller chose explicitly.
     pub(crate) download_behavior_set: std::sync::atomic::AtomicBool,
+    /// The one owner of this tab's `Fetch` domain: every layer of
+    /// interception on the tab ([`Tab::intercept`], and the browser's own
+    /// in [`Self::browser_intercept`]) is added through it.
+    #[cfg(feature = "interception")]
+    pub(crate) interceptor: zendriver_interception::Interceptor,
+    /// The layer that applies the browser's own interception options to
+    /// this tab (tracker blocking, proxy credentials), when any applies.
+    #[cfg(feature = "interception")]
+    pub(crate) browser_intercept: std::sync::OnceLock<zendriver_interception::InterceptHandle>,
 }
 
 impl Drop for TabInner {
@@ -504,6 +513,10 @@ impl Tab {
                 }
             });
             TabInner {
+                #[cfg(feature = "interception")]
+                interceptor: zendriver_interception::Interceptor::new(session.clone()),
+                #[cfg(feature = "interception")]
+                browser_intercept: std::sync::OnceLock::new(),
                 session,
                 isolated_world: tokio::sync::Mutex::new(IsolatedWorldCache::default()),
                 browser,
@@ -3136,26 +3149,39 @@ impl Tab {
 #[cfg(feature = "interception")]
 impl Tab {
     /// Construct a fluent
-    /// [`InterceptBuilder`](zendriver_interception::InterceptBuilder) for
-    /// this tab's session.
+    /// [`InterceptBuilder`](zendriver_interception::InterceptBuilder) for a
+    /// layer of this tab's interception.
     ///
     /// Chain rule registration (`.block(...)` / `.redirect(...)` /
     /// `.respond(...)` / `.modify_request(...)`) and optional CDP
     /// `RequestPattern` filters (`.pattern(...)` / `.at_request()` /
-    /// `.at_response()` / `.resource(...)`), then call
-    /// [`start`](zendriver_interception::InterceptBuilder::start) to spawn
-    /// the rule-driven actor (returns an
+    /// `.at_response()` / `.resource(...)`), then await
+    /// [`start`](zendriver_interception::InterceptBuilder::start) to have
+    /// the rules applied (it returns an
     /// [`InterceptHandle`](zendriver_interception::InterceptHandle) whose
-    /// `Drop` tears it down), or
+    /// `Drop` removes them), or
     /// [`subscribe`](zendriver_interception::InterceptBuilder::subscribe)
     /// to receive raw
     /// [`PausedRequest`](zendriver_interception::PausedRequest)s on a
     /// stream you drive manually.
     ///
+    /// Each `start` or `subscribe` adds a layer, and the tab's layers
+    /// compose: a later one takes precedence for the requests it pauses
+    /// and has a rule for, and the others keep working. The browser's own
+    /// tracker blocking and proxy credentials are the oldest layer. See
+    /// [`zendriver_interception::interceptor`] for the details.
+    ///
+    /// ```no_run
+    /// # async fn ex(tab: &zendriver::Tab) -> zendriver::Result<()> {
+    /// let _ads = tab.intercept().block("*/ads/*")?.start().await?;
+    /// tab.goto("https://example.com").await?; // ads already blocked
+    /// # Ok(()) }
+    /// ```
+    ///
     /// Gated by the `interception` cargo feature.
     #[must_use]
-    pub fn intercept(&self) -> zendriver_interception::InterceptBuilder<'_> {
-        zendriver_interception::InterceptBuilder::new(self.session())
+    pub fn intercept(&self) -> zendriver_interception::InterceptBuilder {
+        zendriver_interception::InterceptBuilder::new(&self.inner.interceptor)
     }
 }
 
@@ -4626,66 +4652,52 @@ mod tests {
 
     // --- Tab::intercept (P5 T7, feature = "interception") -------------
 
-    /// `tab.intercept().block("*").start()` should spawn the rule actor on
-    /// the tab's session: assert `Fetch.enable` lands and a matching
-    /// `Fetch.requestPaused` triggers `Fetch.failRequest`. Verifies the
-    /// `Tab::intercept` shim plumbs into `InterceptBuilder` end-to-end.
+    /// Two `tab.intercept()` layers share the tab's one `Fetch`
+    /// configuration: the second `Fetch.enable` carries both layers'
+    /// patterns, and the newer layer gets the request both match.
     #[cfg(feature = "interception")]
     #[tokio::test]
-    async fn intercept_block_all_dispatches_fail_request_via_tab_shim() {
+    async fn intercepts_of_one_tab_share_its_fetch_configuration() {
         let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let tab = Tab::new_for_test(sess);
-
-        let handle = tab.intercept().block("*").unwrap().start();
-
-        // Side-task `Fetch.enable` must land first; default match-all
-        // pattern is injected when none was registered explicitly.
-        let enable_id =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.enable"))
+        let tab = Tab::new_for_test(SessionHandle::new(conn.clone(), "S1"));
+        let mut handles = Vec::new();
+        let mut enables = Vec::new();
+        for builder in [
+            tab.intercept().pattern("*/a/*").block("*").unwrap(),
+            tab.intercept()
+                .pattern("*/b/*")
+                .respond("*", 204, Vec::new(), Vec::new())
+                .unwrap(),
+        ] {
+            let start = tokio::spawn(builder.start());
+            let id = tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.enable"))
                 .await
-                .expect("intercept did not send Fetch.enable within 2s");
-        let enable_params = mock.last_sent()["params"].clone();
-        assert_eq!(enable_params["handleAuthRequests"], false);
-        assert_eq!(enable_params["patterns"][0]["urlPattern"], "*");
-        mock.reply(enable_id, json!({})).await;
+                .expect("no Fetch.enable within 2s");
+            enables.push(mock.last_sent()["params"]["patterns"].clone());
+            mock.reply(id, json!({})).await;
+            handles.push(start.await.unwrap().unwrap());
+        }
+        assert_eq!(
+            enables[1],
+            json!([{ "urlPattern": "*/a/*" }, { "urlPattern": "*/b/*" }])
+        );
 
-        // Any paused URL matches the `block("*")` rule.
         mock.emit_event_for_session(
             "Fetch.requestPaused",
             json!({
                 "requestId": "REQ-1",
-                "request": {
-                    "url": "https://any.test/whatever",
-                    "method": "GET",
-                    "headers": {},
-                },
-                "resourceType": "Document",
+                "request": { "url": "https://x.test/a/b/", "method": "GET", "headers": {} },
             }),
             "S1",
         )
         .await;
-
-        let fail_id =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.failRequest"))
-                .await
-                .expect("actor did not send Fetch.failRequest within 2s");
-        let fail_params = mock.last_sent()["params"].clone();
-        assert_eq!(fail_params["requestId"], "REQ-1");
-        assert_eq!(fail_params["errorReason"], "BlockedByClient");
-        mock.reply(fail_id, json!({})).await;
-
-        let stop_fut = tokio::spawn(handle.stop());
-        let disable_id =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.disable"))
-                .await
-                .expect("actor did not send Fetch.disable on stop()");
-        mock.reply(disable_id, json!({})).await;
-        stop_fut
-            .await
-            .expect("stop() task panicked")
-            .expect("stop() returned Err");
-
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            mock.expect_cmd("Fetch.fulfillRequest"),
+        )
+        .await
+        .expect("the newer layer did not answer within 2s");
+        assert_eq!(mock.last_sent()["params"]["requestId"], "REQ-1");
         conn.shutdown();
     }
 

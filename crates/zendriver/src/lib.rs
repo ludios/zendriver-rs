@@ -170,8 +170,9 @@ pub use zendriver_transport::{
 /// reach the types without depending on the sub-crate directly.
 #[cfg(feature = "interception")]
 pub use zendriver_interception::{
-    AbortReason, HostMatcher, InterceptBuilder, InterceptHandle, InterceptionError, PausedRequest,
-    RequestInfo, RequestOverrides, RequestStage, ResourceType, ResponseInfo, ResponseOverrides,
+    AbortReason, HostMatcher, InterceptBuilder, InterceptHandle, InterceptStream,
+    InterceptionError, PausedRequest, RequestInfo, RequestOverrides, RequestStage, ResourceType,
+    ResponseInfo, ResponseOverrides,
 };
 
 /// Cloudflare Turnstile bypass re-exports.
@@ -452,6 +453,7 @@ mod auto_trait_assertions {
     fn interception_surface_is_send_sync() {
         assert_send_sync::<InterceptBuilder>();
         assert_send_sync::<InterceptHandle>();
+        assert_send_sync::<InterceptStream>();
         assert_send_sync::<InterceptionError>();
         assert_send_sync::<PausedRequest>();
         assert_send_sync::<RequestInfo>();

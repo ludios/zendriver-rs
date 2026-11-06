@@ -16,13 +16,9 @@ pub enum InterceptionError {
     #[error("invalid url pattern: {0}")]
     InvalidPattern(String),
 
-    #[error("interception already started")]
-    AlreadyStarted,
-
-    #[error("interception not started")]
-    NotStarted,
-
-    #[error("subscription channel closed")]
+    /// The session's interception task is gone (it panicked, or its
+    /// runtime shut down), so a layer couldn't be added.
+    #[error("the session's interception task is gone")]
     SubscriptionClosed,
 
     #[error("invalid response from CDP: {0}")]

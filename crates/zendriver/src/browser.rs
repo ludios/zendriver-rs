@@ -682,8 +682,8 @@ pub struct BrowserBuilder {
     /// Optional `(username, password)` to answer the proxy's auth
     /// challenges with (never a site's).
     /// Only honored when the `interception` feature is enabled; when present
-    /// at launch, an interception actor is spawned on the main tab session
-    /// that auto-replies to `Fetch.authRequired`. See cdpdriver/zendriver#208.
+    /// at launch, the main tab's interception answers `Fetch.authRequired`
+    /// with them. See cdpdriver/zendriver#208.
     #[cfg(feature = "interception")]
     pub(crate) proxy_auth: Option<(String, String)>,
     /// Custom or auto-derived exit-IP -> country resolver. Set via
@@ -897,8 +897,8 @@ impl BrowserBuilder {
 
     /// Answer the proxy's auth challenges with `(username, password)`.
     ///
-    /// At launch, an interception actor is spawned on the main tab session
-    /// that sends `Fetch.enable { handleAuthRequests: true }` and answers a
+    /// At launch, before `launch()` returns, the main tab's interception
+    /// sends `Fetch.enable { handleAuthRequests: true }`, and it answers a
     /// proxy's `Fetch.authRequired` with `Fetch.continueWithAuth` carrying
     /// these credentials, once for each combination of request, proxy and
     /// auth scheme (if the proxy rejects them within a minute, the request
@@ -909,7 +909,8 @@ impl BrowserBuilder {
     ///
     /// Scope: applies to the main tab only — tabs opened later via
     /// [`Browser::new_tab`] do **not** inherit auth handling. For those,
-    /// wire `tab.intercept().handle_proxy_auth(user, pass).start()` yourself.
+    /// wire `tab.intercept().handle_proxy_auth(user, pass).start().await`
+    /// yourself.
     ///
     /// See cdpdriver/zendriver#208.
     ///
@@ -1873,35 +1874,51 @@ pub(crate) struct BrowserInner {
     /// notification before reading the map so a fire that lands between
     /// the read and the wait is still delivered.
     pub(crate) tabs_changed: tokio::sync::Notify,
-    /// Optional RAII guard for the proxy-auth interception actor spawned in
-    /// [`BrowserBuilder::launch`] when `proxy_auth` is set. Held here so
-    /// the actor lives for the entire `Browser` lifetime; on `Browser` drop
-    /// the handle drops and cancels the actor cleanly. See
-    /// cdpdriver/zendriver#208.
-    #[cfg(feature = "interception")]
-    #[allow(dead_code)]
-    // RAII guard: only ever `.set()`, never read back — see doc comment above.
-    pub(crate) proxy_auth_handle: std::sync::OnceLock<zendriver_interception::InterceptHandle>,
     /// Per-`browserContextId` proxy credentials, registered by
     /// [`crate::BrowserContextBuilder::build`] and read by the `TabRegistrar`
-    /// to install a `Fetch.authRequired` handler on each tab opened in that
-    /// context. Removed on `BrowserContext` drop.
+    /// to give the proxy credentials to each tab opened in that context.
+    /// Removed on `BrowserContext` drop.
     #[cfg(feature = "interception")]
     pub(crate) context_proxy_auth: tokio::sync::Mutex<HashMap<String, (String, String)>>,
     /// Combined tracker/fingerprinter [`HostMatcher`] (bundled + custom),
-    /// built once at launch. `None` when blocking is not configured. Read by
-    /// the [`TabRegistrar`] to install a `BlockHosts` interception on each new
-    /// page tab.
+    /// built once at launch. `None` when blocking is not configured. Applied
+    /// to every page tab by [`BrowserInner::start_browser_intercept`].
     #[cfg(feature = "tracker-blocking")]
     pub(crate) tracker_matcher: Option<std::sync::Arc<crate::HostMatcher>>,
-    /// Live per-session interception handles keyed by `sessionId` (main tab +
-    /// each page tab). Holds the single chained actor per session — tracker
-    /// blocking and/or per-context proxy auth. Inserted on attach, removed on
-    /// detach; dropping a handle stops that tab's actor. One actor per session
-    /// so they never double-resolve `Fetch.requestPaused` (cdpdriver/zendriver#208).
-    #[cfg(feature = "interception")]
-    pub(crate) session_intercept_handles:
-        tokio::sync::Mutex<HashMap<String, zendriver_interception::InterceptHandle>>,
+}
+
+#[cfg(feature = "interception")]
+impl BrowserInner {
+    /// Start `tab`'s layer of interception for the browser's own options:
+    /// tracker blocking, and `credentials` for a proxy that challenges.
+    /// Returns once Chrome has applied it. Does nothing when neither
+    /// applies.
+    ///
+    /// - `credentials`: the `(user, password)` for the proxy of `tab`'s
+    ///   browser context, if it has any.
+    pub(crate) async fn start_browser_intercept(
+        &self,
+        tab: &Tab,
+        credentials: Option<(String, String)>,
+    ) -> Result<(), ZendriverError> {
+        let mut builder = tab.intercept();
+        let mut wanted = false;
+        #[cfg(feature = "tracker-blocking")]
+        if let Some(matcher) = self.tracker_matcher.clone() {
+            builder = builder.block_hosts(matcher);
+            wanted = true;
+        }
+        if let Some((user, pass)) = credentials {
+            builder = builder.handle_proxy_auth(user, pass);
+            wanted = true;
+        }
+        if wanted {
+            let handle = builder.start().await?;
+            debug_assert!(tab.inner.browser_intercept.get().is_none());
+            let _ = tab.inner.browser_intercept.set(handle);
+        }
+        Ok(())
+    }
 }
 
 impl BrowserInner {
@@ -2092,13 +2109,9 @@ pub(crate) fn test_only_inner_with(
             ws_url: None,
             tabs_changed: tokio::sync::Notify::new(),
             #[cfg(feature = "interception")]
-            proxy_auth_handle: std::sync::OnceLock::new(),
-            #[cfg(feature = "interception")]
             context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher: None,
-            #[cfg(feature = "interception")]
-            session_intercept_handles: tokio::sync::Mutex::new(HashMap::new()),
         };
         customize(&mut inner);
         inner
@@ -2319,15 +2332,11 @@ impl TargetObserver for TabRegistrar {
                 }
                 let conn = session.connection().clone();
                 let new_session = SessionHandle::new(conn, session.session_id.to_string());
-                // Clone the session before it is moved into Tab::new so the
-                // per-session interception install can use it afterwards.
-                #[cfg(feature = "interception")]
-                let new_session_for_intercept = new_session.clone();
                 let input = InputController::new(self.input_profile.clone());
                 let weak_inner = Arc::downgrade(&browser);
                 // Give this tab its own CDP socket for its traffic (falls back to
-                // the flat attach session — see `per_tab_session`). Stealth and
-                // any per-context interception stay on the flat session.
+                // the flat attach session — see `per_tab_session`). Stealth
+                // stays on the flat session.
                 let tab_session = per_tab_session(
                     browser.debug_host_port.as_deref(),
                     browser.ws_url.as_deref(),
@@ -2347,6 +2356,28 @@ impl TargetObserver for TabRegistrar {
                         .filter(|id| browser.default_context_id.as_ref() != Some(id)),
                 );
 
+                // Before the target runs (the observer chain resumes it
+                // after this), so the page's first request is intercepted.
+                #[cfg(feature = "interception")]
+                {
+                    let mut credentials = None;
+                    if let Some(context) = session.target_info.browser_context_id.as_deref() {
+                        credentials = browser
+                            .context_proxy_auth
+                            .lock()
+                            .await
+                            .get(context)
+                            .cloned();
+                    }
+                    if let Err(e) = browser.start_browser_intercept(&tab, credentials).await {
+                        warn!(
+                            error = %e,
+                            target_id = %session.target_info.target_id,
+                            "could not start the tab's tracker blocking / proxy credentials"
+                        );
+                    }
+                }
+
                 // Dedupe by `target_id`: if `flatten: true` re-fires
                 // `attachedToTarget` for the same target under a different
                 // sessionId (observed on `--headless=new`), the old entry
@@ -2358,43 +2389,6 @@ impl TargetObserver for TabRegistrar {
                 drop(tabs);
                 // Wake any `new_tab_at` callers waiting on this insert.
                 browser.tabs_changed.notify_waiters();
-
-                // Per-session interception: chain tracker-blocking (if a
-                // matcher is configured) and per-context proxy auth (if this
-                // tab's browser context registered credentials) into ONE
-                // actor, then park the handle keyed by sessionId so it lives
-                // with the browser. One actor per session — never two — so
-                // they don't double-resolve the same `Fetch.requestPaused`
-                // (cdpdriver/zendriver#208).
-                #[cfg(feature = "interception")]
-                {
-                    let mut builder =
-                        zendriver_interception::InterceptBuilder::new(&new_session_for_intercept);
-                    let mut needs_actor = false;
-
-                    #[cfg(feature = "tracker-blocking")]
-                    if let Some(matcher) = browser.tracker_matcher.clone() {
-                        builder = builder.block_hosts(matcher);
-                        needs_actor = true;
-                    }
-
-                    if let Some(ctx_id) = session.target_info.browser_context_id.as_deref() {
-                        let creds = browser.context_proxy_auth.lock().await.get(ctx_id).cloned();
-                        if let Some((user, pass)) = creds {
-                            builder = builder.handle_proxy_auth(user, pass);
-                            needs_actor = true;
-                        }
-                    }
-
-                    if needs_actor {
-                        let handle = builder.start();
-                        browser
-                            .session_intercept_handles
-                            .lock()
-                            .await
-                            .insert(session.session_id.to_string(), handle);
-                    }
-                }
 
                 Ok(())
             }
@@ -2424,15 +2418,6 @@ impl TargetObserver for TabRegistrar {
             browser.tabs_changed.notify_waiters();
         } else {
             let _ = crate::frame::oopif::deregister_oopif_frame(&browser, session_id).await;
-        }
-        // Drop any per-session interception handle (stops its actor).
-        #[cfg(feature = "interception")]
-        {
-            browser
-                .session_intercept_handles
-                .lock()
-                .await
-                .remove(session_id);
         }
     }
 }
@@ -3136,13 +3121,9 @@ pub(crate) async fn finish_connect(
             ws_url,
             tabs_changed: tokio::sync::Notify::new(),
             #[cfg(feature = "interception")]
-            proxy_auth_handle: std::sync::OnceLock::new(),
-            #[cfg(feature = "interception")]
             context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher,
-            #[cfg(feature = "interception")]
-            session_intercept_handles: tokio::sync::Mutex::new(HashMap::new()),
         }
     });
 
@@ -3869,32 +3850,13 @@ impl BrowserBuilder {
                 .await?;
         }
 
-        // 14. Spawn a single main-session interception actor carrying BOTH
-        // proxy-auth (handle_proxy_auth) and tracker blocking (block_hosts), so they
-        // don't double-resolve the same Fetch.requestPaused. New tabs get their
-        // own tracker-only actor via the TabRegistrar (proxy auth is
-        // main-tab-only). The InterceptHandle is parked on BrowserInner so the
-        // actor lives as long as the Browser does; dropping BrowserInner drops
-        // the handle which cancels the actor. See cdpdriver/zendriver#208.
+        // 14. The main tab's tracker blocking and proxy credentials, in force
+        // before the caller gets the browser. (The registrar does this for
+        // every later tab.)
         #[cfg(feature = "interception")]
-        {
-            let main_session = inner.main_tab.session().clone();
-            let mut builder = zendriver_interception::InterceptBuilder::new(&main_session);
-            let mut needs_actor = false;
-            if let Some((user, pass)) = self.proxy_auth.clone() {
-                builder = builder.handle_proxy_auth(user, pass);
-                needs_actor = true;
-            }
-            #[cfg(feature = "tracker-blocking")]
-            if let Some(matcher) = inner.tracker_matcher.clone() {
-                builder = builder.block_hosts(matcher);
-                needs_actor = true;
-            }
-            if needs_actor {
-                let handle = builder.start();
-                let _ = inner.proxy_auth_handle.set(handle);
-            }
-        }
+        inner
+            .start_browser_intercept(&inner.main_tab, self.proxy_auth.clone())
+            .await?;
 
         Ok(Browser { inner })
     }
@@ -6045,7 +6007,7 @@ mod tests {
         assert_eq!(p.server, "http://host:3128");
         assert_eq!(p.credentials, Some(("bob".into(), "pw".into())));
         // proxy_auth auto-wired from userinfo (field only exists under the
-        // `interception` feature, which drives the auth-reply actor).
+        // `interception` feature, which answers the proxy's challenges).
         #[cfg(feature = "interception")]
         assert_eq!(b.proxy_auth, Some(("bob".into(), "pw".into())));
 
@@ -6455,13 +6417,12 @@ mod tests {
         conn.shutdown();
     }
 
-    /// The `TabRegistrar` auto-installs a `Fetch.authRequired` handler on a
-    /// page tab whose `browserContextId` has registered proxy credentials in
-    /// `BrowserInner.context_proxy_auth` — no per-tab boilerplate. Drives the
-    /// install (`Fetch.enable { handleAuthRequests: true }`) then a simulated
-    /// auth challenge, and asserts `Fetch.continueWithAuth` carries the
-    /// registered credentials (wire shape confirmed against
-    /// `zendriver-interception/src/actor.rs`).
+    /// The `TabRegistrar` gives a page tab whose `browserContextId` has
+    /// registered proxy credentials in `BrowserInner.context_proxy_auth`
+    /// those credentials — no per-tab boilerplate. Drives the install
+    /// (`Fetch.enable { handleAuthRequests: true }`) then a simulated auth
+    /// challenge, and asserts `Fetch.continueWithAuth` carries the
+    /// registered credentials.
     #[cfg(feature = "interception")]
     #[tokio::test]
     async fn tab_registrar_installs_context_proxy_auth() {
@@ -6509,10 +6470,9 @@ mod tests {
         assert_eq!(enable["params"]["handleAuthRequests"], true);
         mock.reply(enable_id, json!({})).await;
 
-        // Simulate an auth challenge; the actor must answer with the creds.
-        // Scoped to session S2 — `SessionHandle::subscribe` filters events by
-        // `sessionId`, so an unscoped `emit_event` would never reach the
-        // per-tab actor's `Fetch.authRequired` subscription.
+        // Simulate an auth challenge; the tab's interception must answer
+        // with the creds. Scoped to session S2: the tab's interception only
+        // reads its own session's events.
         mock.emit_event_for_session(
             "Fetch.authRequired",
             json!({
@@ -6544,15 +6504,12 @@ mod tests {
         conn.shutdown();
     }
 
-    /// Regression lock for cdpdriver/zendriver#208: a page tab whose context
-    /// has BOTH tracker-blocking (`tracker_matcher`) AND per-context proxy
-    /// auth (`context_proxy_auth`) configured must get exactly ONE chained
-    /// `InterceptBuilder` / actor — never two competing actors that could
-    /// double-resolve the same `Fetch.requestPaused` event. Asserts exactly
-    /// one `Fetch.enable` is sent for the attached session.
+    /// A page tab whose context has both tracker blocking (`tracker_matcher`)
+    /// and per-context proxy auth (`context_proxy_auth`) gets both in one
+    /// layer, applied with one `Fetch.enable` before the target resumes.
     #[cfg(all(test, feature = "tracker-blocking"))]
     #[tokio::test]
-    async fn tab_registrar_chains_tracker_and_auth_into_one_actor() {
+    async fn tab_registrar_chains_tracker_and_auth_into_one_layer() {
         use zendriver_transport::testing::MockConnection;
 
         let input_profile = zendriver_stealth::InputProfile::native();
@@ -6590,22 +6547,30 @@ mod tests {
         )
         .await;
 
-        let enable_id = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            mock.expect_cmd("Fetch.enable"),
-        )
-        .await
-        .expect("Fetch.enable not sent");
-        mock.reply(enable_id, json!({})).await;
-
-        // Give the registrar a moment to finish installing, then confirm no
-        // SECOND actor also sent its own `Fetch.enable` for this session —
-        // chaining tracker-blocking + auth into ONE `InterceptBuilder` means
-        // exactly one `Fetch.enable`, never two (cdpdriver/zendriver#208).
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        if let Some((method, _id)) = mock.try_recv_cmd() {
-            panic!("expected no further CDP calls after the single install, got `{method}`");
+        let mut sent = Vec::new();
+        while let Some((method, id)) = mock
+            .recv_cmd_timeout(std::time::Duration::from_millis(300))
+            .await
+        {
+            sent.push((method, mock.last_sent()["params"].clone()));
+            mock.reply(id, json!({})).await;
         }
+        let methods: Vec<&str> = sent.iter().map(|(m, _)| m.as_str()).collect();
+        let enables: Vec<&serde_json::Value> = sent
+            .iter()
+            .filter(|(m, _)| m == "Fetch.enable")
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(enables.len(), 1, "{methods:?}");
+        assert_eq!(enables[0]["handleAuthRequests"], true);
+        let enabled = methods.iter().position(|m| *m == "Fetch.enable");
+        let resumed = methods
+            .iter()
+            .position(|m| *m == "Runtime.runIfWaitingForDebugger");
+        assert!(
+            enabled < resumed,
+            "resumed before Fetch.enable: {methods:?}"
+        );
 
         conn.shutdown();
     }

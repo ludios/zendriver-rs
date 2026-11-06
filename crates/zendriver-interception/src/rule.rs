@@ -2,8 +2,8 @@
 //!
 //! Each rule pairs a matcher (a [`UrlPattern`], or a [`HostMatcher`] for
 //! [`BlockHosts`]) with one of six actions ([`Block`], [`Redirect`],
-//! [`Respond`], [`Modify`], [`ModifyResponse`], [`BlockHosts`]). The actor in
-//! T6 walks the rule list in registration order on each `Fetch.requestPaused`
+//! [`Respond`], [`Modify`], [`ModifyResponse`], [`BlockHosts`]). The multiplexer
+//! walks a layer's rule list in registration order on each `Fetch.requestPaused`
 //! event; the first rule that matches the request URL wins.
 //!
 //! [`Block`]: Rule::Block
@@ -30,7 +30,7 @@ use crate::url_pattern::UrlPattern;
 //
 // Not `Clone`: `Modify` holds an `Arc<dyn Fn ...>` which is cheap to clone,
 // but the other variants own `Vec`s/`String`s that we'd rather not silently
-// duplicate. The actor consumes the rule list by reference (`&Rule`) so a
+// duplicate. The multiplexer reads the rule list by reference (`&Rule`) so a
 // `Clone` impl is unnecessary in practice.
 pub enum Rule {
     /// Abort matching requests with `Fetch.failRequest`
@@ -54,7 +54,7 @@ pub enum Rule {
         status: u16,
         /// Response headers as `(name, value)` pairs.
         headers: Vec<(String, String)>,
-        /// Raw response body bytes (base64-encoded on the wire by the actor).
+        /// Raw response body bytes (base64-encoded on the wire).
         body: Vec<u8>,
     },
     /// Rewrite the outgoing request per-field via a user closure, then
@@ -65,7 +65,7 @@ pub enum Rule {
         pattern: UrlPattern,
         /// Closure invoked per matching request to produce overrides.
         ///
-        /// Wrapped in [`Arc`] so the actor can cheaply share the closure
+        /// Wrapped in [`Arc`] so the multiplexer can cheaply share the closure
         /// across the rule list without forcing the rule itself to be `Clone`
         /// or `Send`-by-value.
         modify: Arc<dyn Fn(&RequestInfo) -> RequestOverrides + Send + Sync>,

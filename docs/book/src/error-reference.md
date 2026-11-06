@@ -93,11 +93,10 @@ Gated `interception`. Sub-error returned wrapped in
 
 | Variant | Common cause | Fix |
 |---------|-------------|-----|
-| `Call(CallError)` | Underlying CDP call failed. | Inspect inner error. |
+| `Call(CallError)` | Underlying CDP call failed: for `start()` / `subscribe()` / `stop()`, Chrome refused the patterns or the tab is gone. | Inspect inner error. |
 | `InvalidPattern(String)` | URL pattern didn't parse as CDP wildcard syntax. | Patterns use `*` / `?` (not regex). Quote literal `*` characters. |
-| `AlreadyStarted` | `start()` called twice on the same builder. | Builders are one-shot; create a new one if you need another actor. |
-| `NotStarted` | Operation requires an active actor that hasn't started yet. | Call `start()` first. |
-| `SubscriptionClosed` | The `subscribe()` stream's actor was torn down. | Stream ends naturally on `InterceptHandle` drop; expected during shutdown. |
+| `SubscriptionClosed` | The tab's interception task is gone (it panicked, or the runtime shut down), so `start()` / `subscribe()` couldn't add a layer. | Should not happen; file a bug. |
+| `WrongStage` | `PausedRequest::continue_response` on a request paused at the Request stage. | Pause at the Response stage (`at_response()`). |
 | `InvalidResponse(String)` | A CDP response didn't carry the expected field (e.g. `Fetch.getResponseBody` returned no `body`). | Should not happen with stable Chrome; file a bug. |
 
 ## `CloudflareError` variants

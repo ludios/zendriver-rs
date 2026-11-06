@@ -489,8 +489,8 @@ pub struct CloseOutput {
 ///    per expectation).
 /// 2. **Interception rules**: `s.rules.clear()` drops every stored
 ///    `InterceptRuleHandle`, whose embedded `InterceptHandle::Drop`
-///    cancels the actor (fire-and-forget `Fetch.disable`). Doing this
-///    *before* `Browser::close` means the actor's teardown happens while
+///    removes its layer (fire-and-forget, ending in `Fetch.disable`).
+///    Doing this *before* `Browser::close` means the teardown happens while
 ///    the transport is still live, so the disable round-trip actually
 ///    lands instead of being eaten by a closed connection.
 /// 3. **Browser**: only then do we `b.close().await`, which tears down
@@ -514,10 +514,10 @@ pub async fn close(
 
     #[cfg(feature = "interception")]
     {
-        // `InterceptHandle::Drop` cancels the per-rule actor (fire-and-
-        // forget `Fetch.disable`). Doing this before `Browser::close`
-        // gives each `Fetch.disable` a live transport to land on; doing
-        // it after would race a closed connection.
+        // `InterceptHandle::Drop` removes the rule's layer (fire-and-
+        // forget, ending in `Fetch.disable`). Doing this before
+        // `Browser::close` gives the `Fetch.disable` a live transport to
+        // land on; doing it after would race a closed connection.
         s.rules.clear();
     }
 
@@ -727,10 +727,9 @@ mod tests {
     }
 
     /// `close` clears every entry in `s.rules`. Each
-    /// `InterceptRuleHandle::_handle` drop fires the interception actor's
-    /// cancel token (which would dispatch `Fetch.disable` against the live
-    /// transport in a real session — here we just verify the map is
-    /// emptied).
+    /// `InterceptRuleHandle::handle` drop removes its layer (which would
+    /// dispatch `Fetch.disable` against the live transport in a real
+    /// session — here we just verify the map is emptied).
     #[cfg(feature = "geo")]
     #[test]
     fn geo_country_sets_locale_and_languages() {
@@ -806,7 +805,7 @@ mod tests {
                 InterceptRuleHandle {
                     pattern: "*/ads/*".into(),
                     action_kind: "block",
-                    _handle: zendriver_interception::InterceptHandle::for_tests(),
+                    handle: zendriver_interception::InterceptHandle::for_tests(),
                     tab_id: "tab-a".into(),
                 },
             );
@@ -815,7 +814,7 @@ mod tests {
                 InterceptRuleHandle {
                     pattern: "*/api/*".into(),
                     action_kind: "respond",
-                    _handle: zendriver_interception::InterceptHandle::for_tests(),
+                    handle: zendriver_interception::InterceptHandle::for_tests(),
                     tab_id: "tab-b".into(),
                 },
             );

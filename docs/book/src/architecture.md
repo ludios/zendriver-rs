@@ -191,7 +191,7 @@ own isolated world (allocated per frame contextId).
 | `zendriver` | High-level Browser/Tab/Element + traits | yes |
 | `zendriver-transport` | Actor + WebSocket + observers | yes, but [SEMVER] looser |
 | `zendriver-stealth` | Fingerprint composition + bootstrap JS | yes |
-| `zendriver-interception` | `Fetch.*` actor + rule + stream API | yes, gated `interception` |
+| `zendriver-interception` | Per-session `Fetch.*` multiplexer + rule + stream API | yes, gated `interception` |
 | `zendriver-cloudflare` | Turnstile bypass | yes, gated `cloudflare` |
 | `zendriver-fetcher` | Chrome-for-Testing downloader | yes, gated `fetcher` |
 
@@ -209,7 +209,7 @@ seam.
 - [`zendriver-transport` rustdoc] — wire types, observer trait, the
   `MockConnection` test harness.
 - [Stealth](./stealth.md) — what the bootstrap JS actually patches.
-- [Interception](./interception.md) — how the `Fetch.*` actor sits on
-  top of the same transport.
+- [Interception](./interception.md) — how each tab's `Fetch.*`
+  multiplexer sits on top of the same transport.
 
 [`zendriver-transport` rustdoc]: https://docs.rs/zendriver-transport

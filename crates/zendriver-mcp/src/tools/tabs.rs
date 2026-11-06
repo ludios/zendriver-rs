@@ -324,10 +324,10 @@ pub async fn close(
 ///   the task (it keeps running), it does not cancel it. So the retain
 ///   closure explicitly `.abort()`s each removed entry's task before
 ///   returning `false`.
-/// - `rules`: the removed value's `_handle` field is a
-///   `zendriver::InterceptHandle`, whose `Drop` impl cancels the
-///   interception actor. A plain `retain` (letting the removed values drop)
-///   is therefore enough — no explicit teardown call needed.
+/// - `rules`: the removed value's `handle` field is a
+///   `zendriver::InterceptHandle`, whose `Drop` impl removes the rule's
+///   layer. A plain `retain` (letting the removed values drop) is
+///   therefore enough — no explicit teardown call needed.
 ///
 /// Not currently called for `SessionState::monitors`: `MonitorState` has no
 /// `tab_id` field today, so there is no cheap per-tab filter to apply here
@@ -482,7 +482,7 @@ mod tests {
     /// `drain_tab_scoped` must reap only the closed tab's entries: an
     /// expectation's spawned `task` is `.abort()`ed (dropping a `JoinHandle`
     /// alone detaches rather than cancels), while a rule's `InterceptHandle`
-    /// tears down via `Drop` — so a plain `retain` suffices for rules. A
+    /// removes its layer on `Drop` — so a plain `retain` suffices for rules. A
     /// survivor on a different `tab_id` must remain in both maps untouched.
     #[cfg(all(feature = "expect", feature = "interception"))]
     #[tokio::test]
@@ -531,7 +531,7 @@ mod tests {
             InterceptRuleHandle {
                 pattern: "*/ads/*".into(),
                 action_kind: "block",
-                _handle: zendriver_interception::InterceptHandle::for_tests(),
+                handle: zendriver_interception::InterceptHandle::for_tests(),
                 tab_id: "closed-tab-id".into(),
             },
         );
@@ -540,7 +540,7 @@ mod tests {
             InterceptRuleHandle {
                 pattern: "*/api/*".into(),
                 action_kind: "respond",
-                _handle: zendriver_interception::InterceptHandle::for_tests(),
+                handle: zendriver_interception::InterceptHandle::for_tests(),
                 tab_id: "other-tab-id".into(),
             },
         );

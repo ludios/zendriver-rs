@@ -38,7 +38,8 @@ async fn main() -> zendriver::Result<()> {
                 ..Default::default()
             }
         })?
-        .start();
+        .start()
+        .await?;
 
     tab.goto("https://httpbin.org/headers").await?;
     tab.wait_for_load().await?;

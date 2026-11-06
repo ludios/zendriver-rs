@@ -17,8 +17,8 @@
 //!
 //! Internally `PausedRequest` carries a [`SessionHandle`] (not a full `Tab`)
 //! so the type lives in this crate without a reverse dependency on
-//! `zendriver`. The builder in T6/T7 constructs each instance from the actor
-//! loop's session + the decoded event payload.
+//! `zendriver`. The multiplexer constructs each instance from its session
+//! and the decoded event payload.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -67,7 +67,7 @@ pub struct PausedRequest {
 }
 
 impl PausedRequest {
-    /// Construct a `PausedRequest` from the actor/builder. `pub(crate)` so
+    /// Construct a `PausedRequest` from the multiplexer. `pub(crate)` so
     /// the public API stays "consume one of the action methods" — callers
     /// never assemble a `PausedRequest` by hand.
     pub(crate) fn new(
@@ -93,11 +93,11 @@ impl PausedRequest {
     ///
     /// ```no_run
     /// # use futures::StreamExt;
-    /// # async fn ex(tab: &zendriver_transport::SessionHandle)
+    /// # async fn ex(tab: &zendriver_interception::Interceptor)
     /// #   -> Result<(), zendriver_interception::InterceptionError> {
     /// use zendriver_interception::InterceptBuilder;
     ///
-    /// let mut stream = Box::pin(InterceptBuilder::new(tab).subscribe());
+    /// let mut stream = InterceptBuilder::new(tab).subscribe().await?;
     /// while let Some(req) = stream.next().await {
     ///     req.continue_().await?;
     /// }
@@ -121,12 +121,12 @@ impl PausedRequest {
     ///
     /// ```no_run
     /// # use futures::StreamExt;
-    /// # async fn ex(tab: &zendriver_transport::SessionHandle)
+    /// # async fn ex(tab: &zendriver_interception::Interceptor)
     /// #   -> Result<(), zendriver_interception::InterceptionError> {
     /// use zendriver_interception::{AbortReason, InterceptBuilder};
     ///
-    /// let mut stream = Box::pin(InterceptBuilder::new(tab).subscribe());
-    /// if let Some(req) = stream.next().await {
+    /// let mut stream = InterceptBuilder::new(tab).subscribe().await?;
+    /// while let Some(req) = stream.next().await {
     ///     req.abort(AbortReason::BlockedByClient).await?;
     /// }
     /// # Ok(()) }
@@ -160,7 +160,7 @@ impl PausedRequest {
         body: Vec<u8>,
     ) -> Result<(), InterceptionError> {
         self.released = true;
-        let response_headers = crate::actor::headers_to_cdp(&headers);
+        let response_headers = crate::fetch::headers_to_cdp(&headers);
         self.session
             .call(
                 "Fetch.fulfillRequest",
@@ -198,7 +198,7 @@ impl PausedRequest {
         if let Some(headers) = overrides.headers {
             params.insert(
                 "headers".into(),
-                Value::Array(crate::actor::headers_to_cdp(&headers)),
+                Value::Array(crate::fetch::headers_to_cdp(&headers)),
             );
         }
         if let Some(post_data) = overrides.post_data {
@@ -232,14 +232,13 @@ impl PausedRequest {
     ///
     /// ```no_run
     /// # use futures::StreamExt;
-    /// # async fn ex(tab: &zendriver_transport::SessionHandle)
+    /// # async fn ex(tab: &zendriver_interception::Interceptor)
     /// #   -> Result<(), zendriver_interception::InterceptionError> {
     /// use zendriver_interception::InterceptBuilder;
     ///
-    /// let mut stream = Box::pin(
-    ///     InterceptBuilder::new(tab).pattern("*").at_response().subscribe(),
-    /// );
-    /// if let Some(req) = stream.next().await {
+    /// let builder = InterceptBuilder::new(tab).pattern("*").at_response();
+    /// let mut stream = builder.subscribe().await?;
+    /// while let Some(req) = stream.next().await {
     ///     // Rewrite to 204 No Content, keep the upstream body.
     ///     req.continue_response(Some(204), None, None).await?;
     /// }
@@ -263,7 +262,7 @@ impl PausedRequest {
             phrase,
             headers,
         };
-        let params = crate::actor::continue_response_params(&self.request_id, response, overrides);
+        let params = crate::fetch::continue_response_params(&self.request_id, response, overrides);
         self.session.call("Fetch.continueResponse", params).await?;
         Ok(())
     }

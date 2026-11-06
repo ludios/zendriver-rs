@@ -113,16 +113,16 @@ let ctx = browser
 ```
 
 Under the hood, `build()` registers the credentials in the browser's
-per-context registry; each tab opened in that context has a
-`Fetch.authRequired` handler auto-installed, chained into the same
-per-session interception actor used for tracker blocking (never two
-actors on one session). The handler gives the credentials only to the
+per-context registry; each tab opened in that context answers
+`Fetch.authRequired` with them, from the same layer of the tab's
+interception as tracker blocking, before the tab's page runs. The tab
+gives the credentials only to the
 proxy, never to a site that asks for its own with a 401, and only once for
 each combination of request, proxy and auth scheme: if the proxy rejects
 them within a minute, the request fails instead of retrying forever. Without the `interception` feature, `.proxy()`
 and `.proxy_bypass()` still work (proxy routing only); embedded or
-explicit credentials are logged as inactive since there is no actor to
-install them into.
+explicit credentials are logged as inactive, since nothing answers the
+proxy's challenges without it.
 
 `create_browser_context_with` (proxy, no auth) and
 `create_browser_context` (no proxy) remain available as lighter-weight

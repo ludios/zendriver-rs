@@ -202,24 +202,23 @@ pub struct ExpectationHandle {
     pub tab_id: String,
 }
 
-/// One MCP interception rule = one `zendriver_interception::InterceptHandle`.
+/// One MCP interception rule = one layer of its tab's interception.
 ///
-/// Holding the handle is what keeps the rule live: dropping it (via
-/// [`HashMap::remove`] or [`HashMap::clear`]) cancels the actor and tears
-/// down `Fetch.enable` on that rule's session. `pattern` + `action_kind`
+/// Holding the handle is what keeps the rule live: dropping or stopping it
+/// removes the layer, and only that layer. `pattern` + `action_kind`
 /// are kept alongside so `browser_intercept_list_rules` can report back
 /// what each id corresponds to without poking at the handle's internals.
 ///
 /// `tab_id` is the CDP target id of the tab the rule was registered against
 /// (same id space as `zendriver::Tab::target_id` /
 /// `SessionState::current_tab_id`), so `browser_tab_close` can drop this
-/// entry (and, via `Drop`, cancel its actor) when its tab closes — see
+/// entry (and, via `Drop`, remove its layer) when its tab closes — see
 /// `crate::tools::tabs::drain_tab_scoped`.
 #[cfg(feature = "interception")]
 pub struct InterceptRuleHandle {
     pub pattern: String,
     pub action_kind: &'static str,
-    pub _handle: zendriver::InterceptHandle,
+    pub handle: zendriver::InterceptHandle,
     pub tab_id: String,
 }
 

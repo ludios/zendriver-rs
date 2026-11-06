@@ -16,10 +16,12 @@ zendriver = { version = "0.1", features = ["interception"] }
 ```
 
 The entry point is [`Tab::intercept`], which returns an
-[`InterceptBuilder`] bound to that tab's session. The builder has two
-terminal methods: [`start`] activates a background actor with declarative
-rules, and [`subscribe`] returns a `Stream<Item = PausedRequest>` for the
-manual escape-hatch path.
+[`InterceptBuilder`] for one layer of that tab's interception. The builder
+has two terminal methods, both `async`: [`start`] adds a layer of
+declarative rules, and [`subscribe`] adds a layer that hands each paused
+request to the returned stream, for the manual escape-hatch path. Both
+return once Chrome intercepts, so a request sent afterwards is
+intercepted.
 
 [`Tab::intercept`]: https://docs.rs/zendriver/latest/zendriver/struct.Tab.html#method.intercept
 [`InterceptBuilder`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html
@@ -51,13 +53,19 @@ character).
 {{#include ../../../crates/zendriver/examples/intercept_block_ads.rs}}
 ```
 
-[`start`] returns an [`InterceptHandle`]. The handle owns the background
-actor — when you drop it, the actor receives a cancel signal, dispatches
-`Fetch.disable`, and stops processing events. **Bind the handle to a
-variable; letting it drop immediately silently disables interception.**
+[`start`] returns an [`InterceptHandle`]. The handle keeps the rules in
+force — when you drop it, its layer is removed, and the tab's other layers
+keep working (`Fetch.disable` is sent once no layer is left). Await
+[`stop`] instead of dropping it to wait until Chrome has applied the
+change. **Bind the handle to a variable; letting it drop immediately
+silently disables interception.**
 Use `let _intercept = ...` (note the leading underscore — Rust would warn
 on a plain `_`, which is a different binding semantics that drops at end
 of statement, not end of scope).
+
+[`stop`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptHandle.html#method.stop
+[`InterceptHandle`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptHandle.html
+[`RequestInfo`]: https://docs.rs/zendriver/latest/zendriver/struct.RequestInfo.html
 
 ### Modifying headers
 
@@ -77,8 +85,8 @@ so Chrome has already merged duplicate names and the on-the-wire ordering is
 gone before the closure runs. Response headers (`modify_response`) keep both,
 since CDP sends those as an array.
 
-The closure runs synchronously per-event on the actor task; it should
-not block. Spawn off the runtime if you need to call out to an async
+The closure runs synchronously per-event on the tab's interception task;
+it should not block. Spawn off the runtime if you need to call out to an async
 service before deciding the override.
 
 ### Redirect and synthesize
@@ -92,12 +100,27 @@ let _intercept = tab.intercept()
         vec![("content-type".into(), "application/json".into())],
         b"{\"ok\":true}".to_vec(),
     )?
-    .start();
+    .start()
+    .await?;
 ```
 
 Both `redirect` and `respond` reach an internal `Fetch.continueRequest`
-or `Fetch.fulfillRequest` — the actor decides per event, so a single
-`InterceptHandle` can host any mix of the four rule types.
+or `Fetch.fulfillRequest` — the first rule that matches decides per event,
+so a single `InterceptHandle` can host any mix of the rule types.
+
+### Several layers on one tab
+
+Each `start()` or `subscribe()` adds a layer, and a tab's layers share its
+one `Fetch` configuration: Chrome pauses what any of them asks for. A
+paused request goes to the layers newest first. A layer considers it only
+if one of its own patterns matches the request's URL, resource type and
+stage; a rule layer takes it if one of its rules matches, a stream layer
+takes every request it considers, and a request no layer takes is
+continued unchanged. So a later layer overrides an earlier one where both
+apply, and leaves it working everywhere else. The browser's own
+[tracker blocking](#tracker--fingerprinter-blocklist) and proxy
+credentials are the tab's oldest layer. A proxy's challenge gets the
+credentials of the newest layer that has some.
 
 ## Stream API
 
@@ -109,11 +132,11 @@ to your own pipeline — call [`subscribe`] instead of `start`:
 use futures::StreamExt;
 use zendriver::{AbortReason, RequestStage};
 
-let mut stream = Box::pin(
-    tab.intercept()
-        .at_response()  // pause AFTER headers come back
-        .subscribe()
-);
+let mut stream = tab
+    .intercept()
+    .at_response()  // pause AFTER headers come back
+    .subscribe()
+    .await?;
 
 while let Some(paused) = stream.next().await {
     let body = paused.body().await?;
@@ -138,11 +161,11 @@ stage Chrome has no body yet.
 [`modify_and_continue`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.modify_and_continue
 [`body`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.body
 
-**Forgetting to release a `PausedRequest` deadlocks the page.** Chrome
-holds the connection open until exactly one of the four terminal methods
-arrives. If your stream consumer panics mid-flow, the actor's `Drop`
-will dispatch `Fetch.disable` — every still-paused request fails with
-`net::ERR_BLOCKED_BY_CLIENT`, which is unpleasant but not silent.
+**Release every `PausedRequest` promptly.** Chrome holds the request
+until one of the terminal methods arrives, so a request your consumer
+holds on to stalls the page. A `PausedRequest` dropped without one (say,
+by a panic mid-flow) is continued unchanged, and so is each request the
+stream took that nobody read when the stream is dropped.
 
 ## Tracker / fingerprinter blocklist
 
@@ -204,13 +227,15 @@ let _h = tab.intercept()
     .resource(ResourceType::Image)  // only images
     .at_response()           // pause after response headers, not before request
     .block("*/static/*")?
-    .start();
+    .start()
+    .await?;
 ```
 
 Each call to `pattern()` opens a new `Fetch.RequestPattern`; chained
 `resource` / `at_request` / `at_response` modifiers mutate that most-recent
-pattern. Without a `pattern()`, the builder synthesizes one matching all
-URLs at the rule-declared stage.
+pattern. Without a `pattern()`, the builder uses one matching all URLs at
+the `Request` stage. The patterns are also the requests the layer
+considers (see [Several layers on one tab](#several-layers-on-one-tab)).
 
 ## Gotchas
 
@@ -219,10 +244,9 @@ URLs at the rule-declared stage.
   latency. On heavy pages, expect 10-30% throughput loss even with a
   no-op `continue_` handler. Scope patterns tightly; prefer
   resource-type filters over `*` patterns.
-- **Each tab carries one actor.** Calling `tab.intercept().start()` twice
-  on the same tab without dropping the first handle leaves the second
-  rule set inert — the first actor still has `Fetch.enable` and the new
-  one can't re-enable on the same target.
+- **A stream layer takes everything it pauses.** A `subscribe()` with the
+  default `*` pattern sees every request before any older layer does,
+  tracker blocking included: block or continue each one yourself.
 - **CSP-restricted pages.** `Fetch.fulfillRequest` synthesizes responses
   that may violate a page's `Content-Security-Policy` (especially for
   scripts). Combine with `StealthProfile::spoofed()` which sets

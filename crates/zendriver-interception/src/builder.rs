@@ -5,17 +5,14 @@
 //!   [`modify_request`], [`modify_response`] for declarative rules, plus
 //!   [`pattern`] / [`at_request`] / [`at_response`] / [`resource`] to control
 //!   which CDP `Fetch.RequestPattern` entries are sent on `Fetch.enable`.
-//! - **Activate**: [`start`](InterceptBuilder::start) spawns the actor task
-//!   (T6) with the registered rules + patterns, returning an
-//!   [`InterceptHandle`] for RAII teardown. Alternatively,
-//!   [`subscribe`](InterceptBuilder::subscribe) returns a
-//!   `Stream<Item = PausedRequest>` for the manual escape-hatch path —
-//!   callers drive Chrome's interception loop themselves.
+//! - **Activate**: [`start`](InterceptBuilder::start) adds the rules, with
+//!   the patterns, to the session's [`Interceptor`] as one layer, returning
+//!   an [`InterceptHandle`] that removes the layer when dropped.
+//!   Alternatively, [`subscribe`](InterceptBuilder::subscribe) adds a layer
+//!   that hands each paused request to the returned [`InterceptStream`], for
+//!   the caller to release.
 //!
-//! The `tab` field is a borrow of [`SessionHandle`] (not the full `Tab` from
-//! `zendriver` core) — this crate must not depend on `zendriver` (cycle).
-//! `Tab::intercept()` in `zendriver` constructs the builder via
-//! `InterceptBuilder::new(self.session())`.
+//! `Tab::intercept()` in `zendriver` builds on the tab's [`Interceptor`].
 //!
 //! [`block`]: InterceptBuilder::block
 //! [`block_hosts`]: InterceptBuilder::block_hosts
@@ -30,20 +27,11 @@
 
 use std::sync::Arc;
 
-use futures::stream::{Stream, StreamExt};
-use serde_json::{Value, json};
-use tokio::sync::oneshot;
-use tokio_util::sync::CancellationToken;
-use tracing::warn;
-use zendriver_transport::SessionHandle;
+use tokio::sync::mpsc;
 
-use crate::actor::{
-    InterceptHandle, RequestPausedEvent, build_request_info, build_response_info, run_actor,
-    serialize_pattern,
-};
 use crate::error::InterceptionError;
 use crate::host_matcher::HostMatcher;
-use crate::paused::PausedRequest;
+use crate::interceptor::{Filter, InterceptHandle, InterceptStream, Interceptor, Layer, Responder};
 use crate::rule::Rule;
 use crate::types::{
     RequestInfo, RequestOverrides, RequestStage, ResourceType, ResponseInfo, ResponseOverrides,
@@ -72,54 +60,49 @@ pub struct RequestPattern {
     pub request_stage: Option<RequestStage>,
 }
 
-/// Fluent builder for rule-based interception against a single tab session.
+/// Fluent builder for one layer of a session's interception.
 ///
-/// Construct via `Tab::intercept()` (gated `feature = "interception"`, wired
-/// in Task 7). Chain configuration methods to register rules and declare CDP
-/// `Fetch.enable` patterns, then call [`start`](Self::start) (Task 7) to
-/// activate the background actor or [`subscribe`](Self::subscribe) (Task 7)
-/// for the stream-driven escape hatch.
-///
-/// `'tab` ties the builder's lifetime to the tab's session — the borrow lasts
-/// only until `start()` / `subscribe()` consumes the builder.
+/// Construct via `Tab::intercept()` (gated `feature = "interception"`) or
+/// [`InterceptBuilder::new`]. Chain configuration methods to register rules
+/// and declare the CDP `Fetch` patterns, then call [`start`](Self::start) to
+/// have the rules applied, or [`subscribe`](Self::subscribe) to release each
+/// paused request yourself.
 //
 // `Debug` works because `Rule` has a hand-written `Debug` impl that renders
 // the closure variant's body as `<closure>`. Inner `Vec<Rule>` derives via
 // that.
 #[derive(Debug)]
-pub struct InterceptBuilder<'tab> {
-    tab: &'tab SessionHandle,
+pub struct InterceptBuilder {
+    interceptor: Interceptor,
     patterns: Vec<RequestPattern>,
     rules: Vec<Rule>,
     /// Optional proxy credentials. When set, `Fetch.enable` is sent with
-    /// `handleAuthRequests: true` and the actor answers a proxy's
-    /// `Fetch.authRequired` with these credentials. See
-    /// cdpdriver/zendriver#208.
+    /// `handleAuthRequests: true` and a proxy's `Fetch.authRequired` is
+    /// answered with these credentials. See cdpdriver/zendriver#208.
     proxy_auth: Option<(String, String)>,
 }
 
-impl<'tab> InterceptBuilder<'tab> {
-    /// Construct a fresh builder bound to `tab`'s session.
+impl InterceptBuilder {
+    /// Construct a fresh builder for a layer of `interceptor`'s session.
     ///
-    /// `pub` so adapter crates (e.g. `zendriver` core's `Tab::intercept()`
-    /// shim) can construct it from a `&SessionHandle` without going through
-    /// a trait. End users go through `Tab::intercept()` rather than calling
-    /// this directly.
+    /// End users go through `Tab::intercept()` rather than calling this
+    /// directly.
     ///
     /// ```no_run
-    /// # async fn ex(tab: &zendriver_transport::SessionHandle)
+    /// # async fn ex(interceptor: &zendriver_interception::Interceptor)
     /// #   -> Result<(), zendriver_interception::InterceptionError> {
     /// use zendriver_interception::InterceptBuilder;
     ///
-    /// let _handle = InterceptBuilder::new(tab)
+    /// let _handle = InterceptBuilder::new(interceptor)
     ///     .block("*/tracker.js")?
-    ///     .start();
+    ///     .start()
+    ///     .await?;
     /// # Ok(()) }
     /// ```
     #[must_use]
-    pub fn new(tab: &'tab SessionHandle) -> Self {
+    pub fn new(interceptor: &Interceptor) -> Self {
         Self {
-            tab,
+            interceptor: interceptor.clone(),
             patterns: Vec::new(),
             rules: Vec::new(),
             proxy_auth: None,
@@ -143,17 +126,10 @@ impl<'tab> InterceptBuilder<'tab> {
     /// HTTP auth, add an `Authorization` header to its requests with
     /// [`modify_request`](Self::modify_request).
     ///
-    /// Compose with rules: an `InterceptBuilder` configured with
-    /// `handle_proxy_auth` and `block` / `redirect` / `respond` rules
-    /// handles both from the same actor. Combine with
-    /// [`BrowserBuilder::proxy_auth`] in the `zendriver` crate if you want
-    /// the wiring installed automatically.
-    ///
-    /// **Only [`start`](Self::start) honors this.** The
-    /// [`subscribe`](Self::subscribe) escape hatch has no auth path — it never
-    /// subscribes to `Fetch.authRequired`, so it leaves
-    /// `handleAuthRequests: false` and logs an error rather than pausing auth
-    /// challenges nothing would answer. Use `start()` when you need auth.
+    /// Composes with rules, and with [`subscribe`](Self::subscribe). While
+    /// several layers of a session have credentials, the newest layer's go
+    /// to the proxy. [`BrowserBuilder::proxy_auth`] in the `zendriver` crate
+    /// installs this for you.
     ///
     /// See cdpdriver/zendriver#208.
     #[must_use]
@@ -173,7 +149,7 @@ impl<'tab> InterceptBuilder<'tab> {
     /// challenge.
     ///
     /// Narrowing to `Document` means only the main-frame navigation pauses and
-    /// round-trips through the interception actor; other requests (XHR,
+    /// round-trips through the multiplexer; other requests (XHR,
     /// subresources, and any parallel/pipelined connection that also needs
     /// credentials) are not paused and will not have their auth challenge
     /// answered by this builder. Use plain
@@ -289,7 +265,7 @@ impl<'tab> InterceptBuilder<'tab> {
 
     /// Register a [`Rule::Modify`] driven by a user closure.
     ///
-    /// The closure runs on the actor task per matching request — it must be
+    /// The closure runs on the multiplexer's task per matching request — it must be
     /// `Send + Sync` and `'static`. Wrap shared state in `Arc` if needed.
     pub fn modify_request<F>(
         mut self,
@@ -315,7 +291,7 @@ impl<'tab> InterceptBuilder<'tab> {
     /// every header you want forwarded.
     ///
     /// Like [`modify_request`](Self::modify_request), the closure runs on the
-    /// actor task per matching response, so it must be `Send + Sync` and
+    /// multiplexer's task per matching response, so it must be `Send + Sync` and
     /// `'static`. Wrap shared state in `Arc` if needed.
     pub fn modify_response<F>(
         mut self,
@@ -332,152 +308,105 @@ impl<'tab> InterceptBuilder<'tab> {
         Ok(self)
     }
 
-    /// Activate the rule-based interception loop.
+    /// Add the rules to the session's interception as one layer, and return
+    /// once Chrome pauses the requests they need: requests sent from then
+    /// on are intercepted.
     ///
-    /// Spawns the background actor task with the registered rules and CDP
-    /// `RequestPattern` list, and returns an [`InterceptHandle`] whose
-    /// [`Drop`] (or explicit [`stop`](InterceptHandle::stop)) tears the
-    /// actor down.
+    /// The layer stays in force until the returned [`InterceptHandle`] is
+    /// dropped or [stopped](InterceptHandle::stop). Layers added later take
+    /// precedence: each paused request goes to the newest layer that has a
+    /// pattern and a rule for it.
     ///
     /// If no [`pattern`](Self::pattern) entries were added, a single
-    /// match-all (`"*"`) pattern is sent so Chrome actually pauses requests
+    /// match-all (`"*"`) pattern is used so Chrome actually pauses requests
     /// — without it, `Fetch.enable` would attach to nothing and the rule
     /// list would never fire.
-    #[must_use = "interception stops when the handle is dropped — bind the returned InterceptHandle to keep it alive"]
-    pub fn start(mut self) -> InterceptHandle {
-        if self.patterns.is_empty() && (!self.rules.is_empty() || self.proxy_auth.is_some()) {
-            // A match-all pattern is required in two cases:
-            //
-            // 1. Rules need Chrome to actually pause requests — without a
-            //    pattern `Fetch.enable` attaches to nothing and every rule is a
-            //    silent no-op.
-            // 2. `handleAuthRequests: true` (the proxy-auth path):
-            //    Chrome (~M132+) REJECTS `Fetch.enable { patterns: [],
-            //    handleAuthRequests: true }` with CDP error -32602 "Can't
-            //    specify empty patterns with handleAuth set". Older Chrome
-            //    tolerated empty patterns — auth challenges still surfaced while
-            //    pausing zero requests — so we used to leave them empty on the
-            //    auth-ONLY path to avoid distorting the page's XHR cadence
-            //    (reese84 / Incapsula read it). Modern Chrome no longer permits
-            //    that, so a pattern is mandatory whenever auth handling is on.
-            //
-            // On the auth-only path this pauses (and immediately auto-continues
-            // — see `handle_paused`'s no-match arm) every request. If that
-            // per-request CDP round-trip regresses a timing-sensitive bot
-            // sensor, a caller can register an explicit narrower pattern (e.g.
-            // `resource_type: Document`, so only the main navigation — which
-            // carries the first proxy 407 — is paused), at the risk of missing
-            // 407s on parallel proxy connections.
-            self.patterns.push(RequestPattern {
-                url_pattern: Some("*".into()),
-                ..RequestPattern::default()
-            });
-        }
-        let cancel = CancellationToken::new();
-        let (done_tx, done_rx) = oneshot::channel();
-        let actor_session = self.tab.clone();
-        let actor_cancel = cancel.clone();
-        let actor_rules = self.rules;
-        let actor_patterns = self.patterns;
-        let actor_auth = self.proxy_auth;
-        tokio::spawn(async move {
-            run_actor(
-                actor_session,
-                actor_rules,
-                actor_patterns,
-                actor_auth,
-                actor_cancel,
-                done_tx,
-            )
-            .await;
-        });
-        InterceptHandle::new(cancel, done_rx)
+    ///
+    /// # Errors
+    ///
+    /// [`InterceptionError::InvalidPattern`] for a pattern that doesn't
+    /// compile, and [`InterceptionError::Call`] if Chrome refused the
+    /// patterns, or the session is gone.
+    pub async fn start(self) -> Result<InterceptHandle, InterceptionError> {
+        let interceptor = self.interceptor.clone();
+        let layer = self.into_layer(Responder::Rules)?;
+        interceptor.add(layer).await
     }
 
-    /// Manual escape-hatch: subscribe to raw [`PausedRequest`] events.
+    /// Add a layer that hands each request it pauses to the returned
+    /// [`InterceptStream`], and return once Chrome pauses them.
     ///
-    /// Enables `Fetch` interception with the declared patterns (defaulting
-    /// to a single match-all `"*"` pattern when none were added) and returns
-    /// a [`Stream`] that yields one [`PausedRequest`] per `Fetch.requestPaused`
-    /// CDP event. Callers must dispatch one of `PausedRequest`'s terminal
-    /// methods (`continue_` / `abort` / `respond` / `modify_and_continue`)
-    /// to release each pause — Chrome holds the request open otherwise.
+    /// The layer uses the declared patterns (a single match-all `"*"`
+    /// pattern when none were added), and takes every request they pause
+    /// at that stage, before any older layer sees it. Release each
+    /// [`PausedRequest`](crate::PausedRequest) with one of its terminal
+    /// methods (`continue_` / `abort` / `respond` / `modify_and_continue` /
+    /// `continue_response`): Chrome holds the request until then.
     ///
-    /// Rules registered via `block` / `redirect` / `respond` / `modify_request`
-    /// are ignored on this path: stream consumers drive every paused request
-    /// themselves. Use [`start`](Self::start) when you want the actor to
-    /// apply rules automatically.
+    /// Rules registered via `block` / `redirect` / `respond` /
+    /// `modify_request` are ignored on this path: stream consumers drive
+    /// every paused request themselves. Use [`start`](Self::start) when you
+    /// want them applied. [`handle_proxy_auth`](Self::handle_proxy_auth)
+    /// credentials are honored: a proxy's challenge never reaches the
+    /// stream.
     ///
-    /// [`handle_proxy_auth`](Self::handle_proxy_auth) credentials are **also ignored**
-    /// here, and calling both logs an error. This path never subscribes to
-    /// `Fetch.authRequired`, so `Fetch.enable` is deliberately sent with
-    /// `handleAuthRequests: false`: flipping it on would make Chrome pause
-    /// every auth challenge with nobody to answer it, turning a visible 407
-    /// into a hang. Behind a proxy that requires credentials, use
-    /// [`start`](Self::start) instead.
+    /// Dropping the stream removes the layer, and continues each request it
+    /// took that wasn't read yet.
     ///
-    /// The returned stream owns the underlying CDP subscription. Dropping
-    /// the stream tears the subscription down — Chrome's interception stays
-    /// active until the session is closed, but no further pauses surface to
-    /// the caller.
-    #[must_use = "the returned stream is the only handle on the subscription"]
-    pub fn subscribe(mut self) -> impl Stream<Item = PausedRequest> + Send + use<> {
-        if self.proxy_auth.is_some() {
-            // Loud, because the alternative failure is invisible: behind a
-            // proxy every navigation 407s and the caller sees only empty
-            // pages. We cannot honor the credentials here — this path has no
-            // `Fetch.authRequired` subscription, and enabling
-            // `handleAuthRequests` without one converts the 407 into a hang.
-            tracing::error!(
-                "interception: handle_proxy_auth() credentials are ignored by subscribe(); \
-                 auth challenges will NOT be answered — use start() for proxy auth"
-            );
-        }
-        if self.patterns.is_empty() {
+    /// # Errors
+    ///
+    /// As for [`start`](Self::start).
+    pub async fn subscribe(self) -> Result<InterceptStream, InterceptionError> {
+        let interceptor = self.interceptor.clone();
+        let (requests, received) = mpsc::unbounded_channel();
+        let layer = self.into_layer(|_| Responder::Stream(requests))?;
+        Ok(InterceptStream {
+            requests: received,
+            _layer: interceptor.add(layer).await?,
+        })
+    }
+
+    /// The layer this builder describes, its rules taken by `responder`.
+    ///
+    /// A layer with rules, credentials, or a stream and no pattern gets a
+    /// match-all one. That covers two needs:
+    ///
+    /// 1. Rules need Chrome to actually pause requests — without a pattern
+    ///    `Fetch.enable` attaches to nothing and every rule is a silent
+    ///    no-op.
+    /// 2. `handleAuthRequests: true` (the proxy-auth path): Chrome (~M132+)
+    ///    REJECTS `Fetch.enable { patterns: [], handleAuthRequests: true }`
+    ///    with CDP error -32602 "Can't specify empty patterns with
+    ///    handleAuth set", and only surfaces the challenges of requests
+    ///    that a Request-stage pattern paused.
+    ///
+    /// On the auth-only path this pauses (and immediately continues) every
+    /// request. If that per-request CDP round-trip regresses a
+    /// timing-sensitive bot sensor, a caller can register an explicit
+    /// narrower pattern (e.g. `resource_type: Document`, so only the main
+    /// navigation — which carries the first proxy 407 — is paused), at the
+    /// risk of missing 407s on parallel proxy connections.
+    fn into_layer(
+        mut self,
+        responder: impl FnOnce(Vec<Rule>) -> Responder,
+    ) -> Result<Layer, InterceptionError> {
+        let responder = responder(self.rules);
+        let pauses_something = match &responder {
+            Responder::Rules(rules) => !rules.is_empty() || self.proxy_auth.is_some(),
+            Responder::Stream(_) => true,
+        };
+        if self.patterns.is_empty() && pauses_something {
             self.patterns.push(RequestPattern {
                 url_pattern: Some("*".into()),
                 ..RequestPattern::default()
             });
         }
-        // Same ordering as the actor: subscribe BEFORE the (fire-and-forget)
-        // enable so we don't drop events Chrome emits between the enable
-        // round-trip and the subscription registration.
-        let raw = self.tab.subscribe::<Value>("Fetch.requestPaused");
-        let session = self.tab.clone();
-        let enable_session = session.clone();
-        let enable_patterns: Vec<Value> = self.patterns.iter().map(serialize_pattern).collect();
-        tokio::spawn(async move {
-            if let Err(e) = enable_session
-                .call(
-                    "Fetch.enable",
-                    json!({
-                        "patterns": enable_patterns,
-                        // Always false on this path — see the doc comment: no
-                        // `Fetch.authRequired` subscription exists here, so
-                        // `true` would pause challenges forever.
-                        "handleAuthRequests": false,
-                    }),
-                )
-                .await
-            {
-                warn!(error = %e, "interception: Fetch.enable failed; subscribe() stream will be empty");
-            }
-        });
-        raw.filter_map(move |ev_value| {
-            let session = session.clone();
-            async move {
-                let ev: RequestPausedEvent = match serde_json::from_value(ev_value) {
-                    Ok(ev) => ev,
-                    Err(e) => {
-                        warn!(error = %e, "interception: skipping malformed Fetch.requestPaused event");
-                        return None;
-                    }
-                };
-                let info = build_request_info(&ev);
-                let response = build_response_info(&ev);
-                Some(PausedRequest::new(ev.request_id, info, response, session))
-            }
-        })
+        let filters = self
+            .patterns
+            .into_iter()
+            .map(Filter::new)
+            .collect::<Result<_, _>>()?;
+        Ok(Layer::new(filters, responder, self.proxy_auth))
     }
 
     /// Lazily push an empty pattern if none exists, so the stage/resource
@@ -493,7 +422,7 @@ impl<'tab> InterceptBuilder<'tab> {
     }
 
     /// Test-only accessor: number of registered rules. Used by the Task 5
-    /// builder test (and future actor tests) without exposing the rule list
+    /// builder tests without exposing the rule list
     /// as public API.
     #[cfg(test)]
     pub(crate) fn rules_count(&self) -> usize {
@@ -504,19 +433,27 @@ impl<'tab> InterceptBuilder<'tab> {
 #[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use futures::StreamExt;
+    use serde_json::{Value, json};
     use zendriver_transport::testing::MockConnection;
+
+    use super::*;
+    use crate::interceptor::testing::{applied, mock_interceptor, pause};
+
+    /// The `Fetch.enable` parameters that `builder.start()` sends.
+    async fn enable_params(mock: &mut MockConnection, builder: InterceptBuilder) -> Value {
+        applied(mock, builder.start()).await.1
+    }
 
     /// Register three rules (block + redirect + respond) on a fresh builder
     /// and assert the rule list grew to length 3. Verifies the chain wiring
-    /// without touching the actor (Task 6) or CDP dispatch (Task 7).
+    /// without touching Chrome.
     #[tokio::test]
     async fn three_rules_register_and_count() {
-        let (_mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-
-        let builder = InterceptBuilder::new(&sess)
+        let (_mock, conn, interceptor) = mock_interceptor();
+        let builder = InterceptBuilder::new(&interceptor)
             .block("*/ads/*")
             .unwrap()
             .redirect("*/old/*", "https://example.com/new/")
@@ -533,103 +470,18 @@ mod tests {
         conn.shutdown();
     }
 
-    /// End-to-end on the rule-driven `start()` path: register a Block rule,
-    /// spawn the actor via `start()`, observe `Fetch.enable`, emit a matching
-    /// `Fetch.requestPaused`, and assert `Fetch.failRequest` is dispatched.
-    ///
-    /// This is the actor test from T6 reframed through the `start()` entry
-    /// point — proves the builder properly forwards rules + patterns to
-    /// `run_actor` (and that `start()` actually spawns the task).
-    #[tokio::test]
-    async fn start_spawns_actor_with_rules() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-
-        let handle = InterceptBuilder::new(&sess)
-            .block("*/blocked/*")
-            .unwrap()
-            .pattern("*")
-            .start();
-
-        // The actor's `Fetch.enable` side-task fires fire-and-forget; wait
-        // for it to land so the `Fetch.requestPaused` subscription is in
-        // place before we emit an event.
-        let enable_id =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.enable"))
-                .await
-                .expect("actor did not send Fetch.enable within 2s");
-        let enable_params = mock.last_sent()["params"].clone();
-        assert_eq!(enable_params["handleAuthRequests"], false);
-        assert_eq!(enable_params["patterns"][0]["urlPattern"], "*");
-        mock.reply(enable_id, json!({})).await;
-
-        // Emit a paused-event whose URL matches the Block rule.
-        mock.emit_event_for_session(
-            "Fetch.requestPaused",
-            json!({
-                "requestId": "REQ-1",
-                "request": {
-                    "url": "https://example.test/blocked/banner.png",
-                    "method": "GET",
-                    "headers": {},
-                },
-                "resourceType": "Image",
-            }),
-            "S1",
-        )
-        .await;
-
-        // Actor should dispatch Fetch.failRequest with BlockedByClient.
-        let fail_id =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.failRequest"))
-                .await
-                .expect("actor did not send Fetch.failRequest within 2s");
-        let fail_params = mock.last_sent()["params"].clone();
-        assert_eq!(fail_params["requestId"], "REQ-1");
-        assert_eq!(fail_params["errorReason"], "BlockedByClient");
-        mock.reply(fail_id, json!({})).await;
-
-        // Teardown via the handle: stop() cancels + awaits the oneshot the
-        // actor signals after Fetch.disable lands.
-        let stop_fut = tokio::spawn(handle.stop());
-        let disable_id =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.disable"))
-                .await
-                .expect("actor did not send Fetch.disable on stop()");
-        mock.reply(disable_id, json!({})).await;
-        stop_fut
-            .await
-            .expect("stop() task panicked")
-            .expect("stop() returned Err");
-        conn.shutdown();
-    }
-
-    /// `start()` injects a match-all `"*"` pattern when the caller did not
-    /// add any via [`pattern`](InterceptBuilder::pattern) — otherwise
+    /// `start()` uses a match-all `"*"` pattern when the caller did not add
+    /// any via [`pattern`](InterceptBuilder::pattern) — otherwise
     /// `Fetch.enable` would arrive with an empty patterns array and Chrome
     /// would silently pause nothing.
     #[tokio::test]
     async fn start_defaults_to_match_all_pattern_when_none_registered() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-
-        let handle = InterceptBuilder::new(&sess)
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let builder = InterceptBuilder::new(&interceptor)
             .block("*/blocked/*")
-            .unwrap()
-            .start();
-
-        let enable_id =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.enable"))
-                .await
-                .expect("actor did not send Fetch.enable within 2s");
-        let patterns = mock.last_sent()["params"]["patterns"].clone();
-        let arr = patterns.as_array().expect("patterns must be a JSON array");
-        assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["urlPattern"], "*");
-        mock.reply(enable_id, json!({})).await;
-
-        // Drop the handle to tear down; we don't need to observe the disable.
-        drop(handle);
+            .unwrap();
+        let params = enable_params(&mut mock, builder).await;
+        assert_eq!(params["patterns"], json!([{ "urlPattern": "*" }]));
         conn.shutdown();
     }
 
@@ -639,138 +491,52 @@ mod tests {
     /// Modern Chrome (~M132+) rejects `{ patterns: [], handleAuthRequests:
     /// true }` with CDP -32602 ("Can't specify empty patterns with handleAuth
     /// set"), which silently disables proxy-auth handling and 407s every
-    /// navigation. `start()` must inject a match-all `"*"` and set
-    /// `handleAuthRequests`.
+    /// navigation.
     #[tokio::test]
     async fn start_auth_only_sends_match_all_pattern_with_handle_proxy_auth() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-
-        let handle = InterceptBuilder::new(&sess)
-            .handle_proxy_auth("puser", "ppass")
-            .start();
-
-        let enable_id =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.enable"))
-                .await
-                .expect("actor did not send Fetch.enable within 2s");
-        let params = mock.last_sent()["params"].clone();
-        assert_eq!(
-            params["handleAuthRequests"], true,
-            "auth-only path must enable auth handling"
-        );
-        let arr = params["patterns"]
-            .as_array()
-            .expect("patterns must be a JSON array");
-        assert_eq!(
-            arr.len(),
-            1,
-            "auth-only must send exactly one match-all pattern, never an empty array"
-        );
-        assert_eq!(arr[0]["urlPattern"], "*");
-        mock.reply(enable_id, json!({})).await;
-
-        drop(handle);
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let builder = InterceptBuilder::new(&interceptor).handle_proxy_auth("puser", "ppass");
+        let params = enable_params(&mut mock, builder).await;
+        assert_eq!(params["handleAuthRequests"], true);
+        assert_eq!(params["patterns"], json!([{ "urlPattern": "*" }]));
         conn.shutdown();
     }
 
+    /// The Document-scoped preset sends exactly one pattern, narrowed to
+    /// the `Document` navigation (the difference from plain
+    /// `handle_proxy_auth`), and keeps a rule registered before it.
     #[tokio::test]
     async fn start_auth_scoped_to_document_sends_single_document_pattern() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-
-        let handle = InterceptBuilder::new(&sess)
-            .handle_proxy_auth_scoped_to_document("puser", "ppass")
-            .start();
-
-        let enable_id =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.enable"))
-                .await
-                .expect("actor did not send Fetch.enable within 2s");
-        let params = mock.last_sent()["params"].clone();
-        assert_eq!(params["handleAuthRequests"], true);
-        let arr = params["patterns"]
-            .as_array()
-            .expect("patterns must be a JSON array");
-        assert_eq!(arr.len(), 1, "scoped preset must send exactly one pattern");
-        assert_eq!(arr[0]["urlPattern"], "*");
-        assert_eq!(
-            arr[0]["resourceType"], "Document",
-            "scoped preset must narrow to the Document navigation — the difference from plain handle_proxy_auth"
-        );
-        mock.reply(enable_id, json!({})).await;
-
-        drop(handle);
-        conn.shutdown();
-    }
-
-    #[tokio::test]
-    async fn handle_proxy_auth_scoped_to_document_composes_with_rules() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-
-        let builder = InterceptBuilder::new(&sess)
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let builder = InterceptBuilder::new(&interceptor)
             .block("*/ads/*")
             .unwrap()
             .handle_proxy_auth_scoped_to_document("puser", "ppass");
+        assert_eq!(builder.rules_count(), 1);
+        let params = enable_params(&mut mock, builder).await;
+        assert_eq!(params["handleAuthRequests"], true);
         assert_eq!(
-            builder.rules_count(),
-            1,
-            "the preset must not clobber a rule registered before it in the chain"
+            params["patterns"],
+            json!([{ "urlPattern": "*", "resourceType": "Document" }])
         );
-        let handle = builder.start();
-
-        let enable_id =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.enable"))
-                .await
-                .expect("actor did not send Fetch.enable within 2s");
-        let params = mock.last_sent()["params"].clone();
-        let arr = params["patterns"]
-            .as_array()
-            .expect("patterns must be a JSON array");
-        assert!(
-            arr.iter().any(|p| p["resourceType"] == "Document"),
-            "the Document-scoped auth pattern must survive alongside the block rule: {arr:?}"
-        );
-        mock.reply(enable_id, json!({})).await;
-
-        drop(handle);
         conn.shutdown();
     }
 
     /// On the `subscribe()` path: each `Fetch.requestPaused` event becomes
     /// a `PausedRequest` yielded from the stream, with the request payload
-    /// decoded into [`RequestInfo`].
+    /// decoded into [`RequestInfo`](crate::RequestInfo).
     #[tokio::test]
     async fn subscribe_yields_paused_request_per_event() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let (mut stream, _) =
+            applied(&mut mock, InterceptBuilder::new(&interceptor).subscribe()).await;
 
-        let mut stream = Box::pin(InterceptBuilder::new(&sess).subscribe());
-
-        // Wait for the side-task's Fetch.enable to land so the subscription
-        // is in place before we emit.
-        let enable_id =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.enable"))
-                .await
-                .expect("subscribe() did not send Fetch.enable within 2s");
-        mock.reply(enable_id, json!({})).await;
-
-        mock.emit_event_for_session(
-            "Fetch.requestPaused",
-            json!({
-                "requestId": "REQ-1",
-                "request": {
-                    "url": "https://example.test/widget.json",
-                    "method": "GET",
-                    "headers": {"accept": "application/json"},
-                },
-                "resourceType": "XHR",
-            }),
-            "S1",
-        )
-        .await;
-
+        let headers = json!({ "request": {
+            "url": "https://example.test/widget.json",
+            "method": "GET",
+            "headers": { "accept": "application/json" },
+        }});
+        pause(&mock, "REQ-1", "https://example.test/widget.json", headers).await;
         let paused = tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
             .expect("subscribe() stream did not yield within 2s")
@@ -779,51 +545,24 @@ mod tests {
         assert_eq!(paused.request.url, "https://example.test/widget.json");
         assert_eq!(paused.request.method, "GET");
         assert_eq!(
-            paused
-                .request
-                .headers
-                .iter()
-                .find(|(k, _)| k == "accept")
-                .map(|(_, v)| v.as_str()),
-            Some("application/json"),
+            paused.request.headers,
+            vec![("accept".to_string(), "application/json".to_string())]
         );
         assert!(
             paused.response.is_none(),
             "request-stage event has no response"
         );
-
-        drop(stream);
         conn.shutdown();
     }
 
-    /// `subscribe()` cannot honor `handle_proxy_auth`: it never subscribes to
-    /// `Fetch.authRequired`, so `handleAuthRequests: true` would leave Chrome
-    /// pausing auth challenges nobody answers — a hang instead of a 407.
-    /// Pin the flag to `false` (the caller is warned via `tracing::error!`)
-    /// so a future "fix" can't half-enable the auth path here.
+    /// `subscribe()` honors `handle_proxy_auth`: the multiplexer answers the
+    /// challenges, so `handleAuthRequests` can be on.
     #[tokio::test]
-    async fn subscribe_pins_handle_auth_requests_false_even_with_credentials() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-
-        let stream = Box::pin(
-            InterceptBuilder::new(&sess)
-                .handle_proxy_auth("puser", "ppass")
-                .subscribe(),
-        );
-
-        let enable_id =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.enable"))
-                .await
-                .expect("subscribe() did not send Fetch.enable within 2s");
-        let params = mock.last_sent()["params"].clone();
-        assert_eq!(
-            params["handleAuthRequests"], false,
-            "subscribe() has no Fetch.authRequired subscription — enabling auth handling here hangs every challenge"
-        );
-        mock.reply(enable_id, json!({})).await;
-
-        drop(stream);
+    async fn subscribe_honors_credentials() {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let builder = InterceptBuilder::new(&interceptor).handle_proxy_auth("puser", "ppass");
+        let (_stream, params) = applied(&mut mock, builder.subscribe()).await;
+        assert_eq!(params["handleAuthRequests"], true);
         conn.shutdown();
     }
 }

@@ -4,14 +4,10 @@
 #![cfg(feature = "integration-tests")]
 #![allow(clippy::panic, clippy::unwrap_used)]
 
-use std::time::Duration;
-
 use zendriver::{Browser, ResponseOverrides};
-use zendriver_testkit::{FixtureServer, SITE_A, eval, launch_for_test, load};
-
-/// How long `Fetch.enable` takes to reach Chrome after `start()`, which
-/// doesn't wait for it.
-const INTERCEPT_SETTLE: Duration = Duration::from_millis(150);
+use zendriver_testkit::{
+    FixtureServer, PROXY_PASSWORD, PROXY_USER, SITE_A, eval, launch_for_test, load,
+};
 
 /// What a `fetch` of `path` from the page gets:
 /// `"<status> [<statusText>] <content-type>"`, or `"timeout"` after 5 s (a
@@ -51,8 +47,9 @@ async fn response_rules_that_set_only_a_status_or_a_phrase() {
             ..ResponseOverrides::default()
         })
         .unwrap()
-        .start();
-    tokio::time::sleep(INTERCEPT_SETTLE).await;
+        .start()
+        .await
+        .unwrap();
 
     assert_eq!(
         fetch_response(&tab, "/plain?status").await,
@@ -62,5 +59,57 @@ async fn response_rules_that_set_only_a_status_or_a_phrase() {
         fetch_response(&tab, "/plain?no-phrase").await,
         "200 [] text/html; charset=utf-8"
     );
+    browser.close().await;
+}
+
+/// `start` returns once Chrome intercepts: a request the page sends right
+/// after it is already answered by the rule.
+#[tokio::test]
+async fn a_request_right_after_start_is_intercepted() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/plain")).await;
+
+    let _mock = tab
+        .intercept()
+        .respond("*/plain?mocked", 200, Vec::new(), b"Mocked".to_vec())
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
+    let body = eval(&tab, "fetch('/plain?mocked').then(r => r.text())").await;
+    assert_eq!(body, "Mocked");
+    browser.close().await;
+}
+
+/// A rule of the caller's and the browser's proxy credentials work on the
+/// same tab, and stopping the rule leaves the credentials working.
+#[tokio::test]
+async fn a_rule_and_the_proxy_credentials_compose() {
+    let server = FixtureServer::start().await;
+    let builder = Browser::builder()
+        .proxy(server.proxy_url())
+        .proxy_auth(PROXY_USER, PROXY_PASSWORD);
+    let browser = launch_for_test(builder).await;
+    let tab = browser.main_tab();
+
+    let page = b"<title>Mocked</title>".to_vec();
+    let html = vec![("content-type".to_string(), "text/html".to_string())];
+    let mock = tab
+        .intercept()
+        .respond("*/plain?mocked", 200, html, page)
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
+    load(&tab, &server.url(SITE_A, "/plain?mocked")).await;
+    assert_eq!(eval(&tab, "document.title").await, "Mocked");
+    load(&tab, &server.url(SITE_A, "/plain")).await;
+    assert_eq!(eval(&tab, "document.title").await, "Plain");
+
+    mock.stop().await.unwrap();
+    load(&tab, &server.url(SITE_A, "/plain?mocked")).await;
+    assert_eq!(eval(&tab, "document.title").await, "Plain");
     browser.close().await;
 }

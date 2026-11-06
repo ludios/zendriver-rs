@@ -855,7 +855,7 @@ impl ZendriverServer {
     /// Install one network-interception rule on the current tab.
     #[tool(
         name = "browser_intercept_add_rule",
-        description = "Install one interception rule on the current tab. `pattern` uses CDP wildcard syntax (`*` / `?`). `action.kind` selects `block` (fail with `BlockedByClient`), `redirect` (URL replacement via `action.to`), `respond` (synthesize a response — `status`, `body`, optional `content_type`, optional `headers`), or `modify_request` (overlay extra `headers` onto the request). Returns `{ rule_id }`. v0: one rule per call — chain multiple `add_rule` calls for multiple rules. Each rule spawns its own actor; tearing it down (`browser_intercept_remove_rule` / `_clear_rules`) stops only that rule."
+        description = "Install one interception rule on the current tab. `pattern` uses CDP wildcard syntax (`*` / `?`). `action.kind` selects `block` (fail with `BlockedByClient`), `redirect` (URL replacement via `action.to`), `respond` (synthesize a response — `status`, `body`, optional `content_type`, optional `headers`), `modify_request` (overlay extra `headers` onto the request), or `modify_response` (override the response's `status` and/or overlay `headers`). Returns `{ rule_id }` once the rule is in force. One rule per call — chain multiple `add_rule` calls for multiple rules. The tab's rules compose: where two rules match the same request, the one added later wins; the others, and the browser's tracker blocking and proxy credentials, keep working. Removing a rule (`browser_intercept_remove_rule` / `_clear_rules`) stops only that rule."
     )]
     pub async fn browser_intercept_add_rule(
         &self,
@@ -869,7 +869,7 @@ impl ZendriverServer {
     /// Remove a previously-installed interception rule.
     #[tool(
         name = "browser_intercept_remove_rule",
-        description = "Remove the interception rule identified by `rule_id`. Drops the underlying handle, which cancels the per-rule actor and tears down its `Fetch.enable`. Returns an error if the id is unknown — for an idempotent clear-all use `browser_intercept_clear_rules`."
+        description = "Remove the interception rule identified by `rule_id`, leaving the tab's other rules in force; returns once the change is in force. Returns an error if the id is unknown — for an idempotent clear-all use `browser_intercept_clear_rules`."
     )]
     pub async fn browser_intercept_remove_rule(
         &self,
@@ -897,7 +897,7 @@ impl ZendriverServer {
     /// Drop every live interception rule on this session.
     #[tool(
         name = "browser_intercept_clear_rules",
-        description = "Drop every live interception rule on this session (each handle's `Drop` cancels its actor). Returns `{ cleared: <count> }`. Idempotent — calling on an empty registry returns `{ cleared: 0 }` rather than erroring."
+        description = "Drop every live interception rule on this session; returns once the change is in force. Returns `{ cleared: <count> }`. Idempotent — calling on an empty registry returns `{ cleared: 0 }` rather than erroring."
     )]
     pub async fn browser_intercept_clear_rules(
         &self,

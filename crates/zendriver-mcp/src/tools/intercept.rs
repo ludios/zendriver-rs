@@ -1,18 +1,16 @@
 //! Interception tools — `browser_intercept_add_rule / _remove_rule /
 //! _list_rules / _clear_rules`. Gated behind the `interception` feature.
 //!
-//! ## One MCP rule = one `InterceptHandle`
+//! ## One MCP rule = one layer of the tab's interception
 //!
-//! The underlying `zendriver-interception` builder supports chaining many
-//! actions onto a single handle, but that shape doesn't map cleanly to a
-//! per-call MCP tool surface (each `add_rule` call must produce its own
-//! removable id). v0 simplification: every `browser_intercept_add_rule`
-//! invocation spawns a fresh `tab.intercept().pattern(pat).<action>.start()`
-//! chain and keeps the returned [`InterceptHandle`] in
-//! [`SessionState::rules`]. Removing the entry drops the handle, which the
-//! interception actor treats as a cancellation signal — so
-//! `browser_intercept_remove_rule` is the user-visible inverse of
-//! `_add_rule`.
+//! Each `browser_intercept_add_rule` call adds one layer to the current
+//! tab's interception (`tab.intercept().<action>.start()`) and keeps the
+//! returned [`InterceptHandle`] in [`SessionState::rules`], under the rule's
+//! own removable id. The tab's layers compose: a newer rule takes
+//! precedence for the requests it matches, and the others (including the
+//! browser's tracker blocking and proxy credentials) keep working.
+//! `browser_intercept_remove_rule` stops the handle, which removes only
+//! that layer.
 //!
 //! ## Action surface (`InterceptAction`)
 //!
@@ -144,9 +142,9 @@ pub struct AddRuleOutput {
     pub rule_id: RuleId,
 }
 
-/// Register one interception rule. Spawns a fresh
-/// `tab.intercept().pattern(...).<action>.start()` chain on the current
-/// tab and stashes the resulting handle.
+/// Register one interception rule: add it to the current tab's
+/// interception as a layer, in force when this returns, and stash the
+/// resulting handle.
 pub async fn add_rule(
     state: Arc<Mutex<SessionState>>,
     input: AddRuleInput,
@@ -158,30 +156,28 @@ pub async fn add_rule(
     // `state::InterceptRuleHandle::tab_id`.
     let tab_id = tab.target_id().to_string();
 
-    // Each match-arm builds + starts its own InterceptBuilder. The action
-    // method (`block` / `redirect` / `respond` / `modify_request`) takes the
-    // URL pattern as its first arg and registers it as the rule's matcher;
-    // `InterceptBuilder::start` auto-injects a match-all `"*"` CDP
+    // Each match-arm builds its own InterceptBuilder. The action method
+    // (`block` / `redirect` / `respond` / `modify_request`) takes the URL
+    // pattern as its first arg and registers it as the rule's matcher;
+    // `InterceptBuilder::start` uses a match-all `"*"` CDP
     // `Fetch.RequestPattern` when none is added via `.pattern()`, so we
     // don't need to add one ourselves. (Conflating the two would just
     // register the same string twice as conceptually different things —
     // the CDP server-side filter and the rule's per-request matcher.)
-    let (handle, action_kind): (zendriver::InterceptHandle, &'static str) = match input.action {
+    let (builder, action_kind): (zendriver::InterceptBuilder, &'static str) = match input.action {
         InterceptAction::Block => {
-            let h = tab
+            let b = tab
                 .intercept()
                 .block(input.pattern.clone())
-                .map_err(zendriver_err)?
-                .start();
-            (h, "block")
+                .map_err(zendriver_err)?;
+            (b, "block")
         }
         InterceptAction::Redirect { to } => {
-            let h = tab
+            let b = tab
                 .intercept()
                 .redirect(input.pattern.clone(), to)
-                .map_err(zendriver_err)?
-                .start();
-            (h, "redirect")
+                .map_err(zendriver_err)?;
+            (b, "redirect")
         }
         InterceptAction::Respond {
             status,
@@ -195,12 +191,11 @@ pub async fn add_rule(
                 headers.insert("content-type".into(), ct);
             }
             let header_vec: Vec<(String, String)> = headers.into_iter().collect();
-            let h = tab
+            let b = tab
                 .intercept()
                 .respond(input.pattern.clone(), status, header_vec, body.into_bytes())
-                .map_err(zendriver_err)?
-                .start();
-            (h, "respond")
+                .map_err(zendriver_err)?;
+            (b, "respond")
         }
         InterceptAction::ModifyRequest {
             headers,
@@ -217,20 +212,19 @@ pub async fn add_rule(
                 method,
                 post_data,
             });
-            let h = tab
+            let b = tab
                 .intercept()
                 .modify_request(input.pattern.clone(), move |req| {
                     overlay.build(&req.headers)
                 })
-                .map_err(zendriver_err)?
-                .start();
-            (h, "modify_request")
+                .map_err(zendriver_err)?;
+            (b, "modify_request")
         }
         InterceptAction::ModifyResponse { status, headers } => {
             // Same `Arc`-capture pattern as `modify_request`; the closure runs
-            // on the actor task per matching response.
+            // on the multiplexer's task per matching response.
             let overlay = Arc::new(headers);
-            let h = tab
+            let b = tab
                 .intercept()
                 .modify_response(input.pattern.clone(), move |resp: &ResponseInfo| {
                     let headers = if overlay.is_empty() {
@@ -244,11 +238,11 @@ pub async fn add_rule(
                         ..ResponseOverrides::default()
                     }
                 })
-                .map_err(zendriver_err)?
-                .start();
-            (h, "modify_response")
+                .map_err(zendriver_err)?;
+            (b, "modify_response")
         }
     };
+    let handle = builder.start().await.map_err(zendriver_err)?;
 
     let id: RuleId = uuid::Uuid::new_v4().to_string();
     s.rules.insert(
@@ -256,7 +250,7 @@ pub async fn add_rule(
         InterceptRuleHandle {
             pattern: input.pattern,
             action_kind,
-            _handle: handle,
+            handle,
             tab_id,
         },
     );
@@ -340,18 +334,18 @@ pub struct RemoveRuleOutput {
     pub removed: bool,
 }
 
-/// Drop a previously-registered rule, tearing down its interception actor.
+/// Drop a previously-registered rule, and return once Chrome has applied
+/// the change, so a request sent afterwards no longer meets the rule.
 pub async fn remove_rule(
     state: Arc<Mutex<SessionState>>,
     input: RemoveRuleInput,
 ) -> Result<RemoveRuleOutput, ErrorData> {
     let mut s = state.lock().await;
-    // `.remove(...)` returns the value (and thus its `_handle: InterceptHandle`),
-    // dropping it here cancels the actor. We don't need to await `stop()` —
-    // `Drop` fires-and-forgets the `Fetch.disable`.
-    s.rules
+    let rule = s
+        .rules
         .remove(&input.rule_id)
         .ok_or_else(|| map_error(McpServerError::RuleNotFound(input.rule_id)))?;
+    rule.handle.stop().await.map_err(zendriver_err)?;
     Ok(RemoveRuleOutput { removed: true })
 }
 
@@ -407,15 +401,25 @@ pub struct ClearRulesOutput {
     pub cleared: usize,
 }
 
-/// Drop every live rule. Each handle's `Drop` cancels its actor; we don't
-/// wait for any of them — same semantics as `remove_rule`.
+/// Drop every live rule, and return once Chrome has applied the change.
+///
+/// Every rule is removed even if Chrome refuses a change (its tab closed,
+/// say); the first such error is returned after.
 pub async fn clear_rules(
     state: Arc<Mutex<SessionState>>,
     _: crate::tools::common::EmptyInput,
 ) -> Result<ClearRulesOutput, ErrorData> {
     let mut s = state.lock().await;
     let cleared = s.rules.len();
-    s.rules.clear();
+    let mut failed = None;
+    for (_, rule) in s.rules.drain() {
+        if let Err(e) = rule.handle.stop().await {
+            failed.get_or_insert(e);
+        }
+    }
+    if let Some(e) = failed {
+        return Err(zendriver_err(e));
+    }
     Ok(ClearRulesOutput { cleared })
 }
 
