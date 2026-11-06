@@ -249,11 +249,12 @@ pub struct TabCloseOutput {
 /// closed tab's id is known, [`drain_tab_scoped`] removes every entry whose
 /// `tab_id` matches it: expectation tasks are `.abort()`ed (a bare
 /// `JoinHandle` drop only detaches, it does not cancel), and rule handles
-/// are simply dropped from the map — `InterceptRuleHandle::_handle`'s `Drop`
-/// impl cancels the actor. Without this, both kinds of handle would
-/// otherwise keep running (the expectation's spawned task holding its
-/// `.matched()` future open until `pre_await_timeout_ms` fires; the
-/// interception actor staying live) until either the agent explicitly calls
+/// are simply dropped from the map — `InterceptRuleHandle::handle`'s `Drop`
+/// impl removes the rule's layer from the tab's interception. Without this,
+/// both kinds of handle would otherwise keep running (the expectation's
+/// spawned task holding its `.matched()` future open until
+/// `pre_await_timeout_ms` fires; the rule's layer staying in the tab's
+/// interception) until either the agent explicitly calls
 /// `browser_expect_cancel` / `browser_intercept_remove_rule`, or the whole
 /// browser is torn down via `browser_close` (which also drains both
 /// registries — see `crate::tools::lifecycle::close`).

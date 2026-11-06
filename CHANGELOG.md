@@ -159,15 +159,12 @@ Changelog](https://keepachangelog.com/en/1.1.0/). Adheres to [SEMVER.md].
 
 ### Known issues
 
-- `zendriver-mcp::browser_tab_close` does NOT reap `browser_expect_*`
-  expectations or `browser_intercept_*` rules that were registered
-  against the closing tab. The per-handle registries
-  (`SessionState::expectations` / `SessionState::rules`) are flat
-  HashMaps with no `tab_id` field, so a per-tab close can't filter
-  them. Workarounds: explicitly call `browser_expect_cancel` /
-  `browser_intercept_remove_rule` before closing the tab, or let
-  `browser_close` tear them down at session end (which DOES drain
-  both registries as of this release). Fix tracked for a follow-up.
+- `zendriver-mcp::browser_tab_close` does NOT stop the
+  `browser_monitor_*` monitors started on the closing tab (stop each
+  with `browser_monitor_stop`), nor an expectation that a
+  `browser_expect_await` is already waiting on. (It does remove the
+  tab's other `browser_expect_*` expectations and its
+  `browser_intercept_*` rules.)
 
 ### Fixed
 

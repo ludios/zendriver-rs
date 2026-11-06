@@ -221,7 +221,7 @@ impl ZendriverServer {
     /// Close a tab.
     #[tool(
         name = "browser_tab_close",
-        description = "Close a tab. When `tab_id` is omitted, the session's current tab is closed; if that was the focused tab, focus falls back to one of the remaining tabs (or `None` if none remain). The `browser_expect_*` expectations and `browser_intercept_*` rules registered against the closed tab are torn down with it; `browser_monitor_*` monitors are not (stop them yourself)."
+        description = "Close a tab. When `tab_id` is omitted, the session's current tab is closed; if that was the focused tab, focus falls back to one of the remaining tabs (or `None` if none remain). Once the tab is closed, the `browser_expect_*` expectations registered against it (except one that a `browser_expect_await` is already waiting on) and the `browser_intercept_*` rules registered against it are removed. Network monitors started on it keep running: stop each with `browser_monitor_stop`."
     )]
     pub async fn browser_tab_close(
         &self,

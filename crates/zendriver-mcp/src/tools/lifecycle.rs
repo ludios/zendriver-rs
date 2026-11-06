@@ -490,9 +490,9 @@ pub struct CloseOutput {
 /// 2. **Interception rules**: `s.rules.clear()` drops every stored
 ///    `InterceptRuleHandle`, whose embedded `InterceptHandle::Drop`
 ///    removes its layer (fire-and-forget, ending in `Fetch.disable`).
-///    Doing this *before* `Browser::close` means the teardown happens while
-///    the transport is still live, so the disable round-trip actually
-///    lands instead of being eaten by a closed connection.
+///    Doing this *before* `Browser::close` gives that `Fetch.disable` a
+///    live transport to land on; nothing waits for it, and Chrome drops the
+///    interception with the browser anyway.
 /// 3. **Browser**: only then do we `b.close().await`, which tears down
 ///    the transport and the CDP connection.
 pub async fn close(
