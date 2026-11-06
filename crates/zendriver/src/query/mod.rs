@@ -47,7 +47,7 @@
 //! | `.attr_regex(name, pat)` | attribute value matches JS regex (post-filter; use a `(?i)` pattern flag for case-insensitivity) |
 //! | `.containing_text(sub)` | element text contains substring (post-filter) |
 //! | `.containing_text_i(sub)` | same, case-insensitive (post-filter) |
-//! | `.text_equals(exact)` | trimmed element text equals string (post-filter) |
+//! | `.text_equals(exact)` | element text equals string, both folded like XPath `normalize-space()`, which keeps `&nbsp;` (post-filter) |
 //! | `.text_equals_i(exact)` | same, case-insensitive (post-filter) |
 //! | `.text_matches(pat)` | element text matches JS regex (post-filter; use a `(?i)` pattern flag for case-insensitivity) |
 //!
@@ -182,7 +182,7 @@ use crate::query::predicate::{AttrPred, PredicateSet, TextPred};
 use crate::query::selectors::{QueryScope, RemoteRef, SelectorKind, text_len_of};
 use crate::tab::Tab;
 
-/// Generates the 10 predicate setters shared by `FindBuilder` + `FindAllBuilder`.
+/// Generates the 16 predicate setters shared by `FindBuilder` + `FindAllBuilder`.
 /// Both structs must have a `predicates: PredicateSet` field.
 macro_rules! predicate_methods {
     () => {
@@ -287,13 +287,16 @@ macro_rules! predicate_methods {
                 .push(TextPred::Contains(sub.into(), true));
             self
         }
-        /// Match elements whose text equals `exact` (post-filter), after
-        /// both are folded the way XPath `normalize-space()` folds them:
-        /// each run of spaces, tabs, CRs and LFs becomes one space, and a
-        /// space at either end is dropped. Other characters are kept,
-        /// U+00A0 (`&nbsp;`) included, so `text_equals("OK")` doesn't match
-        /// `<b>&nbsp;OK</b>`: for that, use `text("OK")`, or put the
-        /// character in `exact`.
+        /// Match elements whose text equals `exact` (post-filter). The text
+        /// is the element's `innerText`, or its `textContent` when
+        /// `innerText` is empty. Both are folded the way XPath
+        /// `normalize-space()` folds them: each run of U+0020 spaces, tabs,
+        /// CRs, and LFs becomes one U+0020 space, and a space at the start
+        /// and one at the end are dropped. Other characters are kept, U+00A0
+        /// (`&nbsp;`) included, so `text_equals("OK")` doesn't match
+        /// `<b>&nbsp;OK</b>`: for that, put U+00A0 itself in `exact`
+        /// (`text_equals("\u{a0}OK")`), or match a substring with
+        /// [`Self::containing_text`].
         #[must_use]
         pub fn text_equals(mut self, exact: &str) -> Self {
             self.predicates
@@ -603,7 +606,11 @@ impl<'scope> FindBuilder<'scope> {
 
     /// Whitespace-collapsed exact text match.
     ///
-    /// Uses XPath `normalize-space(.)=<needle>`.
+    /// Uses XPath `normalize-space(.)=<needle>`, with the needle folded the
+    /// same way: each run of U+0020 spaces, tabs, CRs, and LFs becomes one
+    /// U+0020 space, and a space at the start and one at the end are
+    /// dropped. Other characters are kept, U+00A0 (`&nbsp;`) included, so
+    /// `text_exact("OK")` doesn't match `<b>&nbsp;OK</b>`.
     ///
     /// # Examples
     ///
