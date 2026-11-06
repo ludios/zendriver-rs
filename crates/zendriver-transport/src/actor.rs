@@ -110,6 +110,19 @@ struct TargetDetached {
     session_id: String,
 }
 
+/// Whether a failed socket read or write is expected, and so not an error:
+/// the actor's `shutdown` was requested, or the socket's death was declared
+/// with [`Connection::expect_disconnect`] on the connection that `weak_inner`
+/// points to.
+fn socket_death_expected(shutdown: &CancellationToken, weak_inner: &Weak<ConnectionInner>) -> bool {
+    shutdown.is_cancelled()
+        || weak_inner.upgrade().is_some_and(|inner| {
+            inner
+                .disconnect_expected
+                .load(std::sync::atomic::Ordering::Relaxed)
+        })
+}
+
 /// Runs the actor loop until `shutdown` is cancelled or the WS dies.
 ///
 /// Generic over the WS sink + stream so tests can drive in-memory streams
@@ -183,7 +196,11 @@ pub(crate) async fn run_actor<S>(
                     Ok(s) => {
                         trace!(id, method = %cmd.method, "send");
                         if let Err(e) = ws.send(Message::text(s)).await {
-                            error!("ws send failed: {e}");
+                            if socket_death_expected(&shutdown, &weak_inner) {
+                                debug!("ws send failed, as expected: {e}");
+                            } else {
+                                error!("ws send failed: {e}");
+                            }
                             // Same sentinel the remaining pendings get below:
                             // a failed write means the socket died, and this
                             // command is the one that hit the death first. A
@@ -252,9 +269,11 @@ pub(crate) async fn run_actor<S>(
                     Some(Err(e)) => {
                         // After a requested shutdown this is the expected teardown:
                         // closing a target resets its socket, and with one socket
-                        // per tab that reset races the shutdown signal.
-                        if shutdown.is_cancelled() {
-                            debug!("ws read failed during shutdown (expected): {e}");
+                        // per tab that reset races the shutdown signal. And a
+                        // quitting Chrome resets every socket, which the browser
+                        // declares beforehand with `expect_disconnect`.
+                        if socket_death_expected(&shutdown, &weak_inner) {
+                            debug!("ws read failed, as expected: {e}");
                         } else {
                             error!("ws read failed: {e}");
                         }

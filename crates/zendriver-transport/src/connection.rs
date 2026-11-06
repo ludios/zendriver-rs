@@ -168,6 +168,11 @@ pub(crate) struct ConnectionInner {
     /// Read via [`actor_gone_error`]; see the store in
     /// [`crate::actor::run_actor`] for the ordering that makes it reliable.
     pub(crate) socket_died: AtomicBool,
+    /// Whether the current socket's death is expected, so the actor logs it
+    /// at debug instead of error. Set by [`Connection::expect_disconnect`];
+    /// cleared by [`Connection::reconnect`]. `Relaxed` suffices: it decides
+    /// only a log level.
+    pub(crate) disconnect_expected: AtomicBool,
     /// Total pending-reply entries reaped across every sweep this connection
     /// has run, summed over all actor generations. Monotonic; never reset by
     /// [`Connection::reconnect`].
@@ -201,6 +206,7 @@ impl std::fmt::Debug for ConnectionInner {
             .field("observer_timeout", &self.observer_timeout)
             .field("call_timeout_ms", &self.call_timeout_ms)
             .field("socket_died", &self.socket_died)
+            .field("disconnect_expected", &self.disconnect_expected)
             .field("swept_total", &self.swept_total)
             .field(
                 "observers",
@@ -506,6 +512,33 @@ impl Connection {
             .cancel();
     }
 
+    /// Declare that the other end is about to drop the current socket (e.g.
+    /// Chrome is about to quit), so its death is logged at debug instead of
+    /// error.
+    ///
+    /// Changes nothing else: the connection keeps working until the socket
+    /// dies, and then everything that would observe an unexpected death still
+    /// does — in-flight and later calls fail with
+    /// [`TransportError::Disconnected`], and
+    /// [`AccountedRawEvent::Disconnected`] still ends the streams waiting on
+    /// it. A [`Connection::reconnect`] clears the declaration.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example(conn: zendriver_transport::Connection) {
+    /// conn.expect_disconnect();
+    /// let _ = conn
+    ///     .call_raw("Browser.close", serde_json::json!({}), None)
+    ///     .await;
+    /// # }
+    /// ```
+    pub fn expect_disconnect(&self) {
+        self.inner
+            .disconnect_expected
+            .store(true, Ordering::Relaxed);
+    }
+
     /// Public accessor for advanced users who need to drive the underlying
     /// shutdown token directly.
     ///
@@ -638,6 +671,10 @@ impl Connection {
         // flag while an actor is still running, and the ordering argument above
         // would no longer cover it.
         self.inner.socket_died.store(false, Ordering::Release);
+        // An earlier `expect_disconnect` was about the old socket.
+        self.inner
+            .disconnect_expected
+            .store(false, Ordering::Relaxed);
     }
 
     /// Dial `ws_url` afresh (re-applying the P-A A4 [`WebSocketConfig`] max-size
@@ -848,6 +885,7 @@ where
         observer_timeout,
         call_timeout_ms: AtomicU64::new(DEFAULT_CALL_TIMEOUT.as_millis() as u64),
         socket_died: AtomicBool::new(false),
+        disconnect_expected: AtomicBool::new(false),
         swept_total: AtomicU64::new(0),
         // Retain the observer chain so `reconnect` can re-spawn the actor with
         // the same observers without the caller re-supplying them.
@@ -1094,6 +1132,24 @@ mod tests {
         );
     }
 
+    /// `expect_disconnect` changes only how a socket's death is logged: a
+    /// call in flight when the socket dies still drains as `Disconnected`.
+    #[tokio::test]
+    async fn an_expected_disconnect_still_drains_as_disconnected() {
+        let f = connection_with_one_call_in_flight().await;
+
+        f.conn.expect_disconnect();
+        drop(f.inbound);
+
+        let res = f.call.await.unwrap();
+        assert!(
+            matches!(res, Err(CallError::Transport(TransportError::Disconnected))),
+            "an expected disconnect must still map to TransportError::Disconnected, got {res:?}"
+        );
+
+        f.conn.shutdown();
+    }
+
     /// A failed socket write means the socket died, and the caller whose
     /// command hit that failure must be told so. It used to get a bare
     /// `-32000` — a code Chrome itself emits constantly — so the one call that
@@ -1207,6 +1263,7 @@ mod tests {
             observer_timeout: DEFAULT_OBSERVER_TIMEOUT,
             call_timeout_ms: AtomicU64::new(DEFAULT_CALL_TIMEOUT.as_millis() as u64),
             socket_died: AtomicBool::new(false),
+            disconnect_expected: AtomicBool::new(false),
             swept_total: AtomicU64::new(0),
             observers: Vec::new(),
         });
