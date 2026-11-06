@@ -6,10 +6,12 @@
 // page (Object.keys / getOwnPropertyNames(window) stay clean). The only global
 // side effect is overriding Function.prototype.toString, which MUST persist
 // beyond the IIFE so page scripts that inspect patched functions see native
-// code. Because the whole bootstrap is injected via
-// Page.addScriptToEvaluateOnNewDocument (every frame), the override is
-// re-installed per realm, so cross-realm probes
-// (iframe.contentWindow.Function.prototype.toString.call(fn)) also see native.
+// code. The whole bootstrap is injected via
+// Page.addScriptToEvaluateOnNewDocument, so each frame's realm gets its own
+// override, but also its own `__zdMarks`. So a realm's toString masks only
+// the functions marked in that realm: given a function patched in another
+// realm, it returns that function's JS source, e.g.
+// iframe.contentWindow.Function.prototype.toString.call(Function.prototype.toString).
 const __zdFnToString = Function.prototype.toString;
 const __zdMarks = new WeakMap(); // fn -> native display string
 const __zdNativeStr = (name) => "function " + name + "() { [native code] }";
