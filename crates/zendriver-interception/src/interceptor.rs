@@ -27,8 +27,9 @@
 //! of its events, it disables `Fetch` and enables it again: a pause it
 //! missed would otherwise stay paused, and `Fetch.disable` continues every
 //! paused request, including those a stream holds (whose release then
-//! fails). When the session's socket dies, or is replaced by a reconnect,
-//! the layers are dropped, which ends their streams.
+//! fails). When the session's socket dies, is shut, or is replaced by a
+//! reconnect, or the session detaches from its target, the layers are
+//! dropped, which ends their streams.
 //!
 //! [`InterceptBuilder::start`]: crate::InterceptBuilder::start
 //! [`InterceptBuilder::subscribe`]: crate::InterceptBuilder::subscribe
@@ -385,20 +386,28 @@ fn auth_response(
     })
 }
 
-/// `session`'s `Fetch` events, read from the loss-accounted bus, which also
-/// says when events were lost and when the socket ended.
+/// `session`'s `Fetch` events and its `Target.detachedFromTarget`, read
+/// from the loss-accounted bus, which also says when events were lost and
+/// when the socket died; they end when the socket is shut.
 fn fetch_events(session: &SessionHandle) -> FetchEvents {
     let session_id = session.session_id().map(str::to_owned);
+    let shut = session.connection().shutdown_token().cancelled_owned();
     let events = session.connection().subscribe_raw_accounted();
-    Box::pin(events.filter(move |ev| {
+    let events = events.filter(move |ev| {
         let wanted = match ev {
             AccountedRawEvent::Event { event, .. } => {
-                event.session_id == session_id && event.method.starts_with("Fetch.")
+                if event.method == "Target.detachedFromTarget" {
+                    session_id.is_some()
+                        && event.params["sessionId"].as_str() == session_id.as_deref()
+                } else {
+                    event.session_id == session_id && event.method.starts_with("Fetch.")
+                }
             }
             _ => true,
         };
         std::future::ready(wanted)
-    }))
+    });
+    Box::pin(events.take_until(shut))
 }
 
 /// The next of `events`, or `None` if they ended. Never ready while there
@@ -582,6 +591,7 @@ impl Mux {
         match event.method.as_str() {
             "Fetch.requestPaused" => self.dispatch(&event.params),
             "Fetch.authRequired" => self.authenticate(&event.params),
+            "Target.detachedFromTarget" => self.end(),
             _ => {}
         }
     }
@@ -603,8 +613,8 @@ impl Mux {
         }
     }
 
-    /// The session's events ended (its socket closed): drop every layer,
-    /// which ends their streams.
+    /// The session is gone (its socket closed, or it detached): drop every
+    /// layer, which ends their streams.
     fn end(&mut self) {
         debug!("interception: the session's events ended; dropping its layers");
         self.layers.clear();
@@ -1082,6 +1092,28 @@ mod tests {
             json!([{ "urlPattern": "*/a/*" }, { "urlPattern": "*/b/*" }])
         );
         conn.shutdown();
+    }
+
+    /// A stream ends when its session detaches from its target, or when the
+    /// session's socket is shut.
+    #[tokio::test]
+    async fn a_stream_ends_with_its_session() {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let (mut stream, _) =
+            applied(&mut mock, InterceptBuilder::new(&interceptor).subscribe()).await;
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S1" }))
+            .await;
+        let next = tokio::time::timeout(Duration::from_secs(2), stream.next()).await;
+        assert!(matches!(next, Ok(None)), "the stream didn't end on detach");
+
+        let (mut stream, _) =
+            applied(&mut mock, InterceptBuilder::new(&interceptor).subscribe()).await;
+        conn.shutdown();
+        let next = tokio::time::timeout(Duration::from_secs(2), stream.next()).await;
+        assert!(
+            matches!(next, Ok(None)),
+            "the stream didn't end on shutdown"
+        );
     }
 
     /// A rule's closure that panics leaves the request continued, unchanged,
