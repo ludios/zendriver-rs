@@ -231,7 +231,7 @@ async fn resolve_css_many(scope: &QueryScope<'_>, selector: &str) -> Result<Vec<
                 .await?
         }
     };
-    extract_array_refs(session, &result["result"]).await
+    extract_array_refs(session, &result).await
 }
 
 // ---------------------------------------------------------------------
@@ -287,7 +287,7 @@ pub(crate) async fn resolve_predicate_many(
                 .await?
         }
     };
-    extract_array_refs(session, &result["result"]).await
+    extract_array_refs(session, &result).await
 }
 
 // ---------------------------------------------------------------------
@@ -325,7 +325,7 @@ async fn resolve_xpath_many(scope: &QueryScope<'_>, expr: &str) -> Result<Vec<Re
                 .await?
         }
     };
-    extract_array_refs(session, &result["result"]).await
+    extract_array_refs(session, &result).await
 }
 
 // ---------------------------------------------------------------------
@@ -607,7 +607,7 @@ async fn resolve_text_many(
             }
         }
     };
-    extract_array_refs(session, &result["result"]).await
+    extract_array_refs(session, &result).await
 }
 
 // ---------------------------------------------------------------------
@@ -737,7 +737,7 @@ async fn resolve_text_regex_many(
                 .await?
         }
     };
-    extract_array_refs(session, &result["result"]).await
+    extract_array_refs(session, &result).await
 }
 
 // ---------------------------------------------------------------------
@@ -809,9 +809,12 @@ async fn accessible_name_matches(
 // Helpers
 // ---------------------------------------------------------------------
 
-/// Turn a `Runtime.evaluate` / `Runtime.callFunctionOn` *single-node*
-/// result into a `RemoteRef`. Null subtype (`document.querySelector`
-/// returned `null`) or `undefined` => `Ok(None)`.
+/// Turn a `Runtime.evaluate` / `Runtime.callFunctionOn` reply whose
+/// script returns a *single node* into a `RemoteRef`. `response` is the
+/// whole CDP reply, so a thrown exception fails with
+/// [`ZendriverError::JsException`] instead of looking like no match. Null
+/// subtype (`document.querySelector` returned `null`) or `undefined` =>
+/// `Ok(None)`.
 ///
 /// Takes a `SessionHandle` (not a `Tab`) so the follow-up
 /// `DOM.describeNode` round-trip dispatches on the same session the
@@ -820,8 +823,12 @@ async fn accessible_name_matches(
 /// child session from the parent tab's).
 pub(crate) async fn extract_node_ref(
     session: &SessionHandle,
-    result: &Value,
+    response: &Value,
 ) -> Result<Option<RemoteRef>> {
+    if let Some(e) = ZendriverError::js_exception_in(response) {
+        return Err(e);
+    }
+    let result = &response["result"];
     if result["subtype"] == "null" || result["type"] == "undefined" {
         return Ok(None);
     }
@@ -835,17 +842,24 @@ pub(crate) async fn extract_node_ref(
     }))
 }
 
-/// Turn a `Runtime.evaluate` / `Runtime.callFunctionOn` *array* result
-/// (an `Array` RemoteObject) into a `Vec<RemoteRef>` by enumerating
-/// numeric properties via `Runtime.getProperties` and describing each
-/// element node. Empty array yields an empty Vec, not an error.
+/// Turn a `Runtime.evaluate` / `Runtime.callFunctionOn` reply whose
+/// script returns an *array* of nodes into a `Vec<RemoteRef>` by
+/// enumerating numeric properties via `Runtime.getProperties` and
+/// describing each element node. `response` is the whole CDP reply, so a
+/// thrown exception (such as the `SyntaxError` of an invalid CSS selector
+/// or regex) fails with [`ZendriverError::JsException`] instead of looking
+/// like no match. Empty array yields an empty Vec, not an error.
 ///
 /// See [`extract_node_ref`] for the rationale on taking a
 /// `SessionHandle` rather than a `Tab` here.
 pub(crate) async fn extract_array_refs(
     session: &SessionHandle,
-    result: &Value,
+    response: &Value,
 ) -> Result<Vec<RemoteRef>> {
+    if let Some(e) = ZendriverError::js_exception_in(response) {
+        return Err(e);
+    }
+    let result = &response["result"];
     if result["subtype"] == "null" || result["type"] == "undefined" {
         return Ok(Vec::new());
     }
@@ -930,7 +944,7 @@ async fn describe_backend_id(session: &SessionHandle, object_id: &str) -> Result
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::test_support::expect;
+    use crate::test_support::{expect, try_expect};
     use zendriver_transport::SessionHandle;
     use zendriver_transport::testing::MockConnection;
 
@@ -1015,6 +1029,63 @@ mod tests {
 
         let hits = fut.await.unwrap().unwrap();
         assert!(hits.is_empty(), "an empty array must yield no matches");
+        conn.shutdown();
+    }
+
+    /// A script that throws, such as `querySelectorAll` given an invalid
+    /// selector, fails the resolve with the exception's description. The
+    /// reply's `result` is then the thrown error object, which must not be
+    /// enumerated as though it were the array of matches: an error has no
+    /// numeric properties, so that would read as "no match".
+    #[tokio::test]
+    async fn a_thrown_exception_fails_the_resolve_with_its_description() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let tab = Tab::new_for_test(sess);
+
+        let fut = tokio::spawn({
+            let t = tab.clone();
+            async move {
+                let scope = QueryScope::Tab(&t);
+                SelectorKind::Css("div[".into()).resolve_many(&scope).await
+            }
+        });
+
+        let id = expect(&mut mock, "Runtime.evaluate").await;
+        let description = "SyntaxError: Failed to execute 'querySelectorAll' on 'Document': \
+                           'div[' is not a valid selector.";
+        let thrown = json!({
+            "type": "object",
+            "subtype": "error",
+            "className": "DOMException",
+            "description": description,
+            "objectId": "RErr",
+        });
+        mock.reply(
+            id,
+            json!({
+                "result": thrown,
+                "exceptionDetails": { "exceptionId": 1, "text": "Uncaught", "exception": thrown },
+            }),
+        )
+        .await;
+
+        // Enumerating the error object would send `Runtime.getProperties`
+        // and wait forever on a reply that this mock never sends.
+        assert!(
+            try_expect(&mut mock, "Runtime.getProperties")
+                .await
+                .is_none(),
+            "the thrown error object must not be enumerated as matches"
+        );
+        let err = fut
+            .await
+            .unwrap()
+            .expect_err("a thrown exception must fail the resolve");
+        assert!(
+            matches!(&err, ZendriverError::JsException(m) if m == description),
+            "got {err:?}"
+        );
         conn.shutdown();
     }
 

@@ -643,7 +643,8 @@ impl<'scope> FindBuilder<'scope> {
     /// Only the pattern string reaches JS, so settings made through
     /// `regex::RegexBuilder` (such as `case_insensitive(true)`) are lost.
     /// JS also rejects Rust's inline-flag prefix: for a `Regex` built from
-    /// `"(?i)buy"`, `new RegExp` throws, so the query matches nothing.
+    /// `"(?i)buy"`, `new RegExp` throws, so the query fails with
+    /// [`ZendriverError::JsException`].
     /// For either, pass `"i"` to [`Self::text_regex_with_flags`] instead.
     ///
     /// # Examples
@@ -901,7 +902,9 @@ impl<'scope> FindBuilder<'scope> {
     /// # Errors
     ///
     /// Returns [`ZendriverError::ElementNotFound`] if no element matches
-    /// within the timeout.
+    /// within the timeout, and [`ZendriverError::JsException`] at once, without
+    /// waiting out the timeout, if the query's CSS selector, XPath or regex is
+    /// invalid.
     ///
     /// # Examples
     ///
@@ -1313,7 +1316,9 @@ impl<'scope> FindAllBuilder<'scope> {
     /// # Errors
     ///
     /// Returns [`ZendriverError::ElementNotFound`] if no element matches
-    /// within the timeout.
+    /// within the timeout, and [`ZendriverError::JsException`] at once, without
+    /// waiting out the timeout, if the query's CSS selector, XPath or regex is
+    /// invalid.
     ///
     /// # Examples
     ///

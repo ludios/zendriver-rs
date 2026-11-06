@@ -127,7 +127,12 @@ pub enum ZendriverError {
     #[error("navigation failed: {0}")]
     Navigation(String),
 
-    /// A JS expression raised an exception during evaluation.
+    /// A JS expression raised an exception during evaluation. The string is
+    /// the thrown value's description (for an `Error`, its stack trace).
+    ///
+    /// A query (`tab.find()` and the like) also fails this way, at once, when
+    /// its CSS selector, XPath or regex is invalid: the string is then the
+    /// browser's `SyntaxError`.
     #[error("javascript exception: {0}")]
     JsException(String),
 
@@ -238,6 +243,24 @@ pub enum ZendriverError {
     /// variant costs nothing to keep unconditionally compiled.
     #[error("file chooser: {0}")]
     FileChooser(String),
+}
+
+impl ZendriverError {
+    /// The error for a `Runtime.evaluate` or `Runtime.callFunctionOn` reply
+    /// whose script threw.
+    ///
+    /// `response` is the whole CDP reply (`{ result, exceptionDetails? }`),
+    /// not its `result` field. Returns `None` when `response` has no
+    /// `exceptionDetails`, and otherwise a [`Self::JsException`] holding the
+    /// thrown value's `description` (for an `Error`, its stack trace), or
+    /// `"unknown"` when the thrown value has none.
+    pub(crate) fn js_exception_in(response: &serde_json::Value) -> Option<Self> {
+        let details = response.get("exceptionDetails")?;
+        let description = details["exception"]["description"].as_str();
+        Some(Self::JsException(
+            description.unwrap_or("unknown").to_string(),
+        ))
+    }
 }
 
 impl From<zendriver_transport::TransportError> for ZendriverError {

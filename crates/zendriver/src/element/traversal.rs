@@ -48,9 +48,7 @@ impl Element {
                     }),
                 )
                 .await?;
-            let Some(remote_ref) =
-                extract_node_ref(self.inner.tab.session(), &raw["result"]).await?
-            else {
+            let Some(remote_ref) = extract_node_ref(self.inner.tab.session(), &raw).await? else {
                 return Ok(None);
             };
             let parent_origin = self.inner.origin.clone();
@@ -192,7 +190,7 @@ impl Element {
                     }),
                 )
                 .await?;
-            let refs = extract_array_refs(self.inner.tab.session(), &raw["result"]).await?;
+            let refs = extract_array_refs(self.inner.tab.session(), &raw).await?;
             let parent_origin = self.inner.origin.clone();
             let out = refs
                 .into_iter()
