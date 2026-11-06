@@ -13,8 +13,8 @@ pub(crate) struct PredicateSet {
 
 /// Trailing `bool` on every value-bearing variant below is `case_insensitive`
 /// — `true` requests the CSS `i` flag (`to_css_selector`) / a lower-cased
-/// compare (`to_js_filter`). `Has` (no value) and `Regex` (already
-/// case-insensitive via an inline `(?i)` pattern flag) don't carry one.
+/// compare (`to_js_filter`). `Has` (no value) and `Regex` (whose pattern
+/// can wrap itself in a `(?i:…)` group instead) don't carry one.
 #[derive(Debug, Clone)]
 pub(crate) enum AttrPred {
     Exact(String, String, bool),

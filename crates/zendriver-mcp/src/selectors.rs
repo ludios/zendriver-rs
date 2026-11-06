@@ -42,10 +42,10 @@ pub struct AttrPredicate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     /// Compare case-insensitively (CSS `[name=value i]`). Valid only for
-    /// `eq`/`contains`/`starts_with`/`ends_with` — `has` has no value to
-    /// compare and `regex` is already case-insensitive via an inline
-    /// `(?i)` pattern flag, so setting this with either is a validation
-    /// error.
+    /// `eq`/`contains`/`starts_with`/`ends_with`, so setting this with
+    /// `has` or `regex` is a validation error: `has` has no value to
+    /// compare, and a `regex` pattern is made case-insensitive by wrapping
+    /// it in a `(?i:…)` group (JS rejects a bare `(?i)` prefix).
     #[serde(default)]
     pub case_insensitive: bool,
 }
@@ -138,8 +138,8 @@ pub enum SelectorError {
     /// has no effect.
     #[error(
         "attribute predicate `{name}` with op `{op:?}` does not support `case_insensitive` \
-         (`has` has no value to compare; `regex` is already case-insensitive via an inline \
-         `(?i)` pattern flag)"
+         (`has` has no value to compare; for `regex`, wrap the pattern in a `(?i:…)` group \
+         instead)"
     )]
     CaseInsensitiveNotApplicable { name: String, op: AttrOp },
 }

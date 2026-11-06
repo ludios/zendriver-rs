@@ -239,7 +239,9 @@ async fn text_regex_resolves_to_innermost_leaf_not_ancestor() {
 /// Case-insensitive predicate matchers (Phase 3, item 1): `.attr_i()` matches
 /// an attribute value regardless of case (CSS `[name="value" i]`), and
 /// `.containing_text_i()` matches element text regardless of case (JS
-/// post-filter lowercasing both sides). Fixture: `<div class="Primary">` +
+/// post-filter lowercasing both sides). `.attr_regex()` and `.text_matches()`
+/// have no `_i` sibling, so they fold case the documented way: with a
+/// `(?i:…)` group around the whole pattern. Fixture: `<div class="Primary">` +
 /// `<span>HELLO</span>`.
 #[tokio::test]
 #[serial]
@@ -278,6 +280,28 @@ async fn predicate_finds_with_case_insensitive_attr_and_text() {
         .one()
         .await
         .expect("containing_text_i(\"hello\") must match text \"HELLO\" case-insensitively");
+    let tag = span
+        .evaluate::<String>("el.tagName.toLowerCase()")
+        .await
+        .unwrap();
+    assert_eq!(tag, "span");
+
+    let div = tab
+        .find()
+        .tag("div")
+        .attr_regex("class", "^(?i:primary)$")
+        .one()
+        .await
+        .expect("attr_regex(\"class\", \"^(?i:primary)$\") must match class=\"Primary\"");
+    assert_eq!(div.inner_text().await.unwrap(), "box");
+
+    let span = tab
+        .find()
+        .tag("span")
+        .text_matches("^(?i:hello)$")
+        .one()
+        .await
+        .expect("text_matches(\"^(?i:hello)$\") must match text \"HELLO\"");
     let tag = span
         .evaluate::<String>("el.tagName.toLowerCase()")
         .await

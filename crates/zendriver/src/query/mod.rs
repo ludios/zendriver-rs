@@ -44,12 +44,12 @@
 //! | `.attr_ends_with(name, suf)` | attribute value suffix — `[name$="suf"]` |
 //! | `.attr_ends_with_i(name, suf)` | same, case-insensitive — `[name$="suf" i]` |
 //! | `.has_attr(name)` | attribute is present — `[name]` |
-//! | `.attr_regex(name, pat)` | attribute value matches JS regex (post-filter; use a `(?i)` pattern flag for case-insensitivity) |
+//! | `.attr_regex(name, pat)` | attribute value matches JS regex (post-filter; for case-insensitivity, wrap the whole pattern in `(?i:…)`) |
 //! | `.containing_text(sub)` | element text contains substring (post-filter) |
 //! | `.containing_text_i(sub)` | same, case-insensitive (post-filter) |
 //! | `.text_equals(exact)` | element text equals string, both folded like XPath `normalize-space()`, which keeps `&nbsp;` (post-filter) |
 //! | `.text_equals_i(exact)` | same, case-insensitive (post-filter) |
-//! | `.text_matches(pat)` | element text matches JS regex (post-filter; use a `(?i)` pattern flag for case-insensitivity) |
+//! | `.text_matches(pat)` | element text matches JS regex (post-filter; for case-insensitivity, wrap the whole pattern in `(?i:…)`) |
 //!
 //! Structural predicates (`.tag`, `.attr*`, `.has_attr`) compile to a single
 //! CSS selector that the browser evaluates natively. Regex and text
@@ -262,8 +262,9 @@ macro_rules! predicate_methods {
             self.predicates.attrs.push(AttrPred::Has(name.into()));
             self
         }
-        /// Match an attribute value against a JS regex (post-filter). Use a
-        /// `(?i)` pattern flag for case-insensitivity.
+        /// Match an attribute value against a JS regex (post-filter). For
+        /// case-insensitivity, wrap the whole pattern in a `(?i:…)` group
+        /// (Chrome 125 or newer); JS rejects Rust's `(?i)` prefix.
         #[must_use]
         pub fn attr_regex(mut self, name: &str, pattern: &str) -> Self {
             self.predicates
@@ -313,7 +314,8 @@ macro_rules! predicate_methods {
             self
         }
         /// Match elements whose text matches a JS regex `pattern` (post-filter).
-        /// Use a `(?i)` pattern flag for case-insensitivity.
+        /// For case-insensitivity, wrap the whole pattern in a `(?i:…)` group
+        /// (Chrome 125 or newer); JS rejects Rust's `(?i)` prefix.
         #[must_use]
         pub fn text_matches(mut self, pattern: &str) -> Self {
             self.predicates
@@ -636,6 +638,9 @@ impl<'scope> FindBuilder<'scope> {
     /// The supplied [`regex::Regex`] is serialized to its pattern string and
     /// re-parsed on the JS side as `new RegExp(pattern, "")`. Use
     /// [`Self::text_regex_with_flags`] to pass explicit JS regex flags.
+    /// JS rejects Rust's inline-flag prefix: for a `Regex` built from
+    /// `"(?i)buy"`, `new RegExp` throws, so the query matches nothing.
+    /// Pass `"i"` to [`Self::text_regex_with_flags`] instead.
     ///
     /// # Examples
     ///

@@ -95,7 +95,7 @@ $defs:
     type: object
     properties:
       case_insensitive:
-        description: "Compare case-insensitively (CSS `[name=value i]`). Valid only for\n`eq`/`contains`/`starts_with`/`ends_with` — `has` has no value to\ncompare and `regex` is already case-insensitive via an inline\n`(?i)` pattern flag, so setting this with either is a validation\nerror."
+        description: "Compare case-insensitively (CSS `[name=value i]`). Valid only for\n`eq`/`contains`/`starts_with`/`ends_with`, so setting this with\n`has` or `regex` is a validation error: `has` has no value to\ncompare, and a `regex` pattern is made case-insensitive by wrapping\nit in a `(?i:…)` group (JS rejects a bare `(?i)` prefix)."
         type: boolean
         default: false
       name:
