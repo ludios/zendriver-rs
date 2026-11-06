@@ -588,6 +588,10 @@ excluded = "Stream-returning subscription; not a request/response tool"
 api = "zendriver::AccountedRawEvent"
 excluded = "Stream-returning subscription; not a request/response tool"
 
+[[entry]]
+api = "zendriver::Connection::expect_disconnect"
+excluded = "sets only the level at which the transport logs a socket's death; browser_close already declares the death of every socket that it ends"
+
 # ── Task 4: responseReceived correctness fix + opt-in IdleLossPolicy::Strict ─
 # (EventStreamIncomplete's enum variant landed with Task 3's transport work,
 # but Task 4 is the first — and, as of this entry, only — call site that
