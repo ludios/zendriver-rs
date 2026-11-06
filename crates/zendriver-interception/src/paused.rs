@@ -22,10 +22,11 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use zendriver_transport::SessionHandle;
 
 use crate::error::InterceptionError;
+use crate::fetch;
 use crate::types::{AbortReason, RequestInfo, RequestOverrides, ResponseInfo, ResponseOverrides};
 
 /// A request paused by Chrome at the configured [`RequestStage`].
@@ -39,11 +40,12 @@ use crate::types::{AbortReason, RequestInfo, RequestOverrides, ResponseInfo, Res
 /// `Response` stage to inspect the upstream body before deciding which
 /// terminal action to take.
 ///
-/// If a `PausedRequest` is dropped without one of the terminal actions
-/// firing (e.g. the consuming task panicked or a `select!` arm cancelled
-/// mid-handler), [`Drop`] dispatches a best-effort `Fetch.continueRequest`
-/// in a detached task so Chrome doesn't hold the request open indefinitely.
-/// See cdpdriver/zendriver#126 for the freeze pattern this prevents.
+/// If a `PausedRequest` is dropped without a terminal action that Chrome
+/// accepted (e.g. the consuming task panicked, a `select!` arm cancelled
+/// mid-handler, or Chrome refused the action's parameters), [`Drop`]
+/// dispatches a best-effort `Fetch.continueRequest` in a detached task so
+/// Chrome doesn't hold the request open indefinitely. See
+/// cdpdriver/zendriver#126 for the freeze pattern this prevents.
 ///
 /// [`RequestStage`]: crate::types::RequestStage
 #[derive(Debug)]
@@ -58,11 +60,11 @@ pub struct PausedRequest {
     pub response: Option<ResponseInfo>,
     session: SessionHandle,
     /// Flipped to `true` by every terminal action (`continue_`, `abort`,
-    /// `respond`, `modify_and_continue`, `continue_response`) before the CDP
-    /// call is dispatched.
+    /// `respond`, `modify_and_continue`, `continue_response`) once Chrome
+    /// has accepted its CDP call.
     /// [`Drop`] inspects this to decide whether to fire a fallback
     /// `Fetch.continueRequest` — set means "already released, don't
-    /// double-fire"; clear means "owner forgot us, release Chrome".
+    /// double-fire"; clear means "not released, release Chrome".
     released: bool,
 }
 
@@ -103,15 +105,9 @@ impl PausedRequest {
     /// }
     /// # Ok(()) }
     /// ```
-    pub async fn continue_(mut self) -> Result<(), InterceptionError> {
-        self.released = true;
-        self.session
-            .call(
-                "Fetch.continueRequest",
-                json!({ "requestId": self.request_id }),
-            )
-            .await?;
-        Ok(())
+    pub async fn continue_(self) -> Result<(), InterceptionError> {
+        let params = fetch::continue_params(&self.request_id, RequestOverrides::default());
+        self.release("Fetch.continueRequest", params).await
     }
 
     /// Abort the request with the given Chrome [`Network.ErrorReason`].
@@ -133,18 +129,9 @@ impl PausedRequest {
     /// ```
     ///
     /// [`Network.ErrorReason`]: https://chromedevtools.github.io/devtools-protocol/tot/Network/#type-ErrorReason
-    pub async fn abort(mut self, reason: AbortReason) -> Result<(), InterceptionError> {
-        self.released = true;
-        self.session
-            .call(
-                "Fetch.failRequest",
-                json!({
-                    "requestId": self.request_id,
-                    "errorReason": reason.as_cdp_str(),
-                }),
-            )
-            .await?;
-        Ok(())
+    pub async fn abort(self, reason: AbortReason) -> Result<(), InterceptionError> {
+        let params = fetch::fail_params(&self.request_id, reason);
+        self.release("Fetch.failRequest", params).await
     }
 
     /// Synthesize a response and serve it in place of the upstream one.
@@ -154,25 +141,13 @@ impl PausedRequest {
     /// are CDP's name/value array form; `body` is base64-encoded on the wire
     /// per CDP spec (callers pass raw bytes).
     pub async fn respond(
-        mut self,
+        self,
         status: u16,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> Result<(), InterceptionError> {
-        self.released = true;
-        let response_headers = crate::fetch::headers_to_cdp(&headers);
-        self.session
-            .call(
-                "Fetch.fulfillRequest",
-                json!({
-                    "requestId": self.request_id,
-                    "responseCode": status,
-                    "responseHeaders": response_headers,
-                    "body": BASE64.encode(&body),
-                }),
-            )
-            .await?;
-        Ok(())
+        let params = fetch::fulfill_params(&self.request_id, status, &headers, &body);
+        self.release("Fetch.fulfillRequest", params).await
     }
 
     /// Release the pause with per-field overrides applied.
@@ -183,31 +158,11 @@ impl PausedRequest {
     /// crosses the wire base64-encoded and `headers` is the CDP name/value
     /// array form (replacement, not merge).
     pub async fn modify_and_continue(
-        mut self,
+        self,
         overrides: RequestOverrides,
     ) -> Result<(), InterceptionError> {
-        self.released = true;
-        let mut params = Map::new();
-        params.insert("requestId".into(), Value::String(self.request_id.clone()));
-        if let Some(url) = overrides.url {
-            params.insert("url".into(), Value::String(url));
-        }
-        if let Some(method) = overrides.method {
-            params.insert("method".into(), Value::String(method));
-        }
-        if let Some(headers) = overrides.headers {
-            params.insert(
-                "headers".into(),
-                Value::Array(crate::fetch::headers_to_cdp(&headers)),
-            );
-        }
-        if let Some(post_data) = overrides.post_data {
-            params.insert("postData".into(), Value::String(BASE64.encode(&post_data)));
-        }
-        self.session
-            .call("Fetch.continueRequest", Value::Object(params))
-            .await?;
-        Ok(())
+        let params = fetch::continue_params(&self.request_id, overrides);
+        self.release("Fetch.continueRequest", params).await
     }
 
     /// Forward the upstream response, optionally rewriting its status and/or
@@ -245,25 +200,36 @@ impl PausedRequest {
     /// # Ok(()) }
     /// ```
     pub async fn continue_response(
-        mut self,
+        self,
         status: Option<u16>,
         phrase: Option<String>,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<(), InterceptionError> {
-        // At the Request stage, `released` stays clear: Chrome refuses
-        // continueResponse there, but the pause is still ours to release, so
-        // Drop sends its best-effort continueRequest.
+        // At the Request stage, Chrome refuses continueResponse; the
+        // request is dropped unreleased, so Drop continues it.
         let Some(response) = self.response.as_ref() else {
             return Err(InterceptionError::WrongStage);
         };
-        self.released = true;
         let overrides = ResponseOverrides {
             status,
             phrase,
             headers,
         };
-        let params = crate::fetch::continue_response_params(&self.request_id, response, overrides);
-        self.session.call("Fetch.continueResponse", params).await?;
+        let params = fetch::continue_response_params(&self.request_id, response, overrides);
+        self.release("Fetch.continueResponse", params).await
+    }
+
+    /// Send `method` with `params`, which release this request. It counts
+    /// as released (so [`Drop`] sends nothing) only once Chrome has accepted
+    /// the call; if Chrome refuses it, the drop at the end of this call
+    /// continues the request.
+    async fn release(
+        mut self,
+        method: &'static str,
+        params: Value,
+    ) -> Result<(), InterceptionError> {
+        self.session.call(method, params).await?;
+        self.released = true;
         Ok(())
     }
 
@@ -394,6 +360,23 @@ mod tests {
         let id = mock.expect_cmd("Fetch.continueRequest").await;
         let sent = mock.last_sent();
         assert_eq!(sent["params"]["requestId"], "REQ-DROP");
+        mock.reply(id, serde_json::json!({})).await;
+        conn.shutdown();
+    }
+
+    /// A terminal action that Chrome refuses leaves the request unreleased,
+    /// so its drop continues it.
+    #[tokio::test]
+    async fn a_refused_release_is_continued_on_drop() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let req = PausedRequest::new("REQ-REFUSED", make_request_info(), None, sess);
+        let abort = tokio::spawn(req.abort(AbortReason::Failed));
+        let id = mock.expect_cmd("Fetch.failRequest").await;
+        mock.reply_err(id, -32602, "Invalid InterceptionId.").await;
+        assert!(abort.await.unwrap().is_err());
+        let id = mock.expect_cmd("Fetch.continueRequest").await;
+        assert_eq!(mock.last_sent()["params"]["requestId"], "REQ-REFUSED");
         mock.reply(id, serde_json::json!({})).await;
         conn.shutdown();
     }

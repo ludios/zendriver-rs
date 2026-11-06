@@ -4,7 +4,10 @@
 #![cfg(feature = "integration-tests")]
 #![allow(clippy::panic, clippy::unwrap_used)]
 
-use zendriver::{Browser, ResponseOverrides};
+use std::time::Duration;
+
+use futures::StreamExt;
+use zendriver::{Browser, RequestOverrides, ResponseOverrides};
 use zendriver_testkit::{
     FixtureServer, PROXY_PASSWORD, PROXY_USER, SITE_A, eval, launch_for_test, load,
 };
@@ -142,5 +145,51 @@ async fn rules_pause_at_their_own_stage() {
     );
     let blocked = "fetch('/plain?blocked').then(() => 'loaded', () => 'blocked')";
     assert_eq!(eval(&tab, blocked).await, "blocked");
+    browser.close().await;
+}
+
+/// A paused request is released whatever goes wrong with it: a rule's
+/// closure that panics, a response that Chrome refuses (a header name with
+/// a space), or a stream's request dropped unreleased. Each request still
+/// gets the server's response.
+#[tokio::test]
+async fn a_paused_request_is_released_whatever_goes_wrong() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/plain")).await;
+    let upstream = "200 [OK] text/html; charset=utf-8";
+
+    let bad_header = vec![("bad header".to_string(), "x".to_string())];
+    let _rules = tab
+        .intercept()
+        .modify_request("*/plain?panic", |_| -> RequestOverrides {
+            panic!("a bug in the closure")
+        })
+        .unwrap()
+        .respond("*/plain?refused", 200, bad_header, Vec::new())
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
+    assert_eq!(fetch_response(&tab, "/plain?panic").await, upstream);
+    assert_eq!(fetch_response(&tab, "/plain?refused").await, upstream);
+
+    let mut stream = tab
+        .intercept()
+        .pattern("*/plain?held")
+        .subscribe()
+        .await
+        .unwrap();
+    let held = tokio::spawn({
+        let tab = tab.clone();
+        async move { fetch_response(&tab, "/plain?held").await }
+    });
+    let paused = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("the stream got no request")
+        .unwrap();
+    drop(paused);
+    assert_eq!(held.await.unwrap(), upstream);
     browser.close().await;
 }

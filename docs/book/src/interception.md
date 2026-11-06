@@ -165,9 +165,12 @@ stage Chrome has no body yet.
 
 **Release every `PausedRequest` promptly.** Chrome holds the request
 until one of the terminal methods arrives, so a request your consumer
-holds on to stalls the page. A `PausedRequest` dropped without one (say,
-by a panic mid-flow) is continued unchanged, and so is each request the
-stream took that nobody read when the stream is dropped.
+holds on to stalls the page. A `PausedRequest` dropped without one that
+Chrome accepted (say, after a panic mid-flow, or an action whose headers
+Chrome refused) is continued unchanged, and so is each request the stream
+took that nobody read when the stream is dropped. Rules get the same
+treatment: a rule whose closure panics, or whose release Chrome refuses,
+logs it and continues the request unchanged.
 
 ## Tracker / fingerprinter blocklist
 

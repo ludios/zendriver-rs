@@ -35,6 +35,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use futures::{Stream, StreamExt};
+use serde::Deserialize as _;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};
@@ -381,7 +382,7 @@ async fn next_event(events: &mut Option<FetchEvents>) -> Option<RawEvent> {
 
 /// The command (method and params) with which `rule` releases the paused
 /// request `ev`.
-fn release(rule: &Rule, ev: &RequestPausedEvent) -> (&'static str, Value) {
+fn command(rule: &Rule, ev: &RequestPausedEvent) -> (&'static str, Value) {
     let id = ev.request_id.as_str();
     let unchanged = || {
         let params = continue_params(id, RequestOverrides::default());
@@ -450,7 +451,25 @@ fn send(session: &SessionHandle, method: &'static str, params: Value) {
     let session = session.clone();
     tokio::spawn(async move {
         if let Err(e) = session.call(method, params).await {
-            warn!(error = %e, method, "interception: Chrome refused a paused request's release");
+            warn!(error = %e, method, "interception: Chrome refused an answer to a challenge");
+        }
+    });
+}
+
+/// Release the paused request `request_id` with `method` and `params`,
+/// without waiting (the multiplexer goes on to the next event). If Chrome
+/// refuses them, the request is continued unchanged instead: one left
+/// paused would stall its page for good.
+fn release(session: &SessionHandle, request_id: String, method: &'static str, params: Value) {
+    let session = session.clone();
+    tokio::spawn(async move {
+        let Err(e) = session.call(method, params).await else {
+            return;
+        };
+        warn!(error = %e, method, "interception: Chrome refused a paused request's release; continuing it unchanged");
+        let unchanged = continue_params(&request_id, RequestOverrides::default());
+        if let Err(e) = session.call("Fetch.continueRequest", unchanged).await {
+            debug!(error = %e, "interception: continuing the request failed too");
         }
     });
 }
@@ -531,7 +550,7 @@ impl Mux {
 
     fn on_event(&mut self, event: RawEvent) {
         match event.method.as_str() {
-            "Fetch.requestPaused" => self.dispatch(event.params),
+            "Fetch.requestPaused" => self.dispatch(&event.params),
             "Fetch.authRequired" => self.authenticate(&event.params),
             _ => {}
         }
@@ -547,11 +566,17 @@ impl Mux {
 
     /// Hand the `Fetch.requestPaused` event `params` to the newest layer
     /// that takes it (see the module docs).
-    fn dispatch(&self, params: Value) {
-        let ev: RequestPausedEvent = match serde_json::from_value(params) {
+    fn dispatch(&self, params: &Value) {
+        let ev = match RequestPausedEvent::deserialize(params) {
             Ok(ev) => ev,
             Err(e) => {
-                warn!(error = %e, "interception: skipping malformed Fetch.requestPaused event");
+                let Some(id) = params["requestId"].as_str() else {
+                    warn!(error = %e, "interception: a Fetch.requestPaused event without requestId");
+                    return;
+                };
+                warn!(error = %e, "interception: continuing a Fetch.requestPaused event it can't read");
+                let unchanged = continue_params(id, RequestOverrides::default());
+                release(&self.session, id.into(), "Fetch.continueRequest", unchanged);
                 return;
             }
         };
@@ -583,14 +608,19 @@ impl Mux {
                     else {
                         continue;
                     };
-                    let (method, params) = release(rule, &ev);
-                    send(&self.session, method, params);
+                    let (method, params) = command(rule, &ev);
+                    release(&self.session, ev.request_id, method, params);
                     return;
                 }
             }
         }
         let params = continue_params(&ev.request_id, RequestOverrides::default());
-        send(&self.session, "Fetch.continueRequest", params);
+        release(
+            &self.session,
+            ev.request_id,
+            "Fetch.continueRequest",
+            params,
+        );
     }
 
     /// Answer the `Fetch.authRequired` event `params`, with the credentials
@@ -906,6 +936,41 @@ mod tests {
         let continued = answered(&mut mock, "Fetch.continueResponse").await;
         assert_eq!(continued["requestId"], "R2");
         assert_eq!(continued["responseCode"], 203);
+        conn.shutdown();
+    }
+
+    /// A release that Chrome refuses is followed by a plain
+    /// `continueRequest`, and a pause whose event doesn't decode is
+    /// continued by its `requestId`: neither request is left paused.
+    #[tokio::test]
+    async fn a_refused_or_unreadable_pause_is_continued() {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let builder = InterceptBuilder::new(&interceptor)
+            .respond(
+                "*",
+                200,
+                vec![("bad header".into(), "x".into())],
+                Vec::new(),
+            )
+            .unwrap();
+        let (_handle, _) = applied(&mut mock, builder.start()).await;
+
+        pause(&mock, "R1", "https://x.test/", json!({})).await;
+        let id = mock.expect_cmd("Fetch.fulfillRequest").await;
+        mock.reply_err(id, -32602, "Invalid header: bad header")
+            .await;
+        assert_eq!(
+            answered(&mut mock, "Fetch.continueRequest").await,
+            json!({ "requestId": "R1" })
+        );
+
+        let unreadable = json!({ "requestId": "R2", "request": "not an object" });
+        mock.emit_event_for_session("Fetch.requestPaused", unreadable, "S1")
+            .await;
+        assert_eq!(
+            answered(&mut mock, "Fetch.continueRequest").await,
+            json!({ "requestId": "R2" })
+        );
         conn.shutdown();
     }
 
