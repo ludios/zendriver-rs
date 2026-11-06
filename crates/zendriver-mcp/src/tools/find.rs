@@ -124,7 +124,8 @@ pub async fn resolve_all(
 ///   — exactly one is applied.
 /// - **predicate** (`tag` and/or `attrs`, plus optional `text*` post-filters,
 ///   all AND-ed) — applies `.tag()`, the `.attr*()` / `.has_attr()` /
-///   `.attr_regex()` family (or their `_i` case-insensitive siblings when
+///   `.attr_regex()` family (or, for `eq` / `contains` / `starts_with` /
+///   `ends_with`, their `_i` case-insensitive siblings when
 ///   `AttrPredicate.case_insensitive` is set), and `.containing_text()` /
 ///   `.text_equals()` / `.text_matches()` (or `.containing_text_i()` /
 ///   `.text_equals_i()` when `Selector.text_case_insensitive` is set).

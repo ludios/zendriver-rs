@@ -30,7 +30,9 @@
 //!
 //! Sixteen predicate methods let you match elements without writing a CSS
 //! selector by hand — including a case-insensitive `_i` sibling for every
-//! value-bearing matcher. All active predicates are AND-ed together:
+//! value-bearing matcher except the two regex ones (`.attr_regex`,
+//! `.text_matches`), whose pattern folds case with a `(?i:…)` group instead.
+//! All active predicates are AND-ed together:
 //!
 //! | Method | Matches |
 //! |---|---|
@@ -638,9 +640,11 @@ impl<'scope> FindBuilder<'scope> {
     /// The supplied [`regex::Regex`] is serialized to its pattern string and
     /// re-parsed on the JS side as `new RegExp(pattern, "")`. Use
     /// [`Self::text_regex_with_flags`] to pass explicit JS regex flags.
-    /// JS rejects Rust's inline-flag prefix: for a `Regex` built from
+    /// Only the pattern string reaches JS, so settings made through
+    /// `regex::RegexBuilder` (such as `case_insensitive(true)`) are lost.
+    /// JS also rejects Rust's inline-flag prefix: for a `Regex` built from
     /// `"(?i)buy"`, `new RegExp` throws, so the query matches nothing.
-    /// Pass `"i"` to [`Self::text_regex_with_flags`] instead.
+    /// For either, pass `"i"` to [`Self::text_regex_with_flags`] instead.
     ///
     /// # Examples
     ///
