@@ -14,13 +14,14 @@ use zendriver_testkit::{
 };
 
 /// What a `fetch` of `path` from the page gets:
-/// `"<status> [<statusText>] <content-type>"`, or `"timeout"` after 5 s (a
-/// request left paused never settles).
+/// `"<status> [<statusText>] <content-type>"`, `"failed"` if the request
+/// failed, or `"timeout"` after 5 s (a request left paused never settles).
 async fn fetch_response(tab: &zendriver::Tab, path: &str) -> String {
     let js = format!(
         "Promise.race([\
            fetch('{path}').then(r =>\
-             `${{r.status}} [${{r.statusText}}] ${{r.headers.get('content-type')}}`),\
+             `${{r.status}} [${{r.statusText}}] ${{r.headers.get('content-type')}}`,\
+             () => 'failed'),\
            new Promise(done => setTimeout(() => done('timeout'), 5000)),\
          ])"
     );
@@ -197,17 +198,16 @@ async fn a_new_url_gets_the_response_rule_that_fits_it() {
     browser.close().await;
 }
 
-/// A paused request is released whatever goes wrong with it: a rule's
-/// closure that panics, a response that Chrome refuses (a header name with
-/// a space), or a stream's request dropped unreleased. Each request still
-/// gets the server's response.
+/// A paused request that its deciding entry doesn't answer fails, rather
+/// than staying paused: a rule's closure that panics, a response that
+/// Chrome refuses (a header name with a space), or a stream's request
+/// dropped unanswered.
 #[tokio::test]
-async fn a_paused_request_is_released_whatever_goes_wrong() {
+async fn a_paused_request_left_unanswered_fails() {
     let server = FixtureServer::start().await;
     let browser = launch_for_test(Browser::builder()).await;
     let tab = browser.main_tab();
     load(&tab, &server.url(SITE_A, "/plain")).await;
-    let upstream = "200 [OK] text/html; charset=utf-8";
 
     let bad_header = vec![("bad header".to_string(), "x".to_string())];
     let _rules = tab
@@ -221,8 +221,8 @@ async fn a_paused_request_is_released_whatever_goes_wrong() {
         .start(Position::Last)
         .await
         .unwrap();
-    assert_eq!(fetch_response(&tab, "/plain?panic").await, upstream);
-    assert_eq!(fetch_response(&tab, "/plain?refused").await, upstream);
+    assert_eq!(fetch_response(&tab, "/plain?panic").await, "failed");
+    assert_eq!(fetch_response(&tab, "/plain?refused").await, "failed");
 
     let held = Match::url("*/plain?held").unwrap();
     let mut stream = tab
@@ -239,7 +239,7 @@ async fn a_paused_request_is_released_whatever_goes_wrong() {
         .expect("the stream got no request")
         .unwrap();
     drop(paused);
-    assert_eq!(held.await.unwrap(), upstream);
+    assert_eq!(held.await.unwrap(), "failed");
     browser.close().await;
 }
 

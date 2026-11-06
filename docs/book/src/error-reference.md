@@ -93,13 +93,13 @@ Gated `interception`. Sub-error returned wrapped in
 
 | Variant | Common cause | Fix |
 |---------|-------------|-----|
-| `Call(CallError)` | Underlying CDP call failed: for `start()` / `insert()` / `subscribe()` / `remove()` / `stop()`, Chrome refused the patterns or the tab is gone. | Inspect inner error. |
+| `Call(CallError)` | Underlying CDP call failed: for `start()` / `insert()` / `subscribe()` / `remove()` / `stop()`, Chrome refused the patterns or the tab is gone; for a `PausedRequest` action, Chrome refused the answer (the request is then failed). | Inspect inner error. |
 | `NoSuchRule(RuleId)` | `move_rule` / `remove`, or a `Position::Before` / `After`, named an entry that isn't in the list (never inserted, or removed since). | Read the ids from `snapshot()`. |
 | `NoRules` | `insert` / `start` got no rules. | Add a rule first. |
 | `MismatchedPause { action, pause }` | `Rule::new` got an action that can't act on the match's kind of pause (e.g. `ModifyResponse` on a `Request` pause). | `RewriteUrl` / `ModifyRequest` need `Request`, `ModifyResponse` needs `ResponseHeaders`. |
-| `InvalidPattern(String)` | URL pattern didn't parse as CDP wildcard syntax. | Patterns use `*` / `?` (not regex). Quote literal `*` characters. |
-| `SubscriptionClosed` | The tab's interception task is gone (it panicked, or the runtime shut down), so a change couldn't be made. | Should not happen; file a bug. |
-| `WrongStage` | `PausedRequest::continue_response` on a request paused at the Request stage. | Pause at the Response stage (`at_response()`). |
+| `InvalidPattern(String)` | URL pattern didn't parse as CDP wildcard syntax. | Patterns use `*` / `?` (not regex). Escape a literal `*`, `?` or `\` with `\`. |
+| `SubscriptionClosed` | The tab's interception task is gone (it panicked, or the runtime shut down), so a change couldn't be made, or a `PausedRequest`'s answer couldn't be sent. | Should not happen; file a bug. |
+| `WrongStage` | `PausedRequest::continue_response` on a request paused at the Request stage (the request, dropped unanswered, is then failed). | Subscribe with a `Match` at `PauseKind::ResponseHeaders` (`Match::url(..)?.at(PauseKind::ResponseHeaders)`). |
 | `InvalidResponse(String)` | A CDP response didn't carry the expected field (e.g. `Fetch.getResponseBody` returned no `body`). | Should not happen with stable Chrome; file a bug. |
 
 ## `CloudflareError` variants

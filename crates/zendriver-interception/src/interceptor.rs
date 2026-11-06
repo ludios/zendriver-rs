@@ -39,6 +39,11 @@
 //! 8. A proxy's challenge gets the session's credentials once; a repeated
 //!    challenge is cancelled; a server's challenge always gets Chrome's
 //!    default.
+//! 9. A pause whose deciding entry doesn't answer it fails the request
+//!    (`Fetch.failRequest`, reason `Failed`), logged with the entry's id: a
+//!    closure that panicked, an answer Chrome refused, a `PausedRequest`
+//!    dropped unanswered, a stream dropped with pauses unread. No other
+//!    entry is tried.
 //!
 //! If the multiplexer falls so far behind that the connection drops some
 //! of its events, it disables `Fetch` and enables it again: a pause it
@@ -48,7 +53,7 @@
 //! reconnect, or the session detaches from its target, the entries are
 //! dropped, which ends their streams.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
@@ -377,7 +382,7 @@ impl Interceptor {
 
     /// The multiplexer's command queue, spawning the multiplexer first if
     /// it isn't running.
-    pub(crate) fn commands(&self) -> &mpsc::UnboundedSender<Command> {
+    fn commands(&self) -> &mpsc::UnboundedSender<Command> {
         self.inner.commands.get_or_init(|| {
             let (commands, received) = mpsc::unbounded_channel();
             tokio::spawn(run(
@@ -486,8 +491,8 @@ impl Drop for InterceptHandle {
 /// [`Interceptor::subscribe`].
 ///
 /// Release each with one of [`PausedRequest`]'s methods. Dropping the
-/// stream removes its entry, and continues each request it took that
-/// wasn't read yet.
+/// stream removes its entry, and fails each request it took that wasn't
+/// read yet.
 #[derive(Debug)]
 #[must_use = "the entry is removed when the stream is dropped — bind it to a variable to keep it in"]
 pub struct InterceptStream {
@@ -600,6 +605,8 @@ pub(crate) enum Command {
     Snapshot(bool, oneshot::Sender<Snapshot>),
     /// Send a stream consumer's answer.
     Answer(Answer),
+    /// A stream's paused request (this one) was dropped unanswered.
+    Dropped(String),
     /// Chrome has replied to the answer for this request.
     Answered(String),
 }
@@ -715,15 +722,16 @@ async fn next_event(events: &mut Option<FetchEvents>) -> Option<AccountedRawEven
     }
 }
 
-/// The command (method and params) with which `action` answers the paused
-/// request `ev`. `ev`'s pause kind is one `action` acts on (`Rule::new`
-/// checked it, and the entry's match fit the pause).
-fn command(action: &Action, ev: &RequestPausedEvent) -> (&'static str, Value) {
+/// The command (method and params) with which `action`, of entry `entry`,
+/// answers the paused request `ev`. `ev`'s pause kind is one `action` acts
+/// on (`Rule::new` checked it, and the entry's match fit the pause).
+fn command(action: &Action, ev: &RequestPausedEvent, entry: RuleId) -> (&'static str, Value) {
     let id = ev.request_id.as_str();
     let unchanged = || {
         let params = continue_params(id, RequestOverrides::default());
         ("Fetch.continueRequest", params)
     };
+    let failed = || ("Fetch.failRequest", fail_params(id, AbortReason::Failed));
     match action {
         Action::Continue => unchanged(),
         Action::Block(reason) => ("Fetch.failRequest", fail_params(id, *reason)),
@@ -744,9 +752,9 @@ fn command(action: &Action, ev: &RequestPausedEvent) -> (&'static str, Value) {
         }
         Action::ModifyRequest(modify) => {
             let info = build_request_info(ev);
-            match run_closure(|| modify(&info)) {
+            match run_closure(entry, || modify(&info)) {
                 Some(overrides) => ("Fetch.continueRequest", continue_params(id, overrides)),
-                None => unchanged(),
+                None => failed(),
             }
         }
         Action::ModifyResponse(modify) => {
@@ -754,25 +762,25 @@ fn command(action: &Action, ev: &RequestPausedEvent) -> (&'static str, Value) {
             let Some(info) = build_response_info(ev) else {
                 return unchanged();
             };
-            match run_closure(|| modify(&info)) {
+            match run_closure(entry, || modify(&info)) {
                 Some(overrides) => (
                     "Fetch.continueResponse",
                     continue_response_params(id, &info, overrides),
                 ),
-                None => unchanged(),
+                None => failed(),
             }
         }
     }
 }
 
-/// `f()`, or `None` (logged) if it panicked. A rule's closure is the
-/// caller's code, and a panic left to unwind would end the multiplexer,
-/// leaving the session's requests paused for good.
-fn run_closure<T>(f: impl FnOnce() -> T) -> Option<T> {
+/// `f()`, the closure of entry `entry`, or `None` (logged) if it panicked.
+/// A rule's closure is the caller's code, and a panic left to unwind would
+/// end the multiplexer, leaving the session's requests paused for good.
+fn run_closure<T>(entry: RuleId, f: impl FnOnce() -> T) -> Option<T> {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(value) => Some(value),
         Err(_) => {
-            error!("interception: a rule's closure panicked; continuing the request unchanged");
+            error!(%entry, "interception: the closure of entry {entry} panicked; failing the request");
             None
         }
     }
@@ -792,29 +800,38 @@ fn send(session: &SessionHandle, method: &'static str, params: Value) {
 /// Release the paused request `request_id` with `method` and `params`,
 /// without waiting (the multiplexer goes on to the next event); see
 /// [`answer_now`].
-fn release(session: &SessionHandle, request_id: String, method: &'static str, params: Value) {
+fn release(
+    session: &SessionHandle,
+    request_id: String,
+    entry: Option<RuleId>,
+    method: &'static str,
+    params: Value,
+) {
     let session = session.clone();
     tokio::spawn(async move {
-        let _ = answer_now(&session, &request_id, method, params).await;
+        let _ = answer_now(&session, &request_id, entry, method, params).await;
     });
 }
 
-/// Release the paused request `request_id` with `method` and `params`, and
-/// return Chrome's reply. If Chrome refuses them, the request is continued
-/// unchanged instead: one left paused would stall its page for good.
+/// Release the paused request `request_id` with `method` and `params`, the
+/// answer of entry `entry` (`None`: of no entry), and return Chrome's
+/// reply. If Chrome refuses them, the request is failed instead: one left
+/// paused would stall its page for good.
 async fn answer_now(
     session: &SessionHandle,
     request_id: &str,
+    entry: Option<RuleId>,
     method: &'static str,
     params: Value,
 ) -> Result<(), InterceptionError> {
     let Err(e) = session.call(method, params).await else {
         return Ok(());
     };
-    warn!(error = %e, method, "interception: Chrome refused a paused request's release; continuing it unchanged");
-    let unchanged = continue_params(request_id, RequestOverrides::default());
-    if let Err(e) = session.call("Fetch.continueRequest", unchanged).await {
-        debug!(error = %e, "interception: continuing the request failed too");
+    let entry = entry.map(|e| e.0);
+    warn!(error = %e, method, entry, "interception: Chrome refused the answer to a paused request; failing the request");
+    let failed = fail_params(request_id, AbortReason::Failed);
+    if let Err(e) = session.call("Fetch.failRequest", failed).await {
+        debug!(error = %e, "interception: failing the request failed too");
     }
     Err(e.into())
 }
@@ -868,8 +885,9 @@ struct Mux {
     /// or credentials.
     events: Option<FetchEvents>,
     answered: Answered,
-    /// The requests handed to streams and not answered yet.
-    held: HashSet<String>,
+    /// The requests handed to streams and not answered yet, each with its
+    /// stream's entry.
+    held: HashMap<String, RuleId>,
     /// A sender of the multiplexer's own queue, for paused requests'
     /// answers and their completions. Weak, so the multiplexer ends once
     /// nothing else can send it commands.
@@ -925,8 +943,17 @@ impl Mux {
                 let _ = done.send(snapshot);
             }
             Command::Answer(answer) => self.answer(answer),
+            Command::Dropped(request_id) => {
+                // Not held: `Fetch.disable` released it, or the session ended.
+                let Some(&entry) = self.held.get(&request_id) else {
+                    return;
+                };
+                warn!(%entry, "interception: a paused request of stream entry {entry} was dropped unanswered; failing it");
+                let params = fail_params(&request_id, AbortReason::Failed);
+                self.send_answer(request_id, "Fetch.failRequest", params, None);
+            }
             Command::Answered(request_id) => {
-                let released = self.held.remove(&request_id);
+                let released = self.held.remove(&request_id).is_some();
                 if released && self.held.is_empty() && self.is_idle() {
                     if let Err(e) = self.apply().await {
                         debug!(error = %e, "interception: Fetch.disable after the last held pause failed");
@@ -948,10 +975,24 @@ impl Mux {
             done,
         } = answer;
         let params = self.with_intercept_response(params, resource_type);
+        self.send_answer(request_id, method, params, done);
+    }
+
+    /// Answer the held request `request_id` with `method` and `params`
+    /// ([`answer_now`]), reply to `done`, and tell the multiplexer once
+    /// Chrome has replied.
+    fn send_answer(
+        &self,
+        request_id: String,
+        method: &'static str,
+        params: Value,
+        done: Option<Reply>,
+    ) {
+        let entry = self.held.get(&request_id).copied();
         let session = self.session.clone();
         let commands = self.commands.clone();
         tokio::spawn(async move {
-            let sent = answer_now(&session, &request_id, method, params).await;
+            let sent = answer_now(&session, &request_id, entry, method, params).await;
             if let Some(done) = done {
                 let _ = done.send(sent);
             }
@@ -1110,7 +1151,13 @@ impl Mux {
                 };
                 warn!(error = %e, "interception: continuing a Fetch.requestPaused event it can't read");
                 let unchanged = continue_params(id, RequestOverrides::default());
-                release(&self.session, id.into(), "Fetch.continueRequest", unchanged);
+                release(
+                    &self.session,
+                    id.into(),
+                    None,
+                    "Fetch.continueRequest",
+                    unchanged,
+                );
                 return;
             }
         };
@@ -1126,6 +1173,7 @@ impl Mux {
             release(
                 &self.session,
                 ev.request_id,
+                None,
                 "Fetch.continueRequest",
                 params,
             );
@@ -1146,15 +1194,21 @@ impl Mux {
                     self.session.clone(),
                     answers,
                 );
+                self.held.insert(ev.request_id, decider.id);
                 // If the stream was dropped since, the request comes back,
-                // and its drop answers it.
+                // and its drop fails it.
                 let _ = requests.send(paused);
-                self.held.insert(ev.request_id);
             }
             Responder::Rule(action) => {
-                let (method, params) = command(action, &ev);
+                let (method, params) = command(action, &ev, decider.id);
                 let params = self.with_intercept_response(params, resource_type);
-                release(&self.session, ev.request_id, method, params);
+                release(
+                    &self.session,
+                    ev.request_id,
+                    Some(decider.id),
+                    method,
+                    params,
+                );
             }
         }
     }
@@ -1196,7 +1250,7 @@ async fn run(
         proxy_auth: None,
         events: None,
         answered: Answered::default(),
-        held: HashSet::new(),
+        held: HashMap::new(),
         commands: own,
     };
     loop {
@@ -1559,10 +1613,10 @@ mod tests {
     }
 
     /// A stream entry decides what it fits, ahead of the rules behind it. A
-    /// request read and dropped unreleased is continued, and so is one
-    /// never read when the stream is dropped.
+    /// request read and dropped unanswered is failed, and so is one never
+    /// read when the stream is dropped: no rule behind it gets them.
     #[tokio::test]
-    async fn a_stream_decides_what_it_fits_and_its_drop_continues_the_unread() {
+    async fn a_stream_decides_what_it_fits_and_its_drop_fails_the_unread() {
         let (mut mock, conn, interceptor) = mock_interceptor();
         let rules = vec![rule("*", Action::Block(AbortReason::Failed))];
         let (_rules, _) = applied(&mut mock, interceptor.insert(rules, Position::Last)).await;
@@ -1589,11 +1643,11 @@ mod tests {
         drop(stream);
         let sent = sent_until_quiet(&mut mock).await;
         for id in ["R1", "R2"] {
-            let continued = (
-                "Fetch.continueRequest".to_string(),
-                json!({ "requestId": id }),
+            let failed = (
+                "Fetch.failRequest".to_string(),
+                json!({ "requestId": id, "errorReason": "Failed" }),
             );
-            assert!(sent.contains(&continued), "{id} not continued: {sent:?}");
+            assert!(sent.contains(&failed), "{id} not failed: {sent:?}");
         }
         conn.shutdown();
     }
@@ -1684,31 +1738,32 @@ mod tests {
         conn.shutdown();
     }
 
-    /// A rule's closure that panics leaves the request continued, unchanged,
-    /// and the multiplexer running.
+    /// A rule's closure that panics leaves the request failed (no entry
+    /// behind it is tried), and the multiplexer running.
     #[tokio::test]
-    async fn a_panicking_closure_continues_the_request() {
+    async fn a_panicking_closure_fails_the_request() {
         let (mut mock, conn, interceptor) = mock_interceptor();
         let panics = Action::ModifyRequest(Arc::new(|_| -> RequestOverrides {
             panic!("a bug in the closure")
         }));
-        let rules = vec![rule("*", panics)];
+        let rules = vec![rule("*", panics), rule("*", Action::Continue)];
         let (_handle, _) = applied(&mut mock, interceptor.insert(rules, Position::Last)).await;
         for id in ["R1", "R2"] {
             pause(&mock, id, "https://x.test/", json!({})).await;
-            assert_eq!(
-                answered(&mut mock, "Fetch.continueRequest").await,
-                json!({ "requestId": id })
+            let failed = (
+                "Fetch.failRequest".to_string(),
+                json!({ "requestId": id, "errorReason": "Failed" }),
             );
+            assert_eq!(sent_until_quiet(&mut mock).await, vec![failed]);
         }
         conn.shutdown();
     }
 
-    /// A release that Chrome refuses is followed by a plain
-    /// `continueRequest`, and a pause whose event doesn't decode is
-    /// continued by its `requestId`: neither request is left paused.
+    /// An answer that Chrome refuses is followed by a `failRequest`, and a
+    /// pause whose event doesn't decode (no entry decided it) is continued
+    /// by its `requestId`: neither request is left paused.
     #[tokio::test]
-    async fn a_refused_or_unreadable_pause_is_continued() {
+    async fn a_refused_answer_fails_and_an_unreadable_pause_continues() {
         let (mut mock, conn, interceptor) = mock_interceptor();
         let bad = Action::Respond {
             status: 200,
@@ -1726,8 +1781,8 @@ mod tests {
         mock.reply_err(id, -32602, "Invalid header: bad header")
             .await;
         assert_eq!(
-            answered(&mut mock, "Fetch.continueRequest").await,
-            json!({ "requestId": "R1" })
+            answered(&mut mock, "Fetch.failRequest").await,
+            json!({ "requestId": "R1", "errorReason": "Failed" })
         );
 
         let unreadable = json!({ "requestId": "R2", "request": "not an object" });

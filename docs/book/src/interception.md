@@ -50,6 +50,11 @@ request walks it. In full (from [`zendriver::interception`]):
 8. A proxy's challenge gets the tab's credentials once; a repeated
    challenge is cancelled; a server's challenge always gets Chrome's
    default.
+9. A pause whose deciding entry doesn't answer it fails the request
+   (`Fetch.failRequest`, reason `Failed`), logged with the entry's id: a
+   closure that panicked, an answer Chrome refused, a `PausedRequest`
+   dropped unanswered, a stream dropped with pauses unread. No other entry
+   is tried.
 
 With [tracker blocking](#tracker--fingerprinter-blocklist) on, a tab's list
 starts with the entry `browser.trackers`. A rule at `Last` comes after it,
@@ -218,17 +223,19 @@ useful at a `ResponseHeaders` pause; before the response Chrome has no body.
 
 **Release every `PausedRequest` promptly.** Chrome holds the request
 until one of the terminal methods arrives, so a request your consumer
-holds on to stalls the page. A `PausedRequest` dropped without one that
-Chrome accepted (say, after a panic mid-flow, or an action whose headers
-Chrome refused) is continued unchanged, and so is each request the stream
-took that nobody read when the stream is dropped. Rules get the same
-treatment: a rule whose closure panics, or whose release Chrome refuses,
-logs it and continues the request unchanged. And if the tab's interception
-ever falls so far behind that it loses events (a pause it never saw would
-stay paused), it disables and re-enables `Fetch`, which continues every
-paused request, those a stream holds included. When the tab's socket
-closes or its session detaches, its entries are dropped, which ends their
-streams.
+holds on to stalls the page. A request its entry leaves unanswered fails
+(rule 9 above), with a warning that names the entry: a `PausedRequest`
+dropped without a terminal method (say, after a panic mid-flow), each
+request the stream took that nobody read when the stream is dropped, a
+terminal method or rule action that Chrome refused (say, for a header
+name with a space), and a rule whose closure panicked. Failing it, rather
+than continuing it, keeps an entry that was meant to block or rewrite
+the request from silently letting the original through. And if the
+tab's interception ever falls so far behind that it loses events (a
+pause it never saw would stay paused), it disables and re-enables
+`Fetch`, which continues every paused request, those a stream holds
+included. When the tab's socket closes or its session detaches, its
+entries are dropped, which ends their streams.
 
 ## Proxy credentials
 

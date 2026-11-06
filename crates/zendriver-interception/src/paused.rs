@@ -49,11 +49,11 @@ use crate::types::{
 ///
 /// If a `PausedRequest` is dropped without a terminal action (e.g. the
 /// consuming task panicked, or a `select!` arm was cancelled before the
-/// action was called), [`Drop`] has the multiplexer send a
-/// `Fetch.continueRequest`, so Chrome doesn't hold the request open
+/// action was called), [`Drop`] has the multiplexer fail the request
+/// (`Fetch.failRequest`, reason `Failed`), so Chrome doesn't hold it open
 /// indefinitely. A terminal action that Chrome refuses is followed by the
-/// same `Fetch.continueRequest`. See cdpdriver/zendriver#126 for the
-/// freeze pattern this prevents.
+/// same `Fetch.failRequest`. See cdpdriver/zendriver#126 for the freeze
+/// pattern this prevents.
 
 #[derive(Debug)]
 pub struct PausedRequest {
@@ -188,8 +188,8 @@ impl PausedRequest {
     /// arrived. Called on a `Request`-stage `PausedRequest` (where
     /// [`response`](Self::response) is `None`), it returns
     /// [`InterceptionError::WrongStage`] without dispatching
-    /// `continueResponse` (the request, dropped unreleased, is then
-    /// continued unchanged); use
+    /// `continueResponse` (the request, dropped unanswered, is then
+    /// failed); use
     /// [`respond`](Self::respond) to serve a synthetic response at the
     /// `Request` stage instead.
     ///
@@ -223,7 +223,7 @@ impl PausedRequest {
         headers: Option<Vec<(String, String)>>,
     ) -> Result<(), InterceptionError> {
         // At the Request stage, Chrome refuses continueResponse; the
-        // request is dropped unreleased, so Drop continues it.
+        // request is dropped unanswered, so Drop fails it.
         let Some(response) = self.response.as_ref() else {
             return Err(InterceptionError::WrongStage);
         };
@@ -308,329 +308,191 @@ impl PausedRequest {
 /// Safety net for cdpdriver/zendriver#126: a paused request that gets dropped
 /// without a terminal action (panicked handler, cancelled `select!` arm,
 /// stream consumer exited early) would otherwise leave Chrome waiting on
-/// `requestId` forever and freeze the whole client. The drop hands the
-/// multiplexer a plain `Fetch.continueRequest` for it instead.
+/// `requestId` forever and freeze the whole client. The drop has the
+/// multiplexer fail it instead.
 impl Drop for PausedRequest {
     fn drop(&mut self) {
         if self.released {
             return;
         }
         let request_id = std::mem::take(&mut self.request_id);
-        let params = fetch::continue_params(&request_id, RequestOverrides::default());
-        let answer = Command::Answer(Answer {
-            request_id,
-            resource_type: self.request.resource_type,
-            method: "Fetch.continueRequest",
-            params,
-            done: None,
-        });
         // A multiplexer that is gone took the session's pauses with it.
-        let _ = self.answers.send(answer);
+        let _ = self.answers.send(Command::Dropped(request_id));
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
-    use super::*;
-    use crate::interceptor::Interceptor;
-    use crate::types::ResourceType;
-    use zendriver_transport::SessionHandle;
+    use std::time::Duration;
+
+    use futures::StreamExt;
+    use serde_json::json;
+    use zendriver_transport::Connection;
     use zendriver_transport::testing::MockConnection;
 
-    fn make_request_info() -> RequestInfo {
-        RequestInfo {
-            url: "https://example.test/widget".into(),
-            method: "GET".into(),
-            headers: Vec::new(),
-            post_data: None,
-            resource_type: ResourceType::XHR,
-        }
-    }
+    use super::*;
+    use crate::interceptor::testing::{answered, applied, mock_interceptor, pause};
+    use crate::interceptor::{InterceptStream, Position};
+    use crate::rule::Match;
 
-    /// A paused request of `session`, answered through a multiplexer of its
-    /// own.
-    fn paused(
+    /// A mock Chrome and its connection; a stream entry for every request at
+    /// `pause_kind`; and the request `request_id` the stream got: an XHR,
+    /// with (at a Response pause) a `200 OK` response without headers. The
+    /// tests keep the stream: dropping it would change `Fetch`'s
+    /// configuration.
+    async fn paused(
         request_id: &str,
-        pause: PauseKind,
-        request: RequestInfo,
-        response: Option<ResponseInfo>,
-        session: SessionHandle,
-    ) -> PausedRequest {
-        let answers = Interceptor::new(session.clone()).commands().clone();
-        PausedRequest::new(request_id, pause, request, response, session, answers)
-    }
-
-    fn make_response_info() -> ResponseInfo {
-        ResponseInfo {
-            status: 200,
-            status_text: "OK".into(),
-            headers: Vec::new(),
+        pause_kind: PauseKind,
+    ) -> (MockConnection, Connection, InterceptStream, PausedRequest) {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let when = Match::url("*").unwrap().at(pause_kind);
+        let (mut stream, _) = applied(&mut mock, interceptor.subscribe(when, Position::Last)).await;
+        let mut fields = json!({ "resourceType": "XHR" });
+        if pause_kind == PauseKind::ResponseHeaders {
+            fields["responseStatusCode"] = json!(200);
+            fields["responseStatusText"] = json!("OK");
+            fields["responseHeaders"] = json!([]);
         }
+        pause(&mock, request_id, "https://example.test/widget", fields).await;
+        let req = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        (mock, conn, stream, req)
     }
 
-    #[tokio::test]
-    async fn continue_dispatches_fetch_continue_request() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = paused("REQ-1", PauseKind::Request, make_request_info(), None, sess);
-
-        let fut = tokio::spawn(async move { req.continue_().await });
-
-        let id = mock.expect_cmd("Fetch.continueRequest").await;
-        let sent = mock.last_sent();
-        assert_eq!(sent["params"]["requestId"], "REQ-1");
-        // No overrides on plain continue_: requestId is the only param.
-        let params_obj = sent["params"].as_object().unwrap();
-        assert_eq!(params_obj.len(), 1);
-        mock.reply(id, serde_json::json!({})).await;
-
-        fut.await.unwrap().unwrap();
-        conn.shutdown();
+    /// The next command sent within 2 s, as its method and parameters,
+    /// answered with `{}`.
+    async fn next_sent(mock: &mut MockConnection) -> (String, Value) {
+        let (method, id) = mock.recv_cmd_timeout(Duration::from_secs(2)).await.unwrap();
+        let params = mock.last_sent()["params"].clone();
+        mock.reply(id, json!({})).await;
+        (method, params)
     }
 
-    #[tokio::test]
-    async fn drop_without_terminal_action_fires_fallback_continue() {
-        // cdpdriver/zendriver#126: a PausedRequest that goes out of scope
-        // without continue_/abort/respond/modify_and_continue must release
-        // Chrome — otherwise the InterceptionId stays armed forever and
-        // freezes the next render.
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        {
-            let req = paused(
-                "REQ-DROP",
-                PauseKind::Request,
-                make_request_info(),
-                None,
-                sess,
-            );
-            drop(req);
-        }
-        // The Drop spawns the call on the current runtime; expect_cmd waits
-        // for it to land.
-        let id = mock.expect_cmd("Fetch.continueRequest").await;
-        let sent = mock.last_sent();
-        assert_eq!(sent["params"]["requestId"], "REQ-DROP");
-        mock.reply(id, serde_json::json!({})).await;
-        conn.shutdown();
+    /// Whether no command is sent within 200 ms.
+    async fn nothing_sent(mock: &mut MockConnection) -> bool {
+        mock.recv_cmd_timeout(Duration::from_millis(200))
+            .await
+            .is_none()
     }
 
-    /// A terminal action that Chrome refuses leaves the request unreleased,
-    /// so its drop continues it.
+    /// `continue_` sends one `continueRequest`, with no overrides, and its
+    /// drop (it consumes the request) sends nothing more.
     #[tokio::test]
-    async fn a_refused_release_is_continued_on_drop() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = paused(
-            "REQ-REFUSED",
-            PauseKind::Request,
-            make_request_info(),
-            None,
-            sess,
+    async fn continue_sends_one_plain_continue_request() {
+        let (mut mock, conn, _stream, req) = paused("REQ-1", PauseKind::Request).await;
+        let (sent, continued) = futures::join!(req.continue_(), next_sent(&mut mock));
+        sent.unwrap();
+        let plain = json!({ "requestId": "REQ-1" });
+        assert_eq!(continued, ("Fetch.continueRequest".to_string(), plain));
+        assert!(
+            nothing_sent(&mut mock).await,
+            "a command followed continue_"
         );
+        conn.shutdown();
+    }
+
+    /// cdpdriver/zendriver#126: a `PausedRequest` dropped without a terminal
+    /// action must still release Chrome, or the request stays paused for
+    /// good and stalls its page. Its drop fails it.
+    #[tokio::test]
+    async fn a_request_dropped_unanswered_is_failed() {
+        let (mut mock, conn, _stream, req) = paused("REQ-DROP", PauseKind::Request).await;
+        drop(req);
+        let failed = json!({ "requestId": "REQ-DROP", "errorReason": "Failed" });
+        assert_eq!(answered(&mut mock, "Fetch.failRequest").await, failed);
+        conn.shutdown();
+    }
+
+    /// A terminal action that Chrome refuses returns Chrome's error, and the
+    /// request is failed.
+    #[tokio::test]
+    async fn a_refused_answer_is_followed_by_a_fail() {
+        let (mut mock, conn, _stream, req) = paused("REQ-REFUSED", PauseKind::Request).await;
+        let sent = tokio::spawn(req.continue_());
+        let id = mock.expect_cmd("Fetch.continueRequest").await;
+        mock.reply_err(id, -32602, "Invalid InterceptionId.").await;
+        let failed = json!({ "requestId": "REQ-REFUSED", "errorReason": "Failed" });
+        let next = ("Fetch.failRequest".to_string(), failed);
+        assert_eq!(next_sent(&mut mock).await, next);
+        assert!(sent.await.unwrap().is_err());
+        conn.shutdown();
+    }
+
+    /// An action whose caller stops waiting while it is in flight leaves the
+    /// answer to the multiplexer: the drop sends no answer of its own.
+    #[tokio::test]
+    async fn an_action_cancelled_in_flight_is_not_followed_by_another_answer() {
+        let (mut mock, conn, _stream, req) = paused("REQ-CANCELLED", PauseKind::Request).await;
         let abort = tokio::spawn(req.abort(AbortReason::Failed));
         let id = mock.expect_cmd("Fetch.failRequest").await;
-        mock.reply_err(id, -32602, "Invalid InterceptionId.").await;
-        let id = mock.expect_cmd("Fetch.continueRequest").await;
-        assert_eq!(mock.last_sent()["params"]["requestId"], "REQ-REFUSED");
-        mock.reply(id, serde_json::json!({})).await;
-        assert!(abort.await.unwrap().is_err());
-        conn.shutdown();
-    }
-
-    /// An action whose caller stops waiting while it is in flight leaves
-    /// the release to it: the drop sends no `continueRequest` of its own.
-    #[tokio::test]
-    async fn an_action_cancelled_in_flight_is_not_followed_by_a_continue() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = paused(
-            "REQ-CANCELLED",
-            PauseKind::Request,
-            make_request_info(),
-            None,
-            sess,
-        );
-        let abort = tokio::spawn(req.abort(AbortReason::Failed));
-        mock.expect_cmd("Fetch.failRequest").await;
         abort.abort();
         assert!(abort.await.unwrap_err().is_cancelled());
-        let next = mock
-            .recv_cmd_timeout(std::time::Duration::from_millis(200))
-            .await;
-        assert_eq!(next, None, "a command followed the cancelled action");
-        conn.shutdown();
-    }
-
-    #[tokio::test]
-    async fn continue_does_not_double_fire_on_drop() {
-        // After continue_() consumes self and returns, Drop runs on the moved
-        // value. `released = true` set by continue_() must suppress the Drop
-        // fallback — otherwise every successful path would send two CDP
-        // round-trips.
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = paused(
-            "REQ-ONCE",
-            PauseKind::Request,
-            make_request_info(),
-            None,
-            sess,
-        );
-
-        let fut = tokio::spawn(async move { req.continue_().await });
-
-        let id = mock.expect_cmd("Fetch.continueRequest").await;
-        assert_eq!(mock.last_sent()["params"]["requestId"], "REQ-ONCE");
-        mock.reply(id, serde_json::json!({})).await;
-        fut.await.unwrap().unwrap();
-
-        // Give the runtime a tick — if Drop had spawned a second call it
-        // would be queued by now. `try_recv_cmd` returns None if the channel
-        // is empty.
-        tokio::task::yield_now().await;
+        mock.reply(id, json!({})).await;
         assert!(
-            mock.try_recv_cmd().is_none(),
-            "Drop fired a second Fetch.continueRequest after continue_ already released"
+            nothing_sent(&mut mock).await,
+            "a command followed the action"
         );
         conn.shutdown();
     }
 
     #[tokio::test]
     async fn respond_dispatches_fetch_fulfill_with_base64_body() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = paused("REQ-2", PauseKind::Request, make_request_info(), None, sess);
-
+        let (mut mock, conn, _stream, req) = paused("REQ-2", PauseKind::Request).await;
+        let headers = vec![("content-type".into(), "text/plain".into())];
         let body = b"hello world".to_vec();
         let expected_b64 = BASE64.encode(&body);
-        let fut = tokio::spawn(async move {
-            req.respond(
-                200,
-                vec![("content-type".into(), "text/plain".into())],
-                body,
-            )
-            .await
-        });
-
-        let id = mock.expect_cmd("Fetch.fulfillRequest").await;
-        let sent = mock.last_sent();
-        assert_eq!(sent["params"]["requestId"], "REQ-2");
-        assert_eq!(sent["params"]["responseCode"], 200);
-        assert_eq!(sent["params"]["body"], expected_b64);
-        let headers = sent["params"]["responseHeaders"].as_array().unwrap();
-        assert_eq!(headers.len(), 1);
-        assert_eq!(headers[0]["name"], "content-type");
-        assert_eq!(headers[0]["value"], "text/plain");
-        mock.reply(id, serde_json::json!({})).await;
-
-        fut.await.unwrap().unwrap();
+        let (sent, (method, params)) =
+            futures::join!(req.respond(200, headers, body), next_sent(&mut mock));
+        sent.unwrap();
+        assert_eq!(method, "Fetch.fulfillRequest");
+        assert_eq!(params["requestId"], "REQ-2");
+        assert_eq!(params["responseCode"], 200);
+        assert_eq!(params["body"], expected_b64);
+        assert_eq!(
+            params["responseHeaders"],
+            json!([{ "name": "content-type", "value": "text/plain" }])
+        );
         conn.shutdown();
     }
 
+    /// `continue_response` sends one `continueResponse`, leaving out the
+    /// phrase it wasn't given (rather than sending `null`).
     #[tokio::test]
-    async fn continue_response_dispatches_fetch_continue_response() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = paused(
-            "REQ-CR",
-            PauseKind::ResponseHeaders,
-            make_request_info(),
-            Some(make_response_info()),
-            sess,
+    async fn continue_response_sends_one_continue_response() {
+        let (mut mock, conn, _stream, req) = paused("REQ-CR", PauseKind::ResponseHeaders).await;
+        let headers = Some(vec![("x".into(), "y".into())]);
+        let (sent, continued) = futures::join!(
+            req.continue_response(Some(204), None, headers),
+            next_sent(&mut mock)
         );
-
-        let fut = tokio::spawn(async move {
-            req.continue_response(Some(204), None, Some(vec![("x".into(), "y".into())]))
-                .await
+        sent.unwrap();
+        let params = json!({
+            "requestId": "REQ-CR",
+            "responseCode": 204,
+            "responseHeaders": [{ "name": "x", "value": "y" }],
         });
-
-        let id = mock.expect_cmd("Fetch.continueResponse").await;
-        let sent = mock.last_sent();
-        assert_eq!(sent["params"]["requestId"], "REQ-CR");
-        assert_eq!(sent["params"]["responseCode"], 204);
-        // `phrase: None` must be omitted entirely, not sent as null.
-        assert!(
-            sent["params"]
-                .as_object()
-                .unwrap()
-                .get("responsePhrase")
-                .is_none()
-        );
-        let headers = sent["params"]["responseHeaders"].as_array().unwrap();
-        assert_eq!(headers.len(), 1);
-        assert_eq!(headers[0]["name"], "x");
-        assert_eq!(headers[0]["value"], "y");
-        mock.reply(id, serde_json::json!({})).await;
-
-        fut.await.unwrap().unwrap();
+        assert_eq!(continued, ("Fetch.continueResponse".to_string(), params));
+        assert!(nothing_sent(&mut mock).await, "a command followed it");
         conn.shutdown();
     }
 
+    /// At a Request pause, `continue_response` sends nothing (Chrome would
+    /// refuse it) and returns `WrongStage`; the request, dropped unanswered,
+    /// is failed.
     #[tokio::test]
-    async fn continue_response_wrong_stage_errs() {
-        // Called on a Request-stage PausedRequest (response: None), Chrome
-        // would reject continueResponse — we short-circuit with WrongStage
-        // and dispatch nothing.
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = paused(
-            "REQ-WS",
-            PauseKind::Request,
-            make_request_info(),
-            None,
-            sess,
-        );
-
+    async fn continue_response_at_a_request_pause_is_an_error() {
+        let (mut mock, conn, _stream, req) = paused("REQ-WS", PauseKind::Request).await;
         let err = req
             .continue_response(Some(200), None, None)
             .await
-            .expect_err("continue_response at Request stage must error");
+            .unwrap_err();
         assert!(matches!(err, InterceptionError::WrongStage));
-
-        // No Fetch.continueResponse was sent. (A Drop fallback
-        // continueRequest *may* land — that's the freeze-safety net, not a
-        // continueResponse dispatch.) Give the runtime a tick for any spawned
-        // Drop task to enqueue, then drain whatever queued.
-        tokio::task::yield_now().await;
-        while let Some((method, _id)) = mock.try_recv_cmd() {
-            assert_ne!(
-                method, "Fetch.continueResponse",
-                "WrongStage path must not dispatch Fetch.continueResponse"
-            );
-        }
-        conn.shutdown();
-    }
-
-    #[tokio::test]
-    async fn continue_response_no_double_fire_on_drop() {
-        // After continue_response() consumes self and returns, Drop runs on
-        // the moved value. `released = true` set by continue_response() must
-        // suppress the Drop fallback continueRequest — otherwise the happy
-        // path would send two CDP round-trips.
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = paused(
-            "REQ-CR-ONCE",
-            PauseKind::ResponseHeaders,
-            make_request_info(),
-            Some(make_response_info()),
-            sess,
-        );
-
-        let fut = tokio::spawn(async move { req.continue_response(Some(200), None, None).await });
-
-        let id = mock.expect_cmd("Fetch.continueResponse").await;
-        assert_eq!(mock.last_sent()["params"]["requestId"], "REQ-CR-ONCE");
-        mock.reply(id, serde_json::json!({})).await;
-        fut.await.unwrap().unwrap();
-
-        tokio::task::yield_now().await;
-        assert!(
-            mock.try_recv_cmd().is_none(),
-            "Drop fired a fallback continueRequest after continue_response already released"
-        );
+        let failed = json!({ "requestId": "REQ-WS", "errorReason": "Failed" });
+        let next = ("Fetch.failRequest".to_string(), failed);
+        assert_eq!(next_sent(&mut mock).await, next);
         conn.shutdown();
     }
 }
