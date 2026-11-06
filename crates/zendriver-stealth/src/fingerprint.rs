@@ -191,15 +191,16 @@ pub struct Fingerprint {
 impl Fingerprint {
     /// Probe host system + installed Chrome to build a realistic fingerprint.
     ///
-    /// `chrome_env` holds the environment variables that Chrome will be
-    /// launched with, on top of the inherited environment; the version probe
-    /// runs Chrome with them too.
+    /// `chrome_env` holds the changes to the inherited environment that
+    /// Chrome will be launched with, in order: `(name, Some(value))` sets a
+    /// variable, and `(name, None)` removes it. The version probe runs Chrome
+    /// with them too.
     // `StealthError` is large because `PatchFailed` wraps `CallError` (~152B).
     // Boxing it would cross the Task 5 file scope; bypass per-fn instead.
     #[allow(clippy::result_large_err)]
     pub fn auto_detect(
         chrome_executable: &Path,
-        chrome_env: &[(OsString, OsString)],
+        chrome_env: &[(OsString, Option<OsString>)],
     ) -> Result<Self, StealthError> {
         let platform = detect_platform();
         let (chrome_major, chrome_full) = probe_chrome_version(chrome_executable, chrome_env)
@@ -315,8 +316,9 @@ fn parse_version_banner(stdout: &str) -> Result<(u32, String), StealthError> {
     Ok((major, full))
 }
 
-/// Probe the Chrome version by running `chrome --version`, with the
-/// environment variables `env` set on top of the inherited environment.
+/// Probe the Chrome version by running `chrome --version`, with the changes
+/// `env` made to the inherited environment, in order: `(name, Some(value))`
+/// sets a variable, and `(name, None)` removes it.
 ///
 /// Unix-only *by design*. Chrome on Windows does not implement `--version` as a
 /// print-and-exit: with no existing browser session it starts a whole browser
@@ -334,7 +336,7 @@ fn parse_version_banner(stdout: &str) -> Result<(u32, String), StealthError> {
 #[allow(clippy::result_large_err)]
 pub(crate) fn probe_chrome_version(
     exe: &Path,
-    env: &[(OsString, OsString)],
+    env: &[(OsString, Option<OsString>)],
 ) -> Result<(u32, String), StealthError> {
     use std::io::Read;
     use std::process::Stdio;
@@ -345,12 +347,19 @@ pub(crate) fn probe_chrome_version(
     const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-    let mut child = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .arg("--version")
-        .envs(env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    for (key, value) in env {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| StealthError::ChromeVersionDetect(format!("spawn failed: {e}")))?;
 
@@ -418,13 +427,13 @@ pub(crate) fn probe_chrome_version(
 /// parses the documented `VS_FIXEDFILEINFO` block, which keeps the crate's
 /// `unsafe_code = "deny"` intact and adds no dependency.
 ///
-/// It takes the environment variables of the Unix twin only to share its
+/// It takes the environment changes of the Unix twin only to share its
 /// signature: running nothing, it has no use for them.
 #[cfg(windows)]
 #[allow(clippy::result_large_err)]
 pub(crate) fn probe_chrome_version(
     exe: &Path,
-    _env: &[(OsString, OsString)],
+    _env: &[(OsString, Option<OsString>)],
 ) -> Result<(u32, String), StealthError> {
     let bytes = std::fs::read(exe)
         .map_err(|e| StealthError::ChromeVersionDetect(format!("read {}: {e}", exe.display())))?;
@@ -755,30 +764,32 @@ mod tests {
 mod fingerprint_tests {
     use super::*;
 
-    /// The probe runs Chrome with the environment variables it is given: this
-    /// stand-in for Chrome prints a version only if it gets `ZD_PROBE_VERSION`.
+    /// The probe runs Chrome with the environment changes it is given, in
+    /// order: this stand-in for Chrome prints a version only if it gets
+    /// `ZD_PROBE_VERSION`, and only if it inherited `HOME`.
     #[cfg(unix)]
     #[test]
     fn version_probe_runs_chrome_with_the_given_env() {
         use std::os::unix::fs::PermissionsExt;
 
+        assert!(
+            std::env::var_os("HOME").is_some(),
+            "this test needs HOME set"
+        );
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("chrome");
-        std::fs::write(
-            &exe,
-            "#!/bin/sh\necho \"Google Chrome $ZD_PROBE_VERSION\"\n",
-        )
-        .unwrap();
+        let script = "#!/bin/sh\necho \"Google Chrome ${HOME:+$ZD_PROBE_VERSION}\"\n";
+        std::fs::write(&exe, script).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let env = [(
-            OsString::from("ZD_PROBE_VERSION"),
-            OsString::from("157.0.8103.38"),
-        )];
+        let name = OsString::from("ZD_PROBE_VERSION");
+        let set = (name.clone(), Some(OsString::from("157.0.8103.38")));
         assert_eq!(
-            probe_chrome_version(&exe, &env).unwrap(),
+            probe_chrome_version(&exe, std::slice::from_ref(&set)).unwrap(),
             (157, "157.0.8103.38".to_string())
         );
         assert!(probe_chrome_version(&exe, &[]).is_err());
+        assert!(probe_chrome_version(&exe, &[set.clone(), (name, None)]).is_err());
+        assert!(probe_chrome_version(&exe, &[set, ("HOME".into(), None)]).is_err());
     }
 
     #[test]

@@ -1144,3 +1144,7 @@ excluded = "no agent-facing value: an MCP reply describes the page, and agents r
 [[entry]]
 api = "zendriver::browser::BrowserBuilder::env"
 excluded = "unsafe to expose: an MCP client that could set Chrome's environment could make Chrome run its code as the server's user (e.g. with LD_PRELOAD), which is also why browser_open exposes no executable or arg; whoever starts the server can still set Chrome's environment by setting the server's own, which Chrome inherits"
+
+[[entry]]
+api = "zendriver::browser::BrowserBuilder::env_remove"
+excluded = "no agent-facing value without BrowserBuilder::env, which is excluded above because it would let an MCP client make Chrome run its code"

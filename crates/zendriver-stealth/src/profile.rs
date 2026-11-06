@@ -449,10 +449,11 @@ impl StealthProfile {
     /// baked-in default, so the resolver never errors solely on Chrome being
     /// unavailable.
     ///
-    /// `chrome_env` holds the environment variables that Chrome will be
-    /// launched with, on top of the inherited environment; the Unix probe
-    /// runs Chrome with them too, so that a Chrome which needs one of them
-    /// (such as `LD_LIBRARY_PATH`) to run at all still gets its version read.
+    /// `chrome_env` holds the changes to the inherited environment that
+    /// Chrome will be launched with, in order: `(name, Some(value))` sets a
+    /// variable, and `(name, None)` removes it. The Unix probe runs Chrome
+    /// with them too, so that a Chrome which needs one of them (such as
+    /// `LD_LIBRARY_PATH`) to run at all still gets its version read.
     ///
     /// # Errors
     /// Returns [`StealthError::ChromeVersionDetect`] when the Chrome probe
@@ -464,7 +465,7 @@ impl StealthProfile {
     pub fn resolve_fingerprint(
         &self,
         chrome_exe: &Path,
-        chrome_env: &[(OsString, OsString)],
+        chrome_env: &[(OsString, Option<OsString>)],
     ) -> Result<Fingerprint, StealthError> {
         let mut fp = match &self.fingerprint_override {
             Some(fp) => fp.clone(),

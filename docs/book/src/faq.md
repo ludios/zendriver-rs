@@ -86,7 +86,8 @@ Chromium / Edge does.
 With `.env(key, value)` on the builder. It sets the variable only for the
 Chrome that `launch()` starts (and Chrome's child processes). Chrome still
 inherits the rest of your program's environment, and your program's own
-environment doesn't change.
+environment doesn't change. To keep an inherited variable away from Chrome
+(such as a secret), use `.env_remove(key)`.
 
 It's for what Chrome (or the loader that starts it) takes only from its
 environment, such as `LD_LIBRARY_PATH`. For example, to run

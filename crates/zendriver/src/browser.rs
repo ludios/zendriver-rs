@@ -653,10 +653,11 @@ pub struct BrowserBuilder {
     /// [`BrowserBuilder::force_open_shadow_roots`]. **Detectable.**
     pub(crate) force_open_shadow_roots: bool,
     pub(crate) extra_args: Vec<String>,
-    /// Environment variables set on the Chrome process, in call order, on
-    /// top of the environment that Chrome inherits. See
-    /// [`BrowserBuilder::env`].
-    pub(crate) env: Vec<(OsString, OsString)>,
+    /// Changes to the environment that the Chrome process inherits, applied
+    /// in call order: `(name, Some(value))` sets a variable, and
+    /// `(name, None)` removes it. See [`BrowserBuilder::env`] and
+    /// [`BrowserBuilder::env_remove`].
+    pub(crate) env: Vec<(OsString, Option<OsString>)>,
     pub(crate) stealth: Option<StealthProfile>,
     /// Explicit input-timing profile, decoupled from [`Self::stealth`]. `None`
     /// (the default) falls back to the timing implied by [`Self::stealth`]
@@ -738,7 +739,10 @@ impl std::fmt::Debug for BrowserBuilder {
                 &self
                     .env
                     .iter()
-                    .map(|(key, _)| format!("{}=<redacted>", key.to_string_lossy()))
+                    .map(|(key, value)| match value {
+                        Some(_) => format!("{}=<redacted>", key.to_string_lossy()),
+                        None => format!("{} (removed)", key.to_string_lossy()),
+                    })
                     .collect::<Vec<_>>(),
             )
             .field("stealth", &self.stealth)
@@ -1312,11 +1316,11 @@ impl BrowserBuilder {
     /// processes.
     ///
     /// Chrome still inherits the rest of this process's environment, and
-    /// this process's own environment is not changed. If several calls set
-    /// the same `key`, the last call wins. [`BrowserBuilder::connect`]
-    /// ignores this, because it starts no process. The `chrome --version`
-    /// that the stealth profile may run first (to learn Chrome's version)
-    /// gets these variables too.
+    /// this process's own environment is not changed. If several calls of
+    /// this and [`BrowserBuilder::env_remove`] name the same `key`, the last
+    /// call wins. [`BrowserBuilder::connect`] ignores this, because it
+    /// starts no process. The `chrome --version` that the stealth profile
+    /// may run first (to learn Chrome's version) gets these variables too.
     ///
     /// Use it for what Chrome (or the loader that starts it) takes only from
     /// its environment, such as the Wayland compositor's socket
@@ -1341,19 +1345,59 @@ impl BrowserBuilder {
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         let key = key.as_ref();
         let value = value.as_ref();
-        let key_bytes = key.as_encoded_bytes();
-        assert!(
-            !key_bytes.is_empty() && !key_bytes.contains(&b'=') && !key_bytes.contains(&0),
-            "BrowserBuilder::env: the name of an environment variable must be \
-             non-empty and contain neither '=' nor NUL, but got {key:?}"
-        );
+        Self::assert_env_name("env", key);
         // Unlike the name, the value may be a secret, so it isn't shown.
         assert!(
             !value.as_encoded_bytes().contains(&0),
             "BrowserBuilder::env: the value of {key:?} contains NUL"
         );
-        self.env.push((key.to_owned(), value.to_owned()));
+        self.env.push((key.to_owned(), Some(value.to_owned())));
         self
+    }
+
+    /// Keep the environment variable `key` out of the environment of the
+    /// Chrome process that [`BrowserBuilder::launch`] starts (and so out of
+    /// its child processes' environments), even if this process has `key`.
+    ///
+    /// This process's own environment is not changed. This call undoes an
+    /// earlier [`BrowserBuilder::env`] of the same `key`, and a later
+    /// [`BrowserBuilder::env`] of the same `key` undoes this call. Like
+    /// [`BrowserBuilder::env`], it applies to the stealth profile's
+    /// `chrome --version` too, and [`BrowserBuilder::connect`] ignores it.
+    ///
+    /// Use it to keep an inherited variable away from Chrome, such as a
+    /// secret, `LD_PRELOAD`, or a `WAYLAND_SOCKET` (which libwayland uses
+    /// instead of `WAYLAND_DISPLAY`).
+    ///
+    /// # Panics
+    ///
+    /// If `key` is empty or contains `=` or NUL.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let builder = zendriver::Browser::builder()
+    ///     .env("WAYLAND_DISPLAY", "/tmp/my-sway/wayland-1")
+    ///     .env_remove("WAYLAND_SOCKET");
+    /// ```
+    #[must_use]
+    pub fn env_remove(mut self, key: impl AsRef<OsStr>) -> Self {
+        let key = key.as_ref();
+        Self::assert_env_name("env_remove", key);
+        self.env.push((key.to_owned(), None));
+        self
+    }
+
+    /// Panic unless `key` can be the name of an environment variable: it
+    /// must be non-empty and contain neither `=` nor NUL. `method` is the
+    /// name of the calling method, for the message.
+    fn assert_env_name(method: &str, key: &OsStr) {
+        let bytes = key.as_encoded_bytes();
+        assert!(
+            !bytes.is_empty() && !bytes.contains(&b'=') && !bytes.contains(&0),
+            "BrowserBuilder::{method}: the name of an environment variable must be \
+             non-empty and contain neither '=' nor NUL, but got {key:?}"
+        );
     }
 
     /// Set a Chrome profile preference, e.g.
@@ -3825,11 +3869,16 @@ impl BrowserBuilder {
         // 6. Spawn chrome + parse WS URL.
         let mut cmd = Command::new(&exe);
         cmd.args(&flags)
-            .envs(self.env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        for (key, value) in &self.env {
+            match value {
+                Some(value) => cmd.env(key, value),
+                None => cmd.env_remove(key),
+            };
+        }
 
         // Take Chrome out of our console's Ctrl+C group, so an interactive
         // Ctrl+C cannot signal it behind our back and race the orchestrated
@@ -4021,10 +4070,10 @@ impl BrowserBuilder {
     ///
     /// The spawn-only builder fields — [`BrowserBuilder::executable`],
     /// [`BrowserBuilder::user_data_dir`], [`BrowserBuilder::downloads_dir`],
-    /// [`BrowserBuilder::env`], and any launch flags
-    /// ([`BrowserBuilder::arg`] / headless / sandbox /
-    /// channel / lang / user-agent) — are **ignored** on the connect path,
-    /// since no process is launched.
+    /// [`BrowserBuilder::env`], [`BrowserBuilder::env_remove`], and any
+    /// launch flags ([`BrowserBuilder::arg`] / headless / sandbox / channel /
+    /// lang / user-agent) — are **ignored** on the connect path, since no
+    /// process is launched.
     ///
     /// # Errors
     ///
@@ -5208,9 +5257,12 @@ mod tests {
     /// only its name.
     #[test]
     fn debug_shows_env_names_but_not_values() {
-        let builder = BrowserBuilder::new().env("API_KEY", "hunter2");
+        let builder = BrowserBuilder::new()
+            .env("API_KEY", "hunter2")
+            .env_remove("WAYLAND_SOCKET");
         let debug = format!("{builder:?}");
         assert!(debug.contains("API_KEY=<redacted>"), "{debug}");
+        assert!(debug.contains("WAYLAND_SOCKET (removed)"), "{debug}");
         assert!(!debug.contains("hunter2"), "{debug}");
     }
 
