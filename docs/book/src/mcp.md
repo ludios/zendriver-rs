@@ -231,9 +231,10 @@ never errors out over this. See
 [Network monitor](./network-monitor.md#streaming-bodies) for the full
 mechanism.
 
-`browser_monitor_read` can also return a `delivery_boundary` event: a
-lagged/reconnected/disconnected/shut-down transport, a correlation-map
-eviction, or an undecodable payload on the underlying event stream, surfaced
+`browser_monitor_read` can also return a `delivery_boundary` event: a lagged
+subscription, a reconnected, disconnected, or shut-down transport, a
+correlation-map eviction, or an undecodable payload on the underlying event
+stream, surfaced
 explicitly instead of silently dropped. Its `boundary` field is one of
 `"lagged"` | `"reconnected"` | `"disconnected"` | `"shutdown"` |
 `"correlation_evicted"` | `"decode_failed"` | `"unknown"`, with `generation` /

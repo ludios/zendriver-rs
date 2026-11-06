@@ -135,7 +135,7 @@ pub enum NetworkEvent {
 /// [`NetworkEvent::Http`] exchanges are assembled by correlating
 /// `requestWillBeSent` → `responseReceived` → `loadingFinished` /
 /// `loadingFailed` by `requestId`. If any leg of that correlation is lost —
-/// a broadcast-bus lag, a transport reconnect or disconnect, a
+/// a broadcast-bus lag, a transport reconnect, disconnect, or shutdown, a
 /// correlation-map eviction, or an undecodable payload — an exchange
 /// assembled across the gap would be silently wrong: a bogus "complete"
 /// exchange missing its response, or worse, a response glued onto an
@@ -181,12 +181,14 @@ pub enum NetworkDeliveryBoundary {
         /// Generation whose WebSocket died.
         generation: u64,
     },
-    /// The tab's connection was shut down while its WebSocket was alive —
-    /// by [`crate::Tab::close`] or the drop of the tab's last handle (for a
-    /// tab that has its own socket), or by [`crate::Browser::reconnect`]
-    /// retiring the tab. Like `Disconnected`, it ends the monitor task, and
-    /// any exchange still in flight is dropped. To keep observing after a
-    /// reconnect, start a new monitor on the rebuilt tab.
+    /// The tab's connection was shut down before the monitor saw its
+    /// WebSocket die. For a tab that has its own socket, that is
+    /// [`crate::Tab::close`], the drop of the tab's last handle, or
+    /// [`crate::Browser::reconnect`] retiring the tab; for a tab on the
+    /// browser's socket, it is [`crate::Browser::close`] or the drop of the
+    /// browser. Like `Disconnected`, it ends the monitor task, and any
+    /// exchange still in flight is dropped. To keep observing after a
+    /// reconnect, start a new monitor on a tab from [`crate::Browser::tabs`].
     Shutdown {
         /// Generation that was shut down.
         generation: u64,
@@ -210,8 +212,9 @@ pub enum NetworkDeliveryBoundary {
     /// [`AccountedRawEvent`](zendriver_transport::AccountedRawEvent) variant
     /// this correlator doesn't yet know how to interpret. Treated like a
     /// delivery gap — correlation state is cleared — but unlike
-    /// [`Self::Disconnected`] the monitor task keeps running, since an
-    /// unrecognized variant isn't known to mean the transport is gone.
+    /// [`Self::Disconnected`] and [`Self::Shutdown`] the monitor task keeps
+    /// running, since an unrecognized variant isn't known to mean the
+    /// transport is gone.
     Unknown,
 }
 
@@ -474,7 +477,9 @@ impl MonitorBuilder {
     /// emits that boundary event and then ends; the stream returns `None` on
     /// the next poll. There is no automatic reconnect: a consumer
     /// that wants to keep observing across a transport blip must call
-    /// [`crate::Tab::monitor`]`().start()` again to spawn a fresh correlator.
+    /// [`crate::Tab::monitor`]`().start()` again to spawn a fresh correlator
+    /// — after [`crate::Browser::reconnect`], on a tab from
+    /// [`crate::Browser::tabs`].
     ///
     /// # Errors
     ///
@@ -921,26 +926,23 @@ async fn run_monitor(
                             return;
                         }
                     }
-                    AccountedRawEvent::Disconnected { generation } => {
+                    AccountedRawEvent::Disconnected { generation }
+                    | AccountedRawEvent::Shutdown { generation } => {
                         partial.clear();
                         urls.clear();
                         streaming.clear();
+                        let boundary = if matches!(acc, AccountedRawEvent::Disconnected { .. }) {
+                            NetworkDeliveryBoundary::Disconnected { generation }
+                        } else {
+                            NetworkDeliveryBoundary::Shutdown { generation }
+                        };
                         // Fail closed: report the boundary, then end the
                         // task regardless of whether the send succeeded —
-                        // the transport is gone either way, so there is
+                        // the connection is gone either way, so there is
                         // nothing more this correlator can observe. A
                         // consumer that wants to keep watching must start a
                         // fresh monitor.
-                        let _ = emit_boundary(&tx, NetworkDeliveryBoundary::Disconnected { generation }).await;
-                        return;
-                    }
-                    // Like `Disconnected`: the connection ended, so end too,
-                    // and say so — exchanges still in flight are dropped.
-                    AccountedRawEvent::Shutdown { generation } => {
-                        partial.clear();
-                        urls.clear();
-                        streaming.clear();
-                        let _ = emit_boundary(&tx, NetworkDeliveryBoundary::Shutdown { generation }).await;
+                        let _ = emit_boundary(&tx, boundary).await;
                         return;
                     }
                     // Conservative default for any future `AccountedRawEvent`
@@ -2377,6 +2379,10 @@ mod tests {
             }
             other => panic!("expected DeliveryBoundary::Shutdown, got {other:?}"),
         }
+        let next = tokio::time::timeout(Duration::from_secs(2), monitor.next())
+            .await
+            .expect("monitor stream did not end within 2s after Shutdown");
+        assert!(next.is_none(), "expected the stream to end, got {next:?}");
     }
 
     // `MockConnection::pair()` spawns the connection actor, which requires a

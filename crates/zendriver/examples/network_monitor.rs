@@ -81,17 +81,22 @@ async fn main() -> zendriver::Result<()> {
             } => {
                 println!("[SSE ] id={request_id} event={event_name:?} data={data:?}");
             }
-            // A delivery-loss boundary — a lagged/reconnected/disconnected
-            // transport, a correlation-map eviction, or an undecodable
-            // payload. Ignoring this variant is fine (every fully-observed
-            // exchange above still arrives); printing it here just shows
-            // where a real consumer would decide whether to resync, alert,
-            // or restart the monitor. `Disconnected` in particular means
-            // this monitor's correlator task has already ended — see
+            // A delivery-loss boundary — a lagged subscription, a
+            // reconnected, disconnected, or shut-down transport, a
+            // correlation-map eviction, or an undecodable payload. Ignoring
+            // this variant is fine (every fully-observed exchange above
+            // still arrives); printing it here just shows where a real
+            // consumer would decide whether to resync, alert, or restart the
+            // monitor. `Disconnected` and `Shutdown` mean this monitor's
+            // correlator task has already ended — see
             // `NetworkDeliveryBoundary::Disconnected`.
             NetworkEvent::DeliveryBoundary(boundary) => {
                 println!("[GAP ] {boundary:?}");
-                if matches!(boundary, NetworkDeliveryBoundary::Disconnected { .. }) {
+                if matches!(
+                    boundary,
+                    NetworkDeliveryBoundary::Disconnected { .. }
+                        | NetworkDeliveryBoundary::Shutdown { .. }
+                ) {
                     break;
                 }
             }

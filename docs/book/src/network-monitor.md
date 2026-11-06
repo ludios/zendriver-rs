@@ -163,7 +163,7 @@ same stream:
 | `Lagged { missed, generation }` | this subscription fell behind the connection's accounted event bus | clears all in-flight correlation state — a gap means any partial exchange spanning it can't be trusted |
 | `Reconnected { previous, generation }` | the transport re-established a fresh WebSocket | clears all in-flight correlation state — nothing from the old socket will ever complete |
 | `Disconnected { generation }` | the transport's WebSocket died unexpectedly | clears state, then **ends the monitor task** — see below |
-| `Shutdown { generation }` | the tab's connection was shut down while its WebSocket was alive: `tab.close()` or the drop of the tab's last handle (for a tab with its own socket), or `browser.reconnect()` retiring the tab | clears state, then **ends the monitor task** — see below |
+| `Shutdown { generation }` | the tab's connection was shut down before the monitor saw its WebSocket die: for a tab with its own socket, `tab.close()`, the drop of the tab's last handle, or `browser.reconnect()` retiring the tab; for a tab on the browser's socket, `browser.close()` or the drop of the browser | clears state, then **ends the monitor task** — see below |
 | `CorrelationEvicted { url }` | the in-flight correlation map exceeded its 10k bound | evicts one entry (previously silent beyond a `tracing` warning) |
 | `DecodeFailed` | a CDP payload didn't match the shape expected for its method | skips that one event only — no raw payload is ever included |
 | `Unknown` | a future transport-level variant this correlator doesn't yet recognize | conservatively clears state, but keeps running |
@@ -178,8 +178,8 @@ before; it just loses the ability to tell "nothing happened" apart from
 match event {
     zendriver::NetworkEvent::DeliveryBoundary(b) => {
         eprintln!("network monitor gap: {b:?}");
-        // Decide whether to resync, alert, or (for `Disconnected`) restart
-        // the monitor.
+        // Decide whether to resync, alert, or (for `Disconnected` or
+        // `Shutdown`) restart the monitor.
     }
     _ => { /* handle the fully-observed variants as usual */ }
 }

@@ -664,9 +664,10 @@ api = "zendriver::BoundedBody::full_len:"
 covered = "browser_monitor_read.body_full_bytes"
 
 # ── Task 8: NetworkDeliveryBoundary loss-accounting on the network monitor ──
-# `NetworkEvent::DeliveryBoundary` replaces four previously-silent paths
+# `NetworkEvent::DeliveryBoundary` replaces five previously-silent paths
 # (cross-gap stitching, correlation-cap eviction, decode failure, transport
-# disconnect) with an explicit event. Wired into browser_monitor_read as the
+# disconnect, transport shutdown) with an explicit event. Wired into
+# browser_monitor_read as the
 # `delivery_boundary` MonitorEvent variant.
 [[entry]]
 api = "zendriver::monitor::NetworkDeliveryBoundary"

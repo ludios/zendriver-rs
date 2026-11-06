@@ -711,6 +711,15 @@ mod tests {
     }
 
     #[test]
+    fn convert_boundary_shutdown_carries_generation() {
+        let wire = convert_boundary(NetworkDeliveryBoundary::Shutdown { generation: 4 });
+        let MonitorEvent::DeliveryBoundary { generation, .. } = wire else {
+            panic!("expected MonitorEvent::DeliveryBoundary");
+        };
+        assert_eq!(generation, Some(4));
+    }
+
+    #[test]
     fn convert_boundary_lagged_carries_missed_and_generation() {
         let wire = convert_boundary(NetworkDeliveryBoundary::Lagged {
             missed: 7,
