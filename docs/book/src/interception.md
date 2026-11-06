@@ -41,8 +41,9 @@ request walks it. In full (from [`zendriver::interception`]):
    about the Response pause, and each 3xx hop is a new request to Chrome.
 6. A request sent to a new URL (a `RewriteUrl`, or a `ModifyRequest` or a
    stream's answer that returns a URL) isn't paused again at the Request
-   stage. It pauses at the Response stage exactly when some
-   `ResponseHeaders` / `ResponseError` entry fits the new URL.
+   stage. Its response is paused when some `ResponseHeaders` /
+   `ResponseError` entry is of its resource type, so that at that pause the
+   entry that fits the new URL, as Chrome wrote it, decides (rule 4).
 7. A stream entry owns every pause it decides: the consumer answers each
    through its `PausedRequest`, which hands the answer to the tab's
    interception to send. While a pause awaits its answer (a stream holds

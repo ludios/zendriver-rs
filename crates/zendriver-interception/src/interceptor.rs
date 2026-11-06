@@ -28,9 +28,10 @@
 //!    to Chrome.
 //! 6. A request sent to a new URL (an [`Action::RewriteUrl`], or a
 //!    `ModifyRequest` or a stream's answer that returns a URL) isn't paused
-//!    again at the Request stage. It pauses at the Response stage exactly
-//!    when some `ResponseHeaders` / `ResponseError` entry fits the new URL
-//!    (sent as `interceptResponse`).
+//!    again at the Request stage. Its response is paused (sent as
+//!    `interceptResponse`) when some `ResponseHeaders` / `ResponseError`
+//!    entry is of its resource type, so that at that pause the entry that
+//!    fits the new URL, as Chrome wrote it, decides (rule 4).
 //! 7. A stream entry owns every pause it decides: the consumer answers each
 //!    through its [`PausedRequest`], which hands the answer to the
 //!    multiplexer to send. While a pause awaits its answer (a stream holds
@@ -1047,19 +1048,22 @@ impl Mux {
         });
     }
 
-    /// `params` of a `Fetch.continueRequest` that sends the request to a
-    /// new URL, with `interceptResponse` saying whether some response entry
-    /// fits the new URL (Chrome decided the Response pause from the old
-    /// one); other `params` unchanged.
+    /// `params` of a `Fetch.continueRequest` that sends a request of
+    /// `resource_type` to a new URL, with `interceptResponse` saying whether
+    /// some response entry is of that type; other `params` unchanged.
+    ///
+    /// Chrome decided the Response pause from the old URL. Whether an entry
+    /// fits the new one is left to that pause, which carries the URL as
+    /// Chrome wrote it (`LOCALHOST` as `localhost`, say).
     fn with_intercept_response(&self, mut params: Value, resource_type: ResourceType) -> Value {
-        let Some(url) = params.get("url").and_then(Value::as_str) else {
+        if params.get("url").is_none() {
             return params;
-        };
+        }
         let kinds = [PauseKind::ResponseHeaders, PauseKind::ResponseError];
-        let fits = self.slots.iter().any(|s| {
-            !s.is_dropped_stream() && kinds.iter().any(|k| s.when.fits(url, resource_type, *k))
+        let wanted = self.slots.iter().any(|s| {
+            !s.is_dropped_stream() && kinds.iter().any(|k| s.when.fits_any_url(resource_type, *k))
         });
-        params["interceptResponse"] = Value::Bool(fits);
+        params["interceptResponse"] = Value::Bool(wanted);
         params
     }
 
@@ -1714,22 +1718,21 @@ mod tests {
         conn.shutdown();
     }
 
-    /// A request sent to a new URL pauses at the Response stage exactly when
-    /// a response entry fits the new URL, whether a rule or a stream sent it.
+    /// A request sent to a new URL pauses at the Response stage when a
+    /// response entry is of its resource type, whether a rule or a stream
+    /// sent it: there, the entry that fits the URL as Chrome wrote it
+    /// decides.
     #[tokio::test]
-    async fn a_new_url_pauses_at_the_response_stage_when_an_entry_fits_it() {
+    async fn a_new_url_pauses_at_the_response_stage_for_an_entry_of_its_type() {
         let (mut mock, conn, interceptor) = mock_interceptor();
         let api_responses = Match::url("*/api/*")
             .unwrap()
-            .at(PauseKind::ResponseHeaders);
+            .at(PauseKind::ResponseHeaders)
+            .resource(ResourceType::XHR);
         let rules = vec![
             rule(
                 "*/to-api",
-                Action::RewriteUrl("https://b.test/api/1".into()),
-            ),
-            rule(
-                "*/to-page",
-                Action::RewriteUrl("https://b.test/page".into()),
+                Action::RewriteUrl("https://B.TEST/api/1".into()),
             ),
             Rule::new(api_responses, Action::Continue).unwrap(),
         ];
@@ -1737,17 +1740,20 @@ mod tests {
         let when = Match::url("*/to-stream").unwrap();
         let (mut stream, _) = applied(&mut mock, interceptor.subscribe(when, Position::Last)).await;
 
-        for (id, url, intercept_response) in [
-            ("R1", "https://a.test/to-api", true),
-            ("R2", "https://a.test/to-page", false),
-        ] {
-            pause(&mock, id, url, json!({})).await;
+        for (id, resource_type, intercept_response) in [("R1", "XHR", true), ("R2", "Image", false)]
+        {
+            let fields = json!({ "resourceType": resource_type });
+            pause(&mock, id, "https://a.test/to-api", fields).await;
             let continued = answered(&mut mock, "Fetch.continueRequest").await;
             assert_eq!(continued["requestId"], id);
-            assert_eq!(continued["interceptResponse"], intercept_response, "{url}");
+            assert_eq!(
+                continued["interceptResponse"], intercept_response,
+                "{resource_type}"
+            );
         }
 
-        pause(&mock, "R3", "https://a.test/to-stream", json!({})).await;
+        let xhr = json!({ "resourceType": "XHR" });
+        pause(&mock, "R3", "https://a.test/to-stream", xhr).await;
         let paused = tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
             .unwrap()

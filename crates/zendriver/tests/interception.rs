@@ -150,7 +150,8 @@ async fn rules_pause_at_their_own_stage() {
 
 /// A request sent to a new URL, by a rule or by a stream's answer, pauses
 /// at the Response stage for a response rule that fits the new URL, though
-/// none fits the old one.
+/// none fits the old one; and the rule's URL is matched against the URL as
+/// Chrome writes it (with its host in lowercase).
 #[tokio::test]
 async fn a_new_url_gets_the_response_rule_that_fits_it() {
     let server = FixtureServer::start().await;
@@ -159,20 +160,28 @@ async fn a_new_url_gets_the_response_rule_that_fits_it() {
     load(&tab, &server.url(SITE_A, "/plain")).await;
 
     let new_url = server.url(SITE_A, "/plain?new");
+    let lowercase = server.url(SITE_A, "/plain?lowercase");
+    let uppercase = lowercase.replace(SITE_A, &SITE_A.to_uppercase());
+    let set_203 = |_: &zendriver::ResponseInfo| ResponseOverrides {
+        status: Some(203),
+        ..ResponseOverrides::default()
+    };
     let _rules = tab
         .intercept()
         .redirect("*/plain?by-rule", new_url.clone())
         .unwrap()
-        .modify_response("*/plain?new", |_| ResponseOverrides {
-            status: Some(203),
-            ..ResponseOverrides::default()
-        })
+        .redirect("*/plain?to-uppercase", uppercase)
+        .unwrap()
+        .modify_response("*/plain?new", set_203)
+        .unwrap()
+        .modify_response(lowercase, set_203)
         .unwrap()
         .start(Position::Last)
         .await
         .unwrap();
     let modified = "203 [Non-Authoritative Information] text/html; charset=utf-8";
     assert_eq!(fetch_response(&tab, "/plain?by-rule").await, modified);
+    assert_eq!(fetch_response(&tab, "/plain?to-uppercase").await, modified);
 
     let by_stream = Match::url("*/plain?by-stream").unwrap();
     let mut stream = tab

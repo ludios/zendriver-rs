@@ -99,9 +99,13 @@ impl Match {
             UrlMatch::Glob(glob) => glob.matches(url),
             UrlMatch::Hosts(hosts) => host_of(url).is_some_and(|h| hosts.is_blocked(h)),
         };
-        self.pause == pause
-            && self.resource_type.is_none_or(|t| covers(t, resource_type))
-            && url_fits
+        self.fits_any_url(resource_type, pause) && url_fits
+    }
+
+    /// Whether a request of `resource_type`, paused at `pause`, fits for
+    /// some URL.
+    pub(crate) fn fits_any_url(&self, resource_type: ResourceType, pause: PauseKind) -> bool {
+        self.pause == pause && self.resource_type.is_none_or(|t| covers(t, resource_type))
     }
 
     /// The `Fetch.RequestPattern` that has Chrome pause the requests this
