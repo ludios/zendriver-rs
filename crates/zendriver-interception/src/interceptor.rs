@@ -1171,12 +1171,21 @@ impl Mux {
             missed,
             "interception: lost events; disabling Fetch, which continues every paused request, then enabling it again"
         );
-        if let Err(e) = self.session.call("Fetch.disable", json!({})).await {
-            warn!(error = %e, "interception: Fetch.disable failed");
+        match self.session.call("Fetch.disable", json!({})).await {
+            // It released every pause.
+            Ok(_) => self.held.clear(),
+            Err(e) => {
+                warn!(error = %e, "interception: Fetch.disable failed; the held pauses stay held")
+            }
         }
-        // `Fetch.disable` released every pause.
-        self.held.clear();
-        let applied = configure(&self.session, &self.slots, self.proxy_auth.as_ref(), false).await;
+        let held_open = !self.held.is_empty();
+        let applied = configure(
+            &self.session,
+            &self.slots,
+            self.proxy_auth.as_ref(),
+            held_open,
+        )
+        .await;
         if let Err(e) = applied {
             warn!(error = %e, "interception: Fetch.enable failed; the entries are inert");
         }
@@ -2061,6 +2070,50 @@ mod tests {
                 { "urlPattern": "*/a/*", "requestStage": "Request" },
                 { "urlPattern": "*/b/*", "requestStage": "Request" },
             ])
+        );
+        conn.shutdown();
+    }
+
+    /// A recovery whose `Fetch.disable` Chrome refuses has released nothing,
+    /// so the pauses held stay held: a stream's request dropped afterwards
+    /// is still failed.
+    #[tokio::test]
+    async fn a_refused_recovery_keeps_the_held_pauses() {
+        let (mut mock, conn) = MockConnection::pair_with_accounted_capacity(4);
+        let interceptor = Interceptor::new(SessionHandle::new(conn.clone(), "S1"));
+        let (mut stream, _) = applied(
+            &mut mock,
+            interceptor.subscribe(Match::url("*").unwrap(), Position::Last),
+        )
+        .await;
+        pause(&mock, "R1", "https://x.test/", json!({})).await;
+        let held = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // While the multiplexer waits for Chrome, more events arrive than
+        // its bus holds.
+        let rules = vec![rule("*/b/*", Action::Block(AbortReason::Failed))];
+        let insert = tokio::spawn({
+            let interceptor = interceptor.clone();
+            async move { interceptor.insert(rules, Position::Last).await }
+        });
+        let id = mock.expect_cmd("Fetch.enable").await;
+        for _ in 0..10 {
+            mock.emit_event_for_session("Network.dataReceived", json!({}), "S1")
+                .await;
+        }
+        mock.reply(id, json!({})).await;
+        let _rules = insert.await.unwrap().unwrap();
+        let id = mock.expect_cmd("Fetch.disable").await;
+        mock.reply_err(id, -32000, "refused").await;
+        answered(&mut mock, "Fetch.enable").await;
+
+        drop(held);
+        assert_eq!(
+            answered(&mut mock, "Fetch.failRequest").await,
+            json!({ "requestId": "R1", "errorReason": "Failed" })
         );
         conn.shutdown();
     }
