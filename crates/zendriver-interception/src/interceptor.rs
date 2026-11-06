@@ -706,23 +706,16 @@ fn auth_response(
     })
 }
 
-/// `session`'s `Fetch` events and its `Target.detachedFromTarget`, read
-/// from the loss-accounted bus, which also says when events were lost and
-/// when the socket died; they end when the socket is shut.
+/// `session`'s `Fetch` events, read from its loss-accounted stream
+/// ([`SessionHandle::subscribe_accounted`]), which also says when events
+/// were lost, when the socket died or was replaced, and when the session
+/// detached. They end at once when the socket is shut, skipping the events
+/// still queued, since no answer to them could be sent.
 fn fetch_events(session: &SessionHandle) -> FetchEvents {
-    let session_id = session.session_id().map(str::to_owned);
     let shut = session.connection().shutdown_token().cancelled_owned();
-    let events = session.connection().subscribe_raw_accounted();
-    let events = events.filter(move |ev| {
+    let events = session.subscribe_accounted().filter(|ev| {
         let wanted = match ev {
-            AccountedRawEvent::Event { event, .. } => {
-                if event.method == "Target.detachedFromTarget" {
-                    session_id.is_some()
-                        && event.params["sessionId"].as_str() == session_id.as_deref()
-                } else {
-                    event.session_id == session_id && event.method.starts_with("Fetch.")
-                }
-            }
+            AccountedRawEvent::Event { event, .. } => event.method.starts_with("Fetch."),
             _ => true,
         };
         std::future::ready(wanted)
@@ -1157,7 +1150,6 @@ impl Mux {
         match event.method.as_str() {
             "Fetch.requestPaused" => self.dispatch(&event.params),
             "Fetch.authRequired" => self.authenticate(&event.params),
-            "Target.detachedFromTarget" => self.end(),
             _ => {}
         }
     }
@@ -1336,7 +1328,8 @@ async fn run(
                 Some(AccountedRawEvent::Event { event, .. }) => mux.on_event(event),
                 Some(AccountedRawEvent::Lagged { missed, .. }) => mux.recover(missed).await,
                 // A reconnect gives the connection a new socket, where this
-                // session doesn't exist.
+                // session doesn't exist. A `Shutdown` may also mean that the
+                // session detached from its target.
                 Some(
                     AccountedRawEvent::Reconnected { .. }
                     | AccountedRawEvent::Disconnected { .. }
