@@ -241,15 +241,18 @@ async fn text_regex_resolves_to_innermost_leaf_not_ancestor() {
 /// `.containing_text_i()` matches element text regardless of case (JS
 /// post-filter lowercasing both sides). `.attr_regex()` and `.text_matches()`
 /// have no `_i` sibling, so they fold case the documented way: with a
-/// `(?i:…)` group around the whole pattern. Fixture: `<div class="Primary">` +
-/// `<span>HELLO</span>`.
+/// `(?i:…)` group around the whole pattern. Fixture: a decoy `<div>` and a
+/// decoy `<span>` come before `<div class="Primary">` and `<span>HELLO</span>`,
+/// so a query whose predicate is dropped returns the decoy and fails.
 #[tokio::test]
 #[serial]
 #[ignore]
 async fn predicate_finds_with_case_insensitive_attr_and_text() {
     let mock = fixture_with_html(
         r#"<!doctype html><html><body>
+          <div class="Secondary">decoy</div>
           <div class="Primary">box</div>
+          <span>goodbye</span>
           <span>HELLO</span>
         </body></html>"#,
     )
@@ -268,6 +271,15 @@ async fn predicate_finds_with_case_insensitive_attr_and_text() {
         .expect("attr_i(\"class\", \"primary\") must match class=\"Primary\" case-insensitively");
     assert_eq!(div.inner_text().await.unwrap(), "box");
 
+    let div = tab
+        .find()
+        .tag("div")
+        .attr_regex("class", "(?i:^primary$)")
+        .one()
+        .await
+        .expect("attr_regex(\"class\", \"(?i:^primary$)\") must match class=\"Primary\"");
+    assert_eq!(div.inner_text().await.unwrap(), "box");
+
     // `.tag("span")` narrows the CSS candidate set so the JS text
     // post-filter doesn't also match ancestors (`<html>`/`<body>`) whose
     // `innerText` includes the span's text — the same document-order
@@ -280,33 +292,16 @@ async fn predicate_finds_with_case_insensitive_attr_and_text() {
         .one()
         .await
         .expect("containing_text_i(\"hello\") must match text \"HELLO\" case-insensitively");
-    let tag = span
-        .evaluate::<String>("el.tagName.toLowerCase()")
-        .await
-        .unwrap();
-    assert_eq!(tag, "span");
-
-    let div = tab
-        .find()
-        .tag("div")
-        .attr_regex("class", "^(?i:primary)$")
-        .one()
-        .await
-        .expect("attr_regex(\"class\", \"^(?i:primary)$\") must match class=\"Primary\"");
-    assert_eq!(div.inner_text().await.unwrap(), "box");
+    assert_eq!(span.inner_text().await.unwrap(), "HELLO");
 
     let span = tab
         .find()
         .tag("span")
-        .text_matches("^(?i:hello)$")
+        .text_matches("(?i:^hello$)")
         .one()
         .await
-        .expect("text_matches(\"^(?i:hello)$\") must match text \"HELLO\"");
-    let tag = span
-        .evaluate::<String>("el.tagName.toLowerCase()")
-        .await
-        .unwrap();
-    assert_eq!(tag, "span");
+        .expect("text_matches(\"(?i:^hello$)\") must match text \"HELLO\"");
+    assert_eq!(span.inner_text().await.unwrap(), "HELLO");
 
     browser.close().await.unwrap();
 }
