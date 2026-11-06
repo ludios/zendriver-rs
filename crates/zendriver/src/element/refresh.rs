@@ -25,7 +25,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::element::{Element, ElementOrigin, ScopeKind, TraversalKind};
 use crate::error::{Result, ZendriverError};
@@ -164,25 +164,14 @@ fn resolve_origin<'a>(
                         }),
                     )
                     .await?;
-                extract_remote_ref(&raw, tab)
-                    .await?
-                    .ok_or(ZendriverError::ElementNotFound {
+                extract_node_ref(tab.session(), &raw).await?.ok_or(
+                    ZendriverError::ElementNotFound {
                         selector: missing_selector,
-                    })
+                    },
+                )
             }
         }
     })
-}
-
-/// Lift a `Runtime.callFunctionOn` reply whose script returns a *single
-/// node* into a `RemoteRef`. `response` is the whole CDP reply, so a
-/// thrown exception fails with `JsException`. Thin wrapper over
-/// [`extract_node_ref`] that takes the `Tab` (rather than a raw
-/// `SessionHandle`) — keeps the call sites in `resolve_origin` readable.
-/// Null / undefined results yield `Ok(None)`, which callers map to
-/// `ElementNotFound` with a kind-specific selector.
-async fn extract_remote_ref(response: &Value, tab: &Tab) -> Result<Option<RemoteRef>> {
-    extract_node_ref(tab.session(), response).await
 }
 
 /// Returns `true` if `e` looks like a stale-node failure from Chrome —
