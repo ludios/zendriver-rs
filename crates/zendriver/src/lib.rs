@@ -79,6 +79,7 @@
 pub mod browser;
 pub mod browser_context;
 pub mod cookies;
+mod download_behavior;
 pub mod element;
 pub mod error;
 #[cfg(feature = "expect")]

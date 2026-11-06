@@ -361,12 +361,6 @@ pub(crate) struct TabInner {
     /// [`Tab::wait_for_load`] to take. `None` when that call already took
     /// it, or no such navigation happened.
     pub(crate) pending_load: tokio::sync::Mutex<Option<LoadTracker>>,
-    /// Whether a download path / behavior has been established for this Tab
-    /// (via [`Tab::set_download_path`] or a prior [`Tab::download_file`]).
-    /// Mirrors nodriver's `_download_behavior` guard: [`Tab::download_file`]
-    /// only installs a default `cwd/downloads` path when this is still
-    /// `false`, so it never clobbers a directory the caller chose explicitly.
-    pub(crate) download_behavior_set: std::sync::atomic::AtomicBool,
     /// The one owner of this tab's `Fetch` domain: every entry of the tab's
     /// interception, and its proxy credentials, go through it.
     #[cfg(feature = "interception")]
@@ -533,7 +527,6 @@ impl Tab {
                 frames,
                 frame_lifecycle_cancel,
                 pending_load: tokio::sync::Mutex::new(None),
-                download_behavior_set: std::sync::atomic::AtomicBool::new(false),
             }
         });
 
@@ -637,6 +630,16 @@ impl Tab {
             .upgrade()
             .map(|b| b.conn.clone())
             .unwrap_or_else(|| self.inner.session.connection().clone())
+    }
+
+    /// The browser this tab belongs to; the clean-shutdown
+    /// [`ZendriverError::Transport`] if it is gone (dropping a `Browser`
+    /// shuts its connection down).
+    fn owning_browser(&self) -> Result<Arc<crate::browser::BrowserInner>> {
+        self.inner
+            .browser
+            .upgrade()
+            .ok_or_else(|| zendriver_transport::TransportError::Shutdown.into())
     }
 
     /// Start a persistent network monitor over this tab's session.
@@ -2834,16 +2837,17 @@ impl Tab {
         self.find_all().css("[src], [href]").many_or_empty().await
     }
 
-    /// Route this browser's downloads into `dir` at runtime, keeping each
-    /// file's server-suggested name.
+    /// Route the downloads of this tab's browser context into `dir` at
+    /// runtime, keeping each file's server-suggested name.
     ///
     /// Dispatches `Browser.setDownloadBehavior { behavior: "allow",
-    /// downloadPath: <dir> }` at **browser scope** (no `sessionId`) — the
-    /// connection beneath every tab is the same, and Chrome does not honor
-    /// per-session download behavior reliably across versions, so the policy
-    /// applies browser-wide. `dir` must already exist; Chrome writes files
-    /// there under the names it would have used in the user's downloads
-    /// folder.
+    /// downloadPath: <dir> }` on the browser's own connection, naming this
+    /// tab's browser context. Chrome keeps one download setting per browser
+    /// context, so this applies to every tab in the context, current and
+    /// future, and replaces what was set on the context before (including by
+    /// [`crate::Browser::set_download_path`], for the default context). `dir`
+    /// must already exist; Chrome writes files there under the names it
+    /// would have used in the user's downloads folder.
     ///
     /// This is distinct from [`Tab::expect_download`]
     /// (gated by the `expect` feature), which configures `allowAndName`
@@ -2854,7 +2858,9 @@ impl Tab {
     ///
     /// # Errors
     ///
-    /// Returns [`ZendriverError::Transport`] / `Cdp` if the CDP call fails.
+    /// Returns [`ZendriverError::Transport`] / `Cdp` if the CDP call fails,
+    /// and the clean-shutdown [`ZendriverError::Transport`] if the tab's
+    /// [`crate::Browser`] is gone.
     ///
     /// # Examples
     ///
@@ -2866,23 +2872,16 @@ impl Tab {
     /// # Ok(()) }
     /// ```
     pub async fn set_download_path(&self, dir: impl Into<PathBuf>) -> Result<()> {
-        let dir = dir.into();
-        self.inner
-            .session
-            .connection()
-            .call_raw(
-                "Browser.setDownloadBehavior",
-                json!({
-                    "behavior": "allow",
-                    "downloadPath": dir.to_string_lossy().to_string(),
-                }),
-                None,
+        let browser = self.owning_browser()?;
+        let mode = crate::download_behavior::DownloadMode::Directory(dir.into());
+        browser
+            .download_behaviors
+            .set(
+                &browser.conn,
+                self.inner.browser_context_id.as_deref(),
+                mode,
             )
-            .await?;
-        self.inner
-            .download_behavior_set
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
+            .await
     }
 
     /// Download the resource at `url` into the tab's download directory,
@@ -2896,9 +2895,12 @@ impl Tab {
     /// configured download behavior. The anchor is removed and the object URL
     /// revoked shortly after the click.
     ///
-    /// If no download directory has been set on this tab (via
-    /// [`Tab::set_download_path`] or an earlier `download_file`), a default of
-    /// `<cwd>/downloads` is created and installed first — matching nodriver.
+    /// If zendriver hasn't set where the downloads of this tab's browser
+    /// context go (by [`Tab::set_download_path`] on any of its tabs,
+    /// [`crate::Browser::set_download_path`] or
+    /// [`crate::BrowserBuilder::downloads_dir`] for the default context, or an
+    /// earlier `download_file`), a default of `<cwd>/downloads` is created
+    /// and installed first — matching nodriver.
     /// When `filename` is `None` the saved name is derived from the URL's last
     /// path segment (query string stripped).
     ///
@@ -2910,7 +2912,9 @@ impl Tab {
     ///
     /// Returns [`ZendriverError::Io`] if the default download directory cannot
     /// be created; propagates [`ZendriverError::JsException`] if the injected
-    /// fetch/anchor script raises (e.g. a CORS-blocked `fetch`).
+    /// fetch/anchor script raises (e.g. a CORS-blocked `fetch`); and returns
+    /// the clean-shutdown [`ZendriverError::Transport`] if the tab's
+    /// [`crate::Browser`] is gone.
     ///
     /// # Examples
     ///
@@ -2932,15 +2936,20 @@ impl Tab {
         // Establish a default download directory if the caller never set one
         // (mirrors nodriver's `_download_behavior` guard so we don't clobber
         // an explicitly-chosen directory).
-        if !self
-            .inner
-            .download_behavior_set
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
+        let browser = self.owning_browser()?;
+        let default_dir = || {
             let dir = std::env::current_dir()?.join("downloads");
             std::fs::create_dir_all(&dir)?;
-            self.set_download_path(dir).await?;
-        }
+            Ok(crate::download_behavior::DownloadMode::Directory(dir))
+        };
+        browser
+            .download_behaviors
+            .set_unless_set(
+                &browser.conn,
+                self.inner.browser_context_id.as_deref(),
+                default_dir,
+            )
+            .await?;
 
         // Derive the saved filename from the URL tail (query stripped) when
         // not supplied, matching nodriver.
@@ -5414,27 +5423,57 @@ mod tests {
 
     /// [`Tab::set_download_path`] dispatches `Browser.setDownloadBehavior`
     /// with `behavior: "allow"` (keeps suggested filenames — distinct from
-    /// the `expect_download` coordinator's `allowAndName`) and the chosen
-    /// `downloadPath`, at browser scope.
+    /// the `expect_download` coordinator's `allowAndName`), the chosen
+    /// `downloadPath`, and `eventsEnabled: true`, which every setting must
+    /// carry (Chrome turns the browser session's download events off
+    /// otherwise). A tab in the default context names no context.
     #[tokio::test]
     async fn tab_set_download_path_dispatches_set_download_behavior_allow() {
         let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let tab = Tab::new_for_test(sess);
+        let inner = crate::browser::test_only_inner_from_conn(conn.clone());
+        let tab = inner.main_tab.clone();
 
-        let fut = tokio::spawn({
-            let t = tab.clone();
-            async move { t.set_download_path("/tmp/x").await }
-        });
+        let fut = tokio::spawn(async move { tab.set_download_path("/tmp/x").await });
 
         let id = mock.expect_cmd("Browser.setDownloadBehavior").await;
         let params = &mock.last_sent()["params"];
         assert_eq!(params["behavior"], "allow");
         assert_eq!(params["downloadPath"], "/tmp/x");
+        assert_eq!(params["eventsEnabled"], true);
+        assert!(params.get("browserContextId").is_none(), "{params}");
         mock.reply(id, json!({})).await;
 
         fut.await.unwrap().unwrap();
         conn.shutdown();
+    }
+
+    /// A tab with its own socket sends the setting on the browser's
+    /// connection, not its own (where it would set the page session's
+    /// override, which Chrome drops when the tab closes), naming the tab's
+    /// browser context.
+    #[tokio::test]
+    async fn tab_set_download_path_goes_to_the_browser_naming_the_context() {
+        let (mut browser_mock, browser_conn) = MockConnection::pair();
+        let (_tab_mock, tab_conn) = MockConnection::pair();
+        let inner = crate::browser::test_only_inner_from_conn(browser_conn.clone());
+        let tab = Tab::new_for_test_in(
+            SessionHandle::new_root(tab_conn.clone()),
+            Arc::downgrade(&inner),
+            "T2",
+            Some("CTX"),
+        );
+
+        let fut = tokio::spawn(async move { tab.set_download_path("/tmp/x").await });
+
+        let id = browser_mock.expect_cmd("Browser.setDownloadBehavior").await;
+        let params = &browser_mock.last_sent()["params"];
+        assert_eq!(params["browserContextId"], "CTX");
+        assert_eq!(params["eventsEnabled"], true);
+        browser_mock.reply(id, json!({})).await;
+
+        fut.await.unwrap().unwrap();
+        tab_conn.shutdown();
+        browser_conn.shutdown();
     }
 
     // --- E1: js_dumps --------------------------------------------------
@@ -5619,8 +5658,8 @@ mod tests {
     #[tokio::test]
     async fn download_file_sets_behavior_then_injects_fetch_anchor_script() {
         let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let tab = Tab::new_for_test(sess);
+        let inner = crate::browser::test_only_inner_from_conn(conn.clone());
+        let tab = inner.main_tab.clone();
 
         let fut = tokio::spawn({
             let t = tab.clone();
@@ -5673,17 +5712,20 @@ mod tests {
         conn.shutdown();
     }
 
+    /// A download path set for the tab's browser context, by any means (here
+    /// [`crate::Browser::set_download_path`], for the default context), is
+    /// one `download_file` keeps: Chrome has one setting per context.
     #[tokio::test]
     async fn download_file_skips_default_path_when_already_set() {
         let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let tab = Tab::new_for_test(sess);
+        let inner = crate::browser::test_only_inner_from_conn(conn.clone());
+        let tab = inner.main_tab.clone();
 
         // Pre-set a download path; download_file must NOT re-install a default.
-        let set_fut = tokio::spawn({
-            let t = tab.clone();
-            async move { t.set_download_path("/tmp/chosen").await }
-        });
+        let browser = crate::Browser {
+            inner: inner.clone(),
+        };
+        let set_fut = tokio::spawn(async move { browser.set_download_path("/tmp/chosen").await });
         let id_set = mock.expect_cmd("Browser.setDownloadBehavior").await;
         assert_eq!(mock.last_sent()["params"]["downloadPath"], "/tmp/chosen");
         mock.reply(id_set, json!({})).await;

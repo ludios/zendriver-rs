@@ -74,7 +74,8 @@ pub struct SetDownloadPathInput {
     pub path: String,
 }
 
-/// Set the directory downloads are saved into for the current tab.
+/// Set the directory downloads are saved into for the current tab's browser
+/// context.
 pub async fn set_download_path(
     state: Arc<Mutex<SessionState>>,
     input: SetDownloadPathInput,

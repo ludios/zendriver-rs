@@ -1113,9 +1113,13 @@ impl BrowserBuilder {
     /// folder.
     ///
     /// When set, `launch` sends `Browser.setDownloadBehavior {behavior:"allow",
-    /// downloadPath}` at browser scope after Chrome is ready, so every tab —
-    /// including new tabs opened later — saves files into `path`. The directory
-    /// is **not** created for you; ensure it exists before launching.
+    /// downloadPath}` for Chrome's default browser context after Chrome is
+    /// ready, so every tab in that context — including new tabs opened later
+    /// — saves files into `path`, under their suggested names. Chrome keeps
+    /// the setting per browser context, so the tabs of a
+    /// [`crate::BrowserContext`] don't use it (see
+    /// [`Tab::set_download_path`]). The directory is **not** created for you;
+    /// ensure it exists before launching.
     ///
     /// See <https://github.com/cdpdriver/zendriver/issues/88>.
     ///
@@ -2057,6 +2061,9 @@ pub(crate) struct BrowserInner {
     /// `browserContextId`, so a tab in this context records none ([`Tab`]'s
     /// cookie jar then names no context).
     pub(crate) default_context_id: Option<String>,
+    /// The download behavior zendriver set on each browser context. Every
+    /// `Browser.setDownloadBehavior` goes through it.
+    pub(crate) download_behaviors: crate::download_behavior::DownloadBehaviors,
     pub(crate) child: tokio::sync::Mutex<Option<Child>>,
     /// Windows job object confining Chrome's whole process tree; a zero-sized
     /// no-op elsewhere. Killing the tracked `child` alone is not enough on
@@ -2360,6 +2367,7 @@ pub(crate) fn test_only_inner_with(
             conn,
             main_tab,
             default_context_id: None,
+            download_behaviors: Default::default(),
             child: tokio::sync::Mutex::new(None),
             job: ProcessJob::none(),
             _user_data: None,
@@ -3394,6 +3402,7 @@ pub(crate) async fn finish_connect(
             conn,
             main_tab,
             default_context_id,
+            download_behaviors: Default::default(),
             // Take ownership of the child only now, once every CDP round-trip
             // that can fail the handshake has succeeded. Until this point
             // `guard_handshake` owns the cleanup: if the budget expires
@@ -4146,21 +4155,14 @@ impl BrowserBuilder {
             return Err(BrowserError::GpuBackendUnavailable.into());
         }
 
-        // 13. If a custom downloads_dir was set, configure browser-scoped
-        // download behavior so all tabs (current + future) save into it.
-        // See cdpdriver/zendriver#88.
-        if let Some(dir) = self.downloads_dir.as_ref() {
+        // 13. If a custom downloads_dir was set, send the default context's
+        // downloads (current tabs and future ones) into it. See
+        // cdpdriver/zendriver#88.
+        if let Some(dir) = self.downloads_dir.clone() {
+            let mode = crate::download_behavior::DownloadMode::Directory(dir);
             inner
-                .conn
-                .call_raw(
-                    "Browser.setDownloadBehavior",
-                    json!({
-                        "behavior": "allow",
-                        "downloadPath": dir.display().to_string(),
-                        "eventsEnabled": true,
-                    }),
-                    None,
-                )
+                .download_behaviors
+                .set(&inner.conn, None, mode)
                 .await?;
         }
 
@@ -4574,13 +4576,15 @@ impl Browser {
         crate::CookieJar::new(self.inner.conn.clone())
     }
 
-    /// Route downloads into `dir` at runtime, browser-wide, keeping each
-    /// file's server-suggested name.
+    /// Route the downloads of Chrome's default browser context into `dir` at
+    /// runtime, keeping each file's server-suggested name.
     ///
     /// Dispatches `Browser.setDownloadBehavior { behavior: "allow",
     /// downloadPath: <dir> }` on the root [`Connection`] (browser scope, no
-    /// `sessionId`), so the policy applies to the current tab and any future
-    /// tabs. `dir` must already exist.
+    /// `sessionId`), so the setting applies to the default context's current
+    /// tabs and any future ones. Chrome keeps the setting per browser
+    /// context, so the tabs of a [`crate::BrowserContext`] don't use it (see
+    /// [`Tab::set_download_path`]). `dir` must already exist.
     ///
     /// This is the runtime counterpart to
     /// [`BrowserBuilder::downloads_dir`](crate::BrowserBuilder::downloads_dir)
@@ -4603,19 +4607,11 @@ impl Browser {
     /// # Ok(()) }
     /// ```
     pub async fn set_download_path(&self, dir: impl Into<PathBuf>) -> Result<(), ZendriverError> {
-        let dir = dir.into();
+        let mode = crate::download_behavior::DownloadMode::Directory(dir.into());
         self.inner
-            .conn
-            .call_raw(
-                "Browser.setDownloadBehavior",
-                json!({
-                    "behavior": "allow",
-                    "downloadPath": dir.to_string_lossy().to_string(),
-                }),
-                None,
-            )
-            .await?;
-        Ok(())
+            .download_behaviors
+            .set(&self.inner.conn, None, mode)
+            .await
     }
 
     /// Create a new isolated [`crate::BrowserContext`] bound to an optional
@@ -4931,6 +4927,10 @@ impl Browser {
         // chain). Dials first; only swaps the live socket on success, so a
         // failed reconnect doesn't tear down a connection that might recover.
         self.inner.conn.redial(&ws_url).await?;
+
+        // Chrome dropped the download settings of the old socket's session
+        // when the session ended.
+        self.inner.download_behaviors.forget_all().await;
 
         // Drop the stale tab registry — every entry's session id is invalid
         // now. The re-armed auto-attach below re-populates it from the

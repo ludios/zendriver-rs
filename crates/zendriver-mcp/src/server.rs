@@ -805,7 +805,7 @@ impl ZendriverServer {
     /// Set the directory downloads are saved into.
     #[tool(
         name = "browser_set_download_path",
-        description = "Set the directory (on the MCP host) Chrome saves downloads into for the current tab (`Browser.setDownloadBehavior`). Created if missing. Applies to subsequent `browser_download` calls and any in-page-triggered downloads."
+        description = "Set the directory (on the MCP host) Chrome saves downloads into, for every tab of the current tab's browser context, current and future (`Browser.setDownloadBehavior`, which Chrome keeps per browser context). Created if missing. Applies to subsequent `browser_download` calls and any in-page-triggered downloads."
     )]
     pub async fn browser_set_download_path(
         &self,
