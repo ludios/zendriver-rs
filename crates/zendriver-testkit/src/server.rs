@@ -359,11 +359,14 @@ async fn trickle(params: Params) -> Response {
             index + 1,
         ))
     });
-    (
-        [(header::CONTENT_TYPE, "text/plain")],
-        Body::from_stream(stream),
-    )
-        .into_response()
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    if let Some(name) = params.get("attachment") {
+        let disposition = HeaderValue::from_str(&format!(r#"attachment; filename="{name}""#))
+            .expect("valid Content-Disposition");
+        headers.insert(header::CONTENT_DISPOSITION, disposition);
+    }
+    (headers, Body::from_stream(stream)).into_response()
 }
 
 async fn svg_sprite() -> Html<String> {
@@ -561,7 +564,7 @@ fn canned_routes() -> Router {
 /// | `/download` | `report.csv` attachment, body [`DOWNLOAD_BODY`] |
 /// | `/download-tiny` | `tiny.txt` attachment of one byte |
 /// | `/basic-auth` | `401` with a `Basic` challenge unless given [`BASIC_AUTH_USER`]:[`BASIC_AUTH_PASSWORD`] |
-/// | `/trickle?chunks=N&chunk_bytes=K&interval_ms=M` | [`trickle_body`]`(N, K)`, one chunk every `M` ms (defaults 8, 1024, 100); `interval_ms=0` makes it a plain large body |
+/// | `/trickle?chunks=N&chunk_bytes=K&interval_ms=M&attachment=F` | [`trickle_body`]`(N, K)`, one chunk every `M` ms (defaults 8, 1024, 100); `interval_ms=0` makes it a plain large body; `attachment=F` sends it as an attachment named `F`, so a navigation to it is a download that lasts about `N` × `M` ms |
 /// | `/svg-sprite` | `<use>` of an inline symbol (`href` and `xlink:href`) and of `/sprite.svg` |
 /// | `/below-fold` | `#below` button 3000 px down; clicking sets `window.belowClicked`. Before it: a `display: none` `#hidden` with the same class `below`; `#off-page` at `left: -9999px`; `#faint`, slotted under a shadow wrapper at opacity 0.1 in a host at 0.05 (0.5% in all); `#faint-slot`, under a slot at opacity 0.005, which a slot's `display: contents` makes moot. After it, `#skipped` inside a `content-visibility: auto` section; clicking it sets `window.skippedClicked` |
 /// | `/padded-button` | `#padded` button with large, asymmetric padding and border; clicks push `[clientX, clientY]` onto `window.clicks` |
@@ -708,6 +711,21 @@ mod tests {
         assert!(head.contains("location: /redirect/1"), "{head}");
         let (head, _) = get(&mut stream, "/redirect/1").await;
         assert!(head.contains("location: /plain?title=redirected"), "{head}");
+    }
+
+    /// `/trickle` is an attachment only when asked. (Its body is chunked,
+    /// which `get` doesn't read, so each request gets its own connection.)
+    #[tokio::test]
+    async fn trickle_is_an_attachment_only_when_asked() {
+        let server = FixtureServer::start().await;
+        let (head, _) = get(&mut connect(&server).await, "/trickle?chunks=1").await;
+        assert!(!head.contains("content-disposition"), "{head}");
+        let path = "/trickle?chunks=1&attachment=slow.bin";
+        let (head, _) = get(&mut connect(&server).await, path).await;
+        assert!(
+            head.contains(r#"content-disposition: attachment; filename="slow.bin""#),
+            "{head}"
+        );
     }
 
     #[tokio::test]
