@@ -150,7 +150,9 @@ impl StealthProfile {
     /// that fill that screen's work area, through `--window-size` and
     /// `--window-position`. So Chrome itself reports a screen, window and
     /// viewport that agree, with no `Emulation.setDeviceMetricsOverride` and
-    /// nothing patched in the page. The viewport is the window minus the
+    /// nothing patched in the page, to the page in front of each window.
+    /// (Chrome gives a background tab's page its viewport as its window.)
+    /// The viewport is the window minus the
     /// browser's toolbars, which headless Chrome emulates: 1920x945 by
     /// default. A `--screen-info` or `--window-size` switch that the caller
     /// passes wins over these. A headed Chrome reports the real display and
