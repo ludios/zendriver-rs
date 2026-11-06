@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::time::timeout;
 use tracing::Level;
-use zendriver::Browser;
+use zendriver::{Browser, NetworkDeliveryBoundary, NetworkEvent, ZendriverError};
 use zendriver_testkit::{FixtureServer, Logs, SITE_A, launch_for_test, load};
 
 /// Far less than an expectation's default timeout.
@@ -30,9 +30,10 @@ async fn close_logs_no_warning_or_error() {
     logs.assert_none_at_least(Level::WARN);
 }
 
-/// When Chrome quits, each tab's socket dies, and that ends what was
-/// waiting on the tab: an expectation fails instead of waiting out its
-/// timeout, and a monitor's stream ends.
+/// When Chrome quits, the socket of a tab that has its own socket dies, and
+/// that ends what was waiting on the tab: an expectation fails with
+/// `EventStreamIncomplete` instead of waiting out its timeout, and a
+/// monitor's last event is the disconnect.
 #[tokio::test]
 async fn close_ends_the_waits_on_a_tab() {
     let server = FixtureServer::start().await;
@@ -40,14 +41,26 @@ async fn close_ends_the_waits_on_a_tab() {
     let tab = browser.main_tab();
     load(&tab, &server.url(SITE_A, "/plain")).await;
     let expectation = tab.expect_request("never-requested");
-    let mut monitor = tab.monitor().start().await.unwrap();
+    let monitor = tab.monitor().start().await.unwrap();
 
     browser.close().await;
     let matched = timeout(PROMPTLY, expectation.matched())
         .await
         .expect("the expectation outlived close()");
-    assert!(matched.is_err(), "{matched:?}");
-    timeout(PROMPTLY, async { while monitor.next().await.is_some() {} })
+    assert!(
+        matches!(matched, Err(ZendriverError::EventStreamIncomplete)),
+        "{matched:?}"
+    );
+    let events: Vec<NetworkEvent> = timeout(PROMPTLY, monitor.collect())
         .await
         .expect("the monitor's stream outlived close()");
+    assert!(
+        matches!(
+            events.last(),
+            Some(NetworkEvent::DeliveryBoundary(
+                NetworkDeliveryBoundary::Disconnected { .. }
+            ))
+        ),
+        "{events:?}"
+    );
 }

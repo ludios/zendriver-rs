@@ -5,6 +5,7 @@ use std::cell::OnceCell;
 use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex};
 
+use tokio::runtime::{Handle, RuntimeFlavor};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::filter::LevelFilter;
@@ -118,9 +119,18 @@ pub struct Logs {
 }
 
 impl Logs {
-    /// What this thread logs from now on. Like [`crate::launch_for_test`],
-    /// it sees a task only if the task runs on this thread.
+    /// What this thread logs from now on.
+    ///
+    /// Panics if called on a multi-thread runtime: the capture is per-thread,
+    /// so it would quietly miss what tasks on the other threads log.
     pub fn from_now_on() -> Self {
+        if let Ok(runtime) = Handle::try_current() {
+            assert_eq!(
+                runtime.runtime_flavor(),
+                RuntimeFlavor::CurrentThread,
+                "the log capture needs a current-thread runtime, or it misses events",
+            );
+        }
         let buffer = Buffer::of_this_thread();
         let from = buffer.lines().len();
         Self { buffer, from }

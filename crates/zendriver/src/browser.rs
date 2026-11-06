@@ -4784,9 +4784,10 @@ impl Browser {
         // As it quits, Chrome resets its DevTools sockets: the browser's, and
         // each tab's own (a tab on a flat session has none, and uses the
         // browser's). Declare that beforehand, so that their actors log the
-        // reset at debug, not as an error. Only the log level changes: each
-        // socket works until Chrome resets it, and the reset still ends any
-        // wait in flight on its tab.
+        // reset at debug, not as an error. Only the log level changes: a
+        // tab's own socket works until Chrome resets it, and the reset ends
+        // any wait in flight on that tab. The browser's socket is shut down
+        // below once the quit is answered, so it may never see the reset.
         self.inner.conn.expect_disconnect();
         let tabs = self.inner.tabs.read().await;
         for tab in tabs.values().chain([&self.inner.main_tab]) {

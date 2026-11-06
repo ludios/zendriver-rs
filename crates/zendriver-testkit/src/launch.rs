@@ -3,7 +3,6 @@
 use std::ops::Deref;
 use std::time::Duration;
 
-use tokio::runtime::{Handle, RuntimeFlavor};
 use zendriver::{Browser, BrowserBuilder};
 
 use crate::logs::Logs;
@@ -38,11 +37,6 @@ pub struct TestBrowser {
 /// (`#[tokio::test]`'s default): the log capture is per-thread, and on a
 /// multi-thread runtime it would quietly miss events.
 pub async fn launch_for_test(builder: BrowserBuilder) -> TestBrowser {
-    assert_eq!(
-        Handle::current().runtime_flavor(),
-        RuntimeFlavor::CurrentThread,
-        "launch_for_test needs a current-thread runtime, or the log capture misses events",
-    );
     let logs = Logs::from_now_on();
     let browser = builder
         .headless(true)
