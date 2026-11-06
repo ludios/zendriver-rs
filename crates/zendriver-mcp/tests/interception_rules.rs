@@ -5,7 +5,12 @@
 //! these load the fixture pages from `127.0.0.1`, and use `localhost` (the
 //! same fixture server) as the "tracker".
 
-#![cfg(all(feature = "integration-tests", target_os = "linux"))]
+#![cfg(all(
+    feature = "integration-tests",
+    feature = "interception",
+    feature = "tracker-blocking",
+    target_os = "linux"
+))]
 #![allow(clippy::panic)]
 
 mod support;

@@ -22,7 +22,7 @@ oneOf:
         type: string
         const: redirect
       to:
-        description: "Target URL. Sent to the actor as a string — no expansion of the\nmatched URL is performed; if you need per-request substitution\nuse `modify_request` or the manual stream API."
+        description: "Target URL. Sent to Chrome as a string — no expansion of the\nmatched URL is performed; if you need per-request substitution\nuse `modify_request` or the manual stream API."
         type: string
     additionalProperties: false
     required:

@@ -16,8 +16,9 @@
 //!
 //! Asserting that a request was actually blocked end-to-end requires more
 //! plumbing (a controlled HTTP origin we can issue an XHR to from page JS
-//! and observe the failure) — out of scope for v0; the per-rule actor
-//! itself is covered by `crates/zendriver-interception` tests.
+//! and observe the failure) — out of scope here; `tests/interception_rules.rs`
+//! does that, and the interception itself is covered by
+//! `crates/zendriver-interception` tests.
 
 #![cfg(all(feature = "integration-tests", feature = "interception"))]
 
@@ -51,8 +52,8 @@ async fn end_to_end_add_list_remove_rule() {
         .await
         .expect("browser_open ok");
 
-    // 2. Navigate somewhere real so the tab has a session to attach the
-    //    interception actor to. example.com is the standard cheap target.
+    // 2. Navigate somewhere real so the tab has a page to intercept for.
+    //    example.com is the standard cheap target.
     client
         .call_tool(CallToolRequestParams::new("browser_goto").with_arguments({
             let mut m = serde_json::Map::new();

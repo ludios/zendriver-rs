@@ -6,16 +6,18 @@
 //! Each `browser_intercept_add_rule` call adds one layer to the current
 //! tab's interception (`tab.intercept().<action>.start()`) and keeps the
 //! returned [`InterceptHandle`] in [`SessionState::rules`], under the rule's
-//! own removable id. The tab's layers compose: a newer rule takes
-//! precedence for the requests it matches, and the others (including the
-//! browser's tracker blocking and proxy credentials) keep working.
+//! own removable id. The tab's layers compose: a request goes to the newest
+//! rule that matches it at the stage Chrome paused it at, and the older
+//! rules (and, after them, the browser's tracker blocking) get only what
+//! no newer rule took. The browser's proxy credentials keep working.
 //! `browser_intercept_remove_rule` stops the handle, which removes only
 //! that layer.
 //!
 //! ## Action surface (`InterceptAction`)
 //!
-//! Four tagged variants mirroring the four `InterceptBuilder` rule kinds:
-//! `block`, `redirect`, `respond`, `modify_request`. `respond` carries a
+//! Five tagged variants mirroring five `InterceptBuilder` rule kinds:
+//! `block`, `redirect`, `respond`, `modify_request`, `modify_response`.
+//! `respond` carries a
 //! UTF-8 `body` plus an optional `content_type` (collapsed into the headers
 //! map when set) — binary bodies are out of scope for v0; agents that need
 //! them can fall back to `browser_intercept_add_rule` with a `redirect` to
@@ -26,8 +28,8 @@
 //! returns a [`RequestOverrides`] that preserves the original headers and
 //! overlays the caller-supplied entries. It also accepts optional `url` /
 //! `method` / `post_data` overrides, passed straight through to
-//! [`RequestOverrides`] (the core actor already dispatches all four
-//! fields — this is DTO-only wiring).
+//! [`RequestOverrides`] (the core already dispatches all four fields —
+//! this is DTO-only wiring).
 //!
 //! [`InterceptHandle`]: zendriver::InterceptHandle
 //! [`RequestOverrides`]: zendriver::RequestOverrides
@@ -62,7 +64,7 @@ pub enum InterceptAction {
     Block,
     /// Redirect every match to `to` (verbatim URL replacement).
     Redirect {
-        /// Target URL. Sent to the actor as a string — no expansion of the
+        /// Target URL. Sent to Chrome as a string — no expansion of the
         /// matched URL is performed; if you need per-request substitution
         /// use `modify_request` or the manual stream API.
         to: String,
@@ -334,6 +336,9 @@ pub struct RemoveRuleOutput {
 
 /// Drop a previously-registered rule, and return once Chrome has applied
 /// the change, so a request sent afterwards no longer meets the rule.
+///
+/// The rule is removed even if Chrome refuses the change (its tab closed,
+/// say), so that only gets logged.
 pub async fn remove_rule(
     state: Arc<Mutex<SessionState>>,
     input: RemoveRuleInput,
@@ -343,7 +348,9 @@ pub async fn remove_rule(
         .rules
         .remove(&input.rule_id)
         .ok_or_else(|| map_error(McpServerError::RuleNotFound(input.rule_id)))?;
-    rule.handle.stop().await.map_err(zendriver_err)?;
+    if let Err(e) = rule.handle.stop().await {
+        tracing::debug!(error = %e, "browser_intercept_remove_rule: Chrome refused the change");
+    }
     Ok(RemoveRuleOutput { removed: true })
 }
 
@@ -364,7 +371,8 @@ pub struct RuleSummary {
     pub rule_id: RuleId,
     /// URL pattern the rule was registered with.
     pub pattern: String,
-    /// `"block"`, `"redirect"`, `"respond"`, or `"modify_request"`.
+    /// `"block"`, `"redirect"`, `"respond"`, `"modify_request"`, or
+    /// `"modify_response"`.
     pub action_kind: String,
 }
 
@@ -402,21 +410,17 @@ pub struct ClearRulesOutput {
 /// Drop every live rule, and return once Chrome has applied the change.
 ///
 /// Every rule is removed even if Chrome refuses a change (its tab closed,
-/// say); the first such error is returned after.
+/// say), so that only gets logged: like an empty registry, it is no error.
 pub async fn clear_rules(
     state: Arc<Mutex<SessionState>>,
     _: crate::tools::common::EmptyInput,
 ) -> Result<ClearRulesOutput, ErrorData> {
     let mut s = state.lock().await;
     let cleared = s.rules.len();
-    let mut failed = None;
     for (_, rule) in s.rules.drain() {
         if let Err(e) = rule.handle.stop().await {
-            failed.get_or_insert(e);
+            tracing::debug!(error = %e, "browser_intercept_clear_rules: Chrome refused a change");
         }
-    }
-    if let Some(e) = failed {
-        return Err(zendriver_err(e));
     }
     Ok(ClearRulesOutput { cleared })
 }
@@ -427,8 +431,8 @@ mod tests {
     //! No-browser unit coverage.
     //!
     //! The browser-touching `add_rule` path needs a live Chrome (it goes
-    //! through `current_tab` and spawns a real interception actor) — that
-    //! path is exercised in `tests/integration_interception.rs`. Here we
+    //! through `current_tab` and adds a layer to the tab's interception) —
+    //! that path is exercised in `tests/interception_rules.rs`. Here we
     //! cover the bookkeeping: list / clear on an empty registry never
     //! errors, remove on an unknown id surfaces `RuleNotFound`, and
     //! `add_rule` without a browser surfaces `BrowserNotOpen`.

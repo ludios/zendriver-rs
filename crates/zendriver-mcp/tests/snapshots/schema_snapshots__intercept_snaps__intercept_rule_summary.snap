@@ -8,7 +8,7 @@ description: Description of a single live interception rule.
 type: object
 properties:
   action_kind:
-    description: "`\"block\"`, `\"redirect\"`, `\"respond\"`, or `\"modify_request\"`."
+    description: "`\"block\"`, `\"redirect\"`, `\"respond\"`, `\"modify_request\"`, or\n`\"modify_response\"`."
     type: string
   pattern:
     description: URL pattern the rule was registered with.
