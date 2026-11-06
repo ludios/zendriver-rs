@@ -3328,6 +3328,111 @@ impl<T> typenum::type_operators::Same for zendriver::monitor::NetworkMonitor
 pub type zendriver::monitor::NetworkMonitor::Output = T
 impl<V, T> ppv_lite86::types::VZip<V> for zendriver::monitor::NetworkMonitor where V: ppv_lite86::types::MultiLane<T>
 pub fn zendriver::monitor::NetworkMonitor::vzip(self) -> V
+pub mod zendriver::navigation
+#[non_exhaustive] pub struct zendriver::navigation::Navigation
+pub zendriver::navigation::Navigation::same_document: bool
+pub zendriver::navigation::Navigation::url: url::Url
+impl core::clone::Clone for zendriver::navigation::Navigation
+pub fn zendriver::navigation::Navigation::clone(&self) -> zendriver::navigation::Navigation
+impl core::cmp::Eq for zendriver::navigation::Navigation
+impl core::cmp::PartialEq for zendriver::navigation::Navigation
+pub fn zendriver::navigation::Navigation::eq(&self, &zendriver::navigation::Navigation) -> bool
+impl core::fmt::Debug for zendriver::navigation::Navigation
+pub fn zendriver::navigation::Navigation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for zendriver::navigation::Navigation
+impl core::marker::Freeze for zendriver::navigation::Navigation
+impl core::marker::Send for zendriver::navigation::Navigation
+impl core::marker::Sync for zendriver::navigation::Navigation
+impl core::marker::Unpin for zendriver::navigation::Navigation
+impl core::marker::UnsafeUnpin for zendriver::navigation::Navigation
+impl core::panic::unwind_safe::RefUnwindSafe for zendriver::navigation::Navigation
+impl core::panic::unwind_safe::UnwindSafe for zendriver::navigation::Navigation
+impl<Q, K> equivalent::Equivalent<K> for zendriver::navigation::Navigation where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn zendriver::navigation::Navigation::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for zendriver::navigation::Navigation where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn zendriver::navigation::Navigation::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for zendriver::navigation::Navigation where U: core::convert::From<T>
+pub fn zendriver::navigation::Navigation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for zendriver::navigation::Navigation where U: core::convert::Into<T>
+pub type zendriver::navigation::Navigation::Error = core::convert::Infallible
+pub fn zendriver::navigation::Navigation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for zendriver::navigation::Navigation where U: core::convert::TryFrom<T>
+pub type zendriver::navigation::Navigation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn zendriver::navigation::Navigation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for zendriver::navigation::Navigation where T: core::clone::Clone
+pub type zendriver::navigation::Navigation::Owned = T
+pub fn zendriver::navigation::Navigation::clone_into(&self, &mut T)
+pub fn zendriver::navigation::Navigation::to_owned(&self) -> T
+impl<T> core::any::Any for zendriver::navigation::Navigation where T: 'static + ?core::marker::Sized
+pub fn zendriver::navigation::Navigation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for zendriver::navigation::Navigation where T: ?core::marker::Sized
+pub fn zendriver::navigation::Navigation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for zendriver::navigation::Navigation where T: ?core::marker::Sized
+pub fn zendriver::navigation::Navigation::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for zendriver::navigation::Navigation where T: core::clone::Clone
+pub unsafe fn zendriver::navigation::Navigation::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for zendriver::navigation::Navigation
+pub fn zendriver::navigation::Navigation::from(T) -> T
+impl<T> tower_http::follow_redirect::policy::PolicyExt for zendriver::navigation::Navigation where T: ?core::marker::Sized
+pub fn zendriver::navigation::Navigation::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn zendriver::navigation::Navigation::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for zendriver::navigation::Navigation
+impl<T> tracing::instrument::WithSubscriber for zendriver::navigation::Navigation
+impl<T> typenum::type_operators::Same for zendriver::navigation::Navigation
+pub type zendriver::navigation::Navigation::Output = T
+impl<V, T> ppv_lite86::types::VZip<V> for zendriver::navigation::Navigation where V: ppv_lite86::types::MultiLane<T>
+pub fn zendriver::navigation::Navigation::vzip(self) -> V
+pub struct zendriver::navigation::NavigationExpectation
+impl zendriver::navigation::NavigationExpectation
+pub fn zendriver::navigation::NavigationExpectation::timeout(self, core::time::Duration) -> Self
+impl core::fmt::Debug for zendriver::navigation::NavigationExpectation
+pub fn zendriver::navigation::NavigationExpectation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::future::future::Future for zendriver::navigation::NavigationExpectation
+pub type zendriver::navigation::NavigationExpectation::Output = core::result::Result<zendriver::navigation::Navigation, zendriver::error::ZendriverError>
+pub fn zendriver::navigation::NavigationExpectation::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+impl core::marker::Freeze for zendriver::navigation::NavigationExpectation
+impl core::marker::Send for zendriver::navigation::NavigationExpectation
+impl !core::marker::Sync for zendriver::navigation::NavigationExpectation
+impl core::marker::Unpin for zendriver::navigation::NavigationExpectation
+impl core::marker::UnsafeUnpin for zendriver::navigation::NavigationExpectation
+impl !core::panic::unwind_safe::RefUnwindSafe for zendriver::navigation::NavigationExpectation
+impl !core::panic::unwind_safe::UnwindSafe for zendriver::navigation::NavigationExpectation
+impl<F, T, E> futures_core::future::TryFuture for zendriver::navigation::NavigationExpectation where F: core::future::future::Future<Output = core::result::Result<T, E>> + ?core::marker::Sized
+pub type zendriver::navigation::NavigationExpectation::Error = E
+pub type zendriver::navigation::NavigationExpectation::Ok = T
+pub fn zendriver::navigation::NavigationExpectation::try_poll(core::pin::Pin<&mut F>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<<F as core::future::future::Future>::Output>
+impl<F> core::future::into_future::IntoFuture for zendriver::navigation::NavigationExpectation where F: core::future::future::Future
+pub type zendriver::navigation::NavigationExpectation::IntoFuture = F
+pub type zendriver::navigation::NavigationExpectation::Output = <F as core::future::future::Future>::Output
+pub fn zendriver::navigation::NavigationExpectation::into_future(self) -> <F as core::future::into_future::IntoFuture>::IntoFuture
+impl<Fut> futures_util::future::try_future::TryFutureExt for zendriver::navigation::NavigationExpectation where Fut: futures_core::future::TryFuture + ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for zendriver::navigation::NavigationExpectation where U: core::convert::From<T>
+pub fn zendriver::navigation::NavigationExpectation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for zendriver::navigation::NavigationExpectation where U: core::convert::Into<T>
+pub type zendriver::navigation::NavigationExpectation::Error = core::convert::Infallible
+pub fn zendriver::navigation::NavigationExpectation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for zendriver::navigation::NavigationExpectation where U: core::convert::TryFrom<T>
+pub type zendriver::navigation::NavigationExpectation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn zendriver::navigation::NavigationExpectation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for zendriver::navigation::NavigationExpectation where T: 'static + ?core::marker::Sized
+pub fn zendriver::navigation::NavigationExpectation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for zendriver::navigation::NavigationExpectation where T: ?core::marker::Sized
+pub fn zendriver::navigation::NavigationExpectation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for zendriver::navigation::NavigationExpectation where T: ?core::marker::Sized
+pub fn zendriver::navigation::NavigationExpectation::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for zendriver::navigation::NavigationExpectation
+pub fn zendriver::navigation::NavigationExpectation::from(T) -> T
+impl<T> futures_util::future::future::FutureExt for zendriver::navigation::NavigationExpectation where T: core::future::future::Future + ?core::marker::Sized
+impl<T> tokio_util::future::FutureExt for zendriver::navigation::NavigationExpectation where T: core::future::future::Future + ?core::marker::Sized
+impl<T> tower_http::follow_redirect::policy::PolicyExt for zendriver::navigation::NavigationExpectation where T: ?core::marker::Sized
+pub fn zendriver::navigation::NavigationExpectation::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn zendriver::navigation::NavigationExpectation::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for zendriver::navigation::NavigationExpectation
+impl<T> tracing::instrument::WithSubscriber for zendriver::navigation::NavigationExpectation
+impl<T> typenum::type_operators::Same for zendriver::navigation::NavigationExpectation
+pub type zendriver::navigation::NavigationExpectation::Output = T
+impl<V, T> ppv_lite86::types::VZip<V> for zendriver::navigation::NavigationExpectation where V: ppv_lite86::types::MultiLane<T>
+pub fn zendriver::navigation::NavigationExpectation::vzip(self) -> V
 pub mod zendriver::network_idle
 pub enum zendriver::network_idle::IdleLossPolicy
 pub zendriver::network_idle::IdleLossPolicy::Lenient
@@ -4420,6 +4525,7 @@ pub async fn zendriver::tab::Tab::content(&self) -> zendriver::error::Result<all
 pub fn zendriver::tab::Tab::cookies(&self) -> zendriver::cookies::CookieJar
 pub async fn zendriver::tab::Tab::evaluate<T: serde_core::de::DeserializeOwned>(&self, impl core::convert::AsRef<str>) -> zendriver::error::Result<T>
 pub async fn zendriver::tab::Tab::evaluate_main<T: serde_core::de::DeserializeOwned>(&self, impl core::convert::AsRef<str>) -> zendriver::error::Result<T>
+pub fn zendriver::tab::Tab::expect_navigation(&self) -> zendriver::navigation::NavigationExpectation
 pub async fn zendriver::tab::Tab::flash_point(&self, f64, f64) -> zendriver::error::Result<()>
 pub async fn zendriver::tab::Tab::forward(&self) -> zendriver::error::Result<()>
 pub async fn zendriver::tab::Tab::frame_by_name(&self, &str) -> zendriver::error::Result<core::option::Option<zendriver::frame::Frame>>
@@ -4458,6 +4564,7 @@ pub async fn zendriver::tab::Tab::wait_for_idle_opts(&self, zendriver::tab::Idle
 pub async fn zendriver::tab::Tab::wait_for_idle_with(&self, core::time::Duration, core::time::Duration) -> zendriver::error::Result<()>
 pub async fn zendriver::tab::Tab::wait_for_load(&self) -> zendriver::error::Result<()>
 pub async fn zendriver::tab::Tab::wait_for_ready_state(&self, zendriver::tab::ReadyState) -> zendriver::error::Result<()>
+pub fn zendriver::tab::Tab::wait_for_url(&self, impl core::convert::Into<zendriver::UrlMatcher>) -> zendriver::navigation::NavigationExpectation
 impl zendriver::tab::Tab
 pub fn zendriver::tab::Tab::cloudflare(&self) -> zendriver_cloudflare::bypass::CloudflareBypass<'_>
 impl zendriver::tab::Tab
@@ -7871,6 +7978,110 @@ impl<T> typenum::type_operators::Same for zendriver::monitor::MonitoredResponse
 pub type zendriver::monitor::MonitoredResponse::Output = T
 impl<V, T> ppv_lite86::types::VZip<V> for zendriver::monitor::MonitoredResponse where V: ppv_lite86::types::MultiLane<T>
 pub fn zendriver::monitor::MonitoredResponse::vzip(self) -> V
+#[non_exhaustive] pub struct zendriver::Navigation
+pub zendriver::Navigation::same_document: bool
+pub zendriver::Navigation::url: url::Url
+impl core::clone::Clone for zendriver::navigation::Navigation
+pub fn zendriver::navigation::Navigation::clone(&self) -> zendriver::navigation::Navigation
+impl core::cmp::Eq for zendriver::navigation::Navigation
+impl core::cmp::PartialEq for zendriver::navigation::Navigation
+pub fn zendriver::navigation::Navigation::eq(&self, &zendriver::navigation::Navigation) -> bool
+impl core::fmt::Debug for zendriver::navigation::Navigation
+pub fn zendriver::navigation::Navigation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for zendriver::navigation::Navigation
+impl core::marker::Freeze for zendriver::navigation::Navigation
+impl core::marker::Send for zendriver::navigation::Navigation
+impl core::marker::Sync for zendriver::navigation::Navigation
+impl core::marker::Unpin for zendriver::navigation::Navigation
+impl core::marker::UnsafeUnpin for zendriver::navigation::Navigation
+impl core::panic::unwind_safe::RefUnwindSafe for zendriver::navigation::Navigation
+impl core::panic::unwind_safe::UnwindSafe for zendriver::navigation::Navigation
+impl<Q, K> equivalent::Equivalent<K> for zendriver::navigation::Navigation where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn zendriver::navigation::Navigation::equivalent(&self, &K) -> bool
+impl<Q, K> hashbrown::Equivalent<K> for zendriver::navigation::Navigation where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn zendriver::navigation::Navigation::equivalent(&self, &K) -> bool
+impl<T, U> core::convert::Into<U> for zendriver::navigation::Navigation where U: core::convert::From<T>
+pub fn zendriver::navigation::Navigation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for zendriver::navigation::Navigation where U: core::convert::Into<T>
+pub type zendriver::navigation::Navigation::Error = core::convert::Infallible
+pub fn zendriver::navigation::Navigation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for zendriver::navigation::Navigation where U: core::convert::TryFrom<T>
+pub type zendriver::navigation::Navigation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn zendriver::navigation::Navigation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for zendriver::navigation::Navigation where T: core::clone::Clone
+pub type zendriver::navigation::Navigation::Owned = T
+pub fn zendriver::navigation::Navigation::clone_into(&self, &mut T)
+pub fn zendriver::navigation::Navigation::to_owned(&self) -> T
+impl<T> core::any::Any for zendriver::navigation::Navigation where T: 'static + ?core::marker::Sized
+pub fn zendriver::navigation::Navigation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for zendriver::navigation::Navigation where T: ?core::marker::Sized
+pub fn zendriver::navigation::Navigation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for zendriver::navigation::Navigation where T: ?core::marker::Sized
+pub fn zendriver::navigation::Navigation::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for zendriver::navigation::Navigation where T: core::clone::Clone
+pub unsafe fn zendriver::navigation::Navigation::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for zendriver::navigation::Navigation
+pub fn zendriver::navigation::Navigation::from(T) -> T
+impl<T> tower_http::follow_redirect::policy::PolicyExt for zendriver::navigation::Navigation where T: ?core::marker::Sized
+pub fn zendriver::navigation::Navigation::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn zendriver::navigation::Navigation::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for zendriver::navigation::Navigation
+impl<T> tracing::instrument::WithSubscriber for zendriver::navigation::Navigation
+impl<T> typenum::type_operators::Same for zendriver::navigation::Navigation
+pub type zendriver::navigation::Navigation::Output = T
+impl<V, T> ppv_lite86::types::VZip<V> for zendriver::navigation::Navigation where V: ppv_lite86::types::MultiLane<T>
+pub fn zendriver::navigation::Navigation::vzip(self) -> V
+pub struct zendriver::NavigationExpectation
+impl zendriver::navigation::NavigationExpectation
+pub fn zendriver::navigation::NavigationExpectation::timeout(self, core::time::Duration) -> Self
+impl core::fmt::Debug for zendriver::navigation::NavigationExpectation
+pub fn zendriver::navigation::NavigationExpectation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::future::future::Future for zendriver::navigation::NavigationExpectation
+pub type zendriver::navigation::NavigationExpectation::Output = core::result::Result<zendriver::navigation::Navigation, zendriver::error::ZendriverError>
+pub fn zendriver::navigation::NavigationExpectation::poll(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<Self::Output>
+impl core::marker::Freeze for zendriver::navigation::NavigationExpectation
+impl core::marker::Send for zendriver::navigation::NavigationExpectation
+impl !core::marker::Sync for zendriver::navigation::NavigationExpectation
+impl core::marker::Unpin for zendriver::navigation::NavigationExpectation
+impl core::marker::UnsafeUnpin for zendriver::navigation::NavigationExpectation
+impl !core::panic::unwind_safe::RefUnwindSafe for zendriver::navigation::NavigationExpectation
+impl !core::panic::unwind_safe::UnwindSafe for zendriver::navigation::NavigationExpectation
+impl<F, T, E> futures_core::future::TryFuture for zendriver::navigation::NavigationExpectation where F: core::future::future::Future<Output = core::result::Result<T, E>> + ?core::marker::Sized
+pub type zendriver::navigation::NavigationExpectation::Error = E
+pub type zendriver::navigation::NavigationExpectation::Ok = T
+pub fn zendriver::navigation::NavigationExpectation::try_poll(core::pin::Pin<&mut F>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<<F as core::future::future::Future>::Output>
+impl<F> core::future::into_future::IntoFuture for zendriver::navigation::NavigationExpectation where F: core::future::future::Future
+pub type zendriver::navigation::NavigationExpectation::IntoFuture = F
+pub type zendriver::navigation::NavigationExpectation::Output = <F as core::future::future::Future>::Output
+pub fn zendriver::navigation::NavigationExpectation::into_future(self) -> <F as core::future::into_future::IntoFuture>::IntoFuture
+impl<Fut> futures_util::future::try_future::TryFutureExt for zendriver::navigation::NavigationExpectation where Fut: futures_core::future::TryFuture + ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for zendriver::navigation::NavigationExpectation where U: core::convert::From<T>
+pub fn zendriver::navigation::NavigationExpectation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for zendriver::navigation::NavigationExpectation where U: core::convert::Into<T>
+pub type zendriver::navigation::NavigationExpectation::Error = core::convert::Infallible
+pub fn zendriver::navigation::NavigationExpectation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for zendriver::navigation::NavigationExpectation where U: core::convert::TryFrom<T>
+pub type zendriver::navigation::NavigationExpectation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn zendriver::navigation::NavigationExpectation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for zendriver::navigation::NavigationExpectation where T: 'static + ?core::marker::Sized
+pub fn zendriver::navigation::NavigationExpectation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for zendriver::navigation::NavigationExpectation where T: ?core::marker::Sized
+pub fn zendriver::navigation::NavigationExpectation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for zendriver::navigation::NavigationExpectation where T: ?core::marker::Sized
+pub fn zendriver::navigation::NavigationExpectation::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for zendriver::navigation::NavigationExpectation
+pub fn zendriver::navigation::NavigationExpectation::from(T) -> T
+impl<T> futures_util::future::future::FutureExt for zendriver::navigation::NavigationExpectation where T: core::future::future::Future + ?core::marker::Sized
+impl<T> tokio_util::future::FutureExt for zendriver::navigation::NavigationExpectation where T: core::future::future::Future + ?core::marker::Sized
+impl<T> tower_http::follow_redirect::policy::PolicyExt for zendriver::navigation::NavigationExpectation where T: ?core::marker::Sized
+pub fn zendriver::navigation::NavigationExpectation::and<P, B, E>(self, P) -> tower_http::follow_redirect::policy::and::And<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+pub fn zendriver::navigation::NavigationExpectation::or<P, B, E>(self, P) -> tower_http::follow_redirect::policy::or::Or<T, P> where T: core::marker::Sized + tower_http::follow_redirect::policy::Policy<B, E>, P: tower_http::follow_redirect::policy::Policy<B, E>
+impl<T> tracing::instrument::Instrument for zendriver::navigation::NavigationExpectation
+impl<T> tracing::instrument::WithSubscriber for zendriver::navigation::NavigationExpectation
+impl<T> typenum::type_operators::Same for zendriver::navigation::NavigationExpectation
+pub type zendriver::navigation::NavigationExpectation::Output = T
+impl<V, T> ppv_lite86::types::VZip<V> for zendriver::navigation::NavigationExpectation where V: ppv_lite86::types::MultiLane<T>
+pub fn zendriver::navigation::NavigationExpectation::vzip(self) -> V
 pub struct zendriver::NetworkExchange
 pub zendriver::NetworkExchange::error: core::option::Option<alloc::string::String>
 pub zendriver::NetworkExchange::request: zendriver::monitor::MonitoredRequest
@@ -8460,6 +8671,7 @@ pub async fn zendriver::tab::Tab::content(&self) -> zendriver::error::Result<all
 pub fn zendriver::tab::Tab::cookies(&self) -> zendriver::cookies::CookieJar
 pub async fn zendriver::tab::Tab::evaluate<T: serde_core::de::DeserializeOwned>(&self, impl core::convert::AsRef<str>) -> zendriver::error::Result<T>
 pub async fn zendriver::tab::Tab::evaluate_main<T: serde_core::de::DeserializeOwned>(&self, impl core::convert::AsRef<str>) -> zendriver::error::Result<T>
+pub fn zendriver::tab::Tab::expect_navigation(&self) -> zendriver::navigation::NavigationExpectation
 pub async fn zendriver::tab::Tab::flash_point(&self, f64, f64) -> zendriver::error::Result<()>
 pub async fn zendriver::tab::Tab::forward(&self) -> zendriver::error::Result<()>
 pub async fn zendriver::tab::Tab::frame_by_name(&self, &str) -> zendriver::error::Result<core::option::Option<zendriver::frame::Frame>>
@@ -8498,6 +8710,7 @@ pub async fn zendriver::tab::Tab::wait_for_idle_opts(&self, zendriver::tab::Idle
 pub async fn zendriver::tab::Tab::wait_for_idle_with(&self, core::time::Duration, core::time::Duration) -> zendriver::error::Result<()>
 pub async fn zendriver::tab::Tab::wait_for_load(&self) -> zendriver::error::Result<()>
 pub async fn zendriver::tab::Tab::wait_for_ready_state(&self, zendriver::tab::ReadyState) -> zendriver::error::Result<()>
+pub fn zendriver::tab::Tab::wait_for_url(&self, impl core::convert::Into<zendriver::UrlMatcher>) -> zendriver::navigation::NavigationExpectation
 impl zendriver::tab::Tab
 pub fn zendriver::tab::Tab::cloudflare(&self) -> zendriver_cloudflare::bypass::CloudflareBypass<'_>
 impl zendriver::tab::Tab

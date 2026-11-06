@@ -82,7 +82,9 @@ event fires. `back`, `forward` and `reload` work the same way: each
 starts a navigation that the next `wait_for_load` waits for. (You can
 also use `wait_for_idle` for "no network requests in-flight", or set up
 `expect_response` ahead of the navigation for a targeted wait — covered
-in [Expect()](./expect.md).)
+in [Expect()](./expect.md).) A navigation that a click or a key press
+starts needs `expect_navigation`, created before the action, or
+`wait_for_url` — see [Waiting for navigation](./navigation.md).
 
 ### 4. Query an element
 

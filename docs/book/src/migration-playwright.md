@@ -21,6 +21,8 @@ same shape).
 | Wait for load | implicit on `goto` | `tab.wait_for_load().await?` |
 | Go back / forward / reload | `await page.goBack()` (waits for load) | `tab.back().await?; tab.wait_for_load().await?` |
 | Wait for network idle | `await page.waitForLoadState("networkidle")` | `tab.wait_for_idle().await?` |
+| Wait for a URL | `await page.waitForURL("**/target.html")` | `tab.wait_for_url("/target.html").await?` (a `&str` matches by substring; pass a `Regex` for an exact URL) |
+| Wait for the navigation a click starts | `await Promise.all([page.waitForNavigation(), locator.click()])` | `let nav = tab.expect_navigation(); el.click().await?; nav.await?` |
 | Find one element (CSS) | `page.locator("button").click()` | `tab.find().css("button").one().await?.click().await?` |
 | Find by text | `page.getByText("Submit")` | `tab.find().text("Submit").one().await?` |
 | Find by ARIA role | `page.getByRole("button", { name: "Go" })` | `tab.find().role(AriaRole::Button).name("Go").one().await?` |

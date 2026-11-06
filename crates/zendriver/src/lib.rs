@@ -96,6 +96,7 @@ mod load_tracker;
 pub(crate) mod log_capture;
 #[cfg(feature = "monitor")]
 pub mod monitor;
+pub mod navigation;
 pub mod network_idle;
 pub mod pdf;
 pub(crate) mod preferences;
@@ -126,6 +127,7 @@ pub use element::actions::ClickOptions;
 pub use error::{BrowserError, Result, ZendriverError};
 pub use frame::Frame;
 pub use input::{Key, KeyModifiers, KeySequence, MouseButton, SpecialKey};
+pub use navigation::{Navigation, NavigationExpectation};
 pub use network_idle::IdleLossPolicy;
 pub use pdf::PdfBuilder;
 pub use query::{AriaRole, BoundingBox, FindBuilder, PageBox};

@@ -20,6 +20,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
@@ -230,6 +231,20 @@ async fn redirect(Path(remaining): Path<u32>) -> Response {
         n => format!("/redirect/{}", n - 1),
     };
     (StatusCode::FOUND, [(header::LOCATION, next)]).into_response()
+}
+
+/// A page that leaves for the URL in `to` once it has loaded: a stop on the
+/// way, which commits and loads like any page before the next one does.
+async fn hop(params: Params) -> Html<String> {
+    let to = json!(params.get("to").map_or("/plain", String::as_str));
+    page(
+        "Hop",
+        "",
+        &format!(
+            r#"<h1 id="heading">Hop</h1>
+<script>addEventListener('load', () => {{ location.href = {to}; }});</script>"#
+        ),
+    )
 }
 
 async fn iframe_same_origin() -> Html<String> {
@@ -497,6 +512,7 @@ fn canned_routes() -> Router {
         .route("/form", get(form))
         .route("/form-result", get(form_result))
         .route("/redirect/:remaining", get(redirect))
+        .route("/hop", get(hop))
         .route("/iframe-same-origin", get(iframe_same_origin))
         .route("/iframe-cross-site", get(iframe_cross_site))
         .route("/frame-child", get(frame_child))

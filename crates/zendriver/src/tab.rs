@@ -34,8 +34,10 @@ use crate::frame::Frame;
 use crate::input::InputController;
 use crate::isolated_world::IsolatedWorldCache;
 use crate::load_tracker::{Destination, LoadTracker};
+use crate::navigation::NavigationExpectation;
 use crate::network_idle::IdleLossPolicy;
 use crate::screenshot::ScreenshotBuilder;
+use crate::url_matcher::UrlMatcher;
 
 const DEFAULT_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -1056,7 +1058,9 @@ impl Tab {
     /// Otherwise it waits only if the current document hasn't finished
     /// loading. A navigation that a click or a key press starts leaves the
     /// old document in place until the new one arrives, so this may return
-    /// at once, on the old page.
+    /// at once, on the old page: for such a navigation, arm
+    /// [`Tab::expect_navigation`] before the action, or wait for its
+    /// destination with [`Tab::wait_for_url`].
     ///
     /// Bounded by a 30s timeout.
     ///
@@ -1085,6 +1089,109 @@ impl Tab {
             None => LoadTracker::current(&self.inner.session, self.target_id()),
         };
         tracker.wait(DEFAULT_LOAD_TIMEOUT).await
+    }
+
+    /// Arm a wait for the next navigation of the main frame, before the
+    /// action that starts it.
+    ///
+    /// Create the expectation **before** the click, key press or script that
+    /// navigates, and await it after: it subscribes when it is created, so
+    /// the navigation can't slip past, however fast it is. The wait ends
+    /// when the navigation has committed and, if it brought a new document,
+    /// that document has finished loading (its `load` event, or the end of
+    /// a load that has none, like a back-forward-cache restore). A
+    /// navigation that stays in the document (a fragment, or the History
+    /// API) ends the wait at once. The [`Navigation`](crate::Navigation) it
+    /// resolves with says which it was, and at what URL.
+    ///
+    /// Any navigation counts, even one to the same URL, like a form that
+    /// posts back to its own page. To wait for one destination and skip the
+    /// pages before it, or when the tab may be there already, use
+    /// [`Tab::wait_for_url`]. A navigation that zendriver starts needs
+    /// neither: [`Tab::goto`] and [`Tab::wait_for_load`] already pair up.
+    ///
+    /// Bounded by a 30 s timeout, which
+    /// [`NavigationExpectation::timeout`](crate::NavigationExpectation::timeout)
+    /// changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZendriverError::Timeout`] when no navigation has ended
+    /// within the timeout; [`ZendriverError::EventStreamIncomplete`] when
+    /// events were lost (the subscriber lagged, or the connection was
+    /// replaced), so the navigation may have happened unseen; and
+    /// [`ZendriverError::Navigation`] if Chrome closes the tab's connection
+    /// first.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn ex() -> zendriver::Result<()> {
+    /// use zendriver::{Key, SpecialKey};
+    /// # let browser = zendriver::Browser::builder().launch().await?;
+    /// # let tab = browser.main_tab();
+    /// let input = tab.find().css("input[name=q]").one().await?;
+    /// input.type_text("zendriver").await?;
+    /// let navigation = tab.expect_navigation();
+    /// input.press(Key::Special(SpecialKey::Enter)).await?;
+    /// let reached = navigation.await?;
+    /// println!("the results are at {}", reached.url);
+    /// # Ok(()) }
+    /// ```
+    pub fn expect_navigation(&self) -> NavigationExpectation {
+        NavigationExpectation::new(&self.inner.session, self.target_id(), None, false)
+    }
+
+    /// Wait until the main frame is at a URL matching `pattern`, and the
+    /// page there has loaded.
+    ///
+    /// `pattern` is anything convertible to a [`UrlMatcher`]: a `&str` or
+    /// `String` matches every URL that contains it, and a [`regex::Regex`]
+    /// matches by regex. So `"https://example.com/"` also matches
+    /// `https://example.com/login`; anchor a regex for an exact URL. The
+    /// URL matched includes the fragment.
+    ///
+    /// If the tab is already at a matching URL, the wait ends as soon as
+    /// that page has loaded (at once, if it has). Otherwise it ends when a
+    /// navigation to a matching URL has committed and its document has
+    /// loaded (at once for a navigation that stays in the document).
+    /// Navigations to other URLs in between are skipped, so this can wait
+    /// out a login that bounces through another site. Unlike
+    /// [`Tab::expect_navigation`], it is safe to call after the action that
+    /// navigates: being at a URL is a state, so nothing can slip past. Mind
+    /// a pattern that the page you start from matches too: the wait ends
+    /// there at once.
+    ///
+    /// Bounded by a 30 s timeout, which
+    /// [`NavigationExpectation::timeout`](crate::NavigationExpectation::timeout)
+    /// changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZendriverError::Timeout`] when the tab isn't at a matching,
+    /// loaded page within the timeout, and [`ZendriverError::Navigation`]
+    /// if Chrome closes the tab's connection first. Lost events don't end
+    /// the wait: it reads the URL again instead.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # async fn ex() -> zendriver::Result<()> {
+    /// # let browser = zendriver::Browser::builder().launch().await?;
+    /// # let tab = browser.main_tab();
+    /// tab.find().css("#login").one().await?.click().await?;
+    /// // Through the identity provider and back, however long it takes.
+    /// let home = tab
+    ///     .wait_for_url("/dashboard")
+    ///     .timeout(Duration::from_secs(300))
+    ///     .await?;
+    /// assert!(home.url.path().starts_with("/dashboard"));
+    /// # Ok(()) }
+    /// ```
+    pub fn wait_for_url(&self, pattern: impl Into<UrlMatcher>) -> NavigationExpectation {
+        let to = Some(pattern.into());
+        NavigationExpectation::new(&self.inner.session, self.target_id(), to, true)
     }
 
     /// Block until the document reaches at least the `until` load milestone.

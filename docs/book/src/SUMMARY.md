@@ -14,6 +14,7 @@
 
 # Automation
 
+- [Waiting for navigation](./navigation.md)
 - [Multi-tab](./multi-tab.md)
 - [Per-context isolation](./browser-context.md)
 - [Frames](./frames.md)

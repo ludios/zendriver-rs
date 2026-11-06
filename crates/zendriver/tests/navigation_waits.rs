@@ -3,11 +3,12 @@
 //! page it waited for has loaded. Ported from the `races.rs` repro, with
 //! local fixtures instead of live sites.
 //!
-//! Not here: `wait_for_load` after Enter or a link click, with no earlier
-//! `goto`. On live sites it returned on the old page, but locally the
-//! navigation starts before `wait_for_load` looks, so it passes except on a
-//! loaded machine. That race needs the planned `expect_navigation`, which
-//! subscribes before the action.
+//! A navigation that Enter or a link click starts is waited for with
+//! `expect_navigation`, armed before the action, or `wait_for_url`, which
+//! may be called after it. (`wait_for_load` after such an action isn't
+//! tested: on live sites it returned on the old page, but locally the
+//! navigation starts before `wait_for_load` looks, so it would pass except
+//! on a loaded machine.)
 //!
 //! The page waited for is usually a `/slow-load`, whose `load` event comes a
 //! second late, after the server answers its image. A wait that returns
@@ -21,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use zendriver::{Browser, Tab};
+use zendriver::{Browser, Key, SpecialKey, Tab, ZendriverError};
 use zendriver_testkit::{
     FixtureServer, SITE_A, TestBrowser, assert_eventually, assert_not_before, eval,
     launch_for_test, load, wait_loaded,
@@ -317,5 +318,157 @@ async fn wait_for_load_after_a_refused_goto_returns_at_once() {
     tab.wait_for_load().await.expect("wait_for_load");
     let took = started.elapsed();
     assert!(took < Duration::from_secs(5), "wait_for_load took {took:?}");
+    browser.close().await;
+}
+
+/// A form submitted with Enter: nothing in zendriver follows the navigation
+/// the key starts, so `expect_navigation` is armed before the key press.
+#[tokio::test]
+async fn expect_navigation_waits_for_the_page_a_form_submits_to() {
+    let server = FixtureServer::start().await;
+    let browser = launch().await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/form")).await;
+    let input = tab.find().css("#q").one().await.expect("the form's input");
+    input.type_text("hello").await.expect("type_text");
+    let navigation = tab.expect_navigation();
+    input
+        .press(Key::Special(SpecialKey::Enter))
+        .await
+        .expect("press Enter");
+    let reached = navigation.await.expect("expect_navigation");
+    let url = server.url(SITE_A, "/form-result?q=hello");
+    assert_eq!(reached.url.as_str(), url);
+    assert!(!reached.same_document);
+    assert_loaded_now(&tab, &url, "expect_navigation").await;
+    browser.close().await;
+}
+
+/// A link to a slow page: the wait ends only when that page has loaded, not
+/// when its document has arrived.
+#[tokio::test]
+async fn expect_navigation_waits_for_the_page_a_link_leads_to() {
+    let server = FixtureServer::start().await;
+    let browser = launch().await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/plain?link=/slow-load")).await;
+    tab.wait_for_idle().await.expect("wait_for_idle");
+    let url = server.url(SITE_A, "/slow-load");
+    let since = slow_requests(&server);
+    let navigation = tab.expect_navigation();
+    let link = tab.find().css("#link").one().await.expect("the link");
+    link.click().await.expect("click");
+    let reached = navigation.await.expect("expect_navigation");
+    assert_waited_for(
+        &server,
+        &tab,
+        &url,
+        since,
+        Instant::now(),
+        "expect_navigation",
+    )
+    .await;
+    assert_eq!(reached.url.as_str(), url);
+    assert!(!reached.same_document);
+    browser.close().await;
+}
+
+/// The History API and a fragment change navigate within the document: the
+/// wait ends at once, and says so.
+#[tokio::test]
+async fn expect_navigation_ends_on_a_same_document_navigation() {
+    let server = FixtureServer::start().await;
+    let browser = launch().await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/plain")).await;
+    let cases = [
+        (
+            "history.pushState(null, '', '/plain?title=Pushed'); 1",
+            "/plain?title=Pushed",
+        ),
+        ("location.hash = 'h'; 1", "/plain?title=Pushed#h"),
+    ];
+    for (js, path) in cases {
+        let navigation = tab.expect_navigation();
+        eval(&tab, js).await;
+        let reached = navigation.await.unwrap_or_else(|e| panic!("{js}: {e}"));
+        assert_eq!(reached.url.as_str(), server.url(SITE_A, path), "{js}");
+        assert!(reached.same_document, "{js}");
+    }
+    browser.close().await;
+}
+
+/// `wait_for_url` after the click that navigates: being at a URL is a state,
+/// so calling it after the action misses nothing.
+#[tokio::test]
+async fn wait_for_url_after_a_click_waits_for_the_page_at_the_url() {
+    let server = FixtureServer::start().await;
+    let browser = launch().await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/plain?link=/slow-load")).await;
+    let url = server.url(SITE_A, "/slow-load");
+    let since = slow_requests(&server);
+    let link = tab.find().css("#link").one().await.expect("the link");
+    link.click().await.expect("click");
+    let reached = tab.wait_for_url("/slow-load").await.expect("wait_for_url");
+    assert_waited_for(&server, &tab, &url, since, Instant::now(), "wait_for_url").await;
+    // Whether the new document had already committed when the wait began
+    // depends on timing, so `same_document` may be either.
+    assert_eq!(reached.url.as_str(), url);
+    browser.close().await;
+}
+
+/// A tab already at a matching URL: the wait ends at once, on that document.
+#[tokio::test]
+async fn wait_for_url_ends_at_once_on_a_page_already_at_the_url() {
+    let server = FixtureServer::start().await;
+    let browser = launch().await;
+    let tab = browser.main_tab();
+    let url = server.url(SITE_A, "/plain");
+    load(&tab, &url).await;
+    let started = Instant::now();
+    let reached = tab.wait_for_url("/plain").await.expect("wait_for_url");
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(2), "wait_for_url took {took:?}");
+    assert_eq!(reached.url.as_str(), url);
+    assert!(reached.same_document);
+    browser.close().await;
+}
+
+/// The pages on the way to the URL don't end the wait: here a `/hop` page
+/// that commits, loads, and only then leaves for the destination.
+#[tokio::test]
+async fn wait_for_url_skips_the_pages_before_the_url() {
+    let server = FixtureServer::start().await;
+    let browser = launch().await;
+    let tab = browser.main_tab();
+    let start = server.url(SITE_A, "/plain?link=/hop%3Fto%3D/plain%3Ftitle%3DFinal");
+    load(&tab, &start).await;
+    let link = tab.find().css("#link").one().await.expect("the link");
+    link.click().await.expect("click");
+    let reached = tab.wait_for_url("title=Final").await.expect("wait_for_url");
+    let url = server.url(SITE_A, "/plain?title=Final");
+    assert_eq!(reached.url.as_str(), url);
+    assert_eq!(
+        server.requests_to("/hop").len(),
+        1,
+        "the hop page was visited"
+    );
+    assert_loaded_now(&tab, &url, "wait_for_url").await;
+    browser.close().await;
+}
+
+/// A URL that never comes: the wait ends at its timeout.
+#[tokio::test]
+async fn wait_for_url_ends_at_its_timeout() {
+    let server = FixtureServer::start().await;
+    let browser = launch().await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/plain")).await;
+    let res = tab
+        .wait_for_url("/nowhere")
+        .timeout(Duration::from_millis(300))
+        .await;
+    assert!(matches!(res, Err(ZendriverError::Timeout(_))), "{res:?}");
     browser.close().await;
 }

@@ -1096,3 +1096,24 @@ covered = "browser_intercept_add_rule"
 [[entry]]
 api = "zendriver::Interceptor"
 excluded = "a session's Fetch owner, for InterceptBuilder::new outside Tab; agents reach it through Tab::intercept (browser_intercept_add_rule)"
+
+# ── Navigation waits: Tab::expect_navigation / Tab::wait_for_url ───────────
+[[entry]]
+api = "zendriver::navigation"
+covered = "browser_wait_for_url / browser_click.wait_for_navigation / browser_press.wait_for_navigation"
+
+[[entry]]
+api = "zendriver::Navigation"
+covered = "browser_wait_for_url output (its url; same_document isn't reported)"
+
+[[entry]]
+api = "zendriver::NavigationExpectation"
+covered = "browser_wait_for_url.timeout_ms"
+
+[[entry]]
+api = "zendriver::tab::Tab::expect_navigation"
+covered = "browser_click.wait_for_navigation / browser_press.wait_for_navigation"
+
+[[entry]]
+api = "zendriver::tab::Tab::wait_for_url"
+covered = "browser_wait_for_url"
