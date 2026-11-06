@@ -25,15 +25,19 @@ const DEFAULT_TASKBAR_HEIGHT: u32 = 48;
 /// size beyond `i32::MAX`.
 const MAX_PHYSICAL: u64 = 1 << 16;
 
-/// Whether [`headless_screen_switches`] takes the device pixel ratio of
-/// `quarters` quarters. On Linux and Windows, where zendriver measured
-/// Chrome's rounding (see [`chrome_axis`]), it takes 1, 1.25, 1.5, … 4,
-/// which cover Windows' scaling steps. Elsewhere it takes only 1 and 2
-/// (macOS's), whose `f32` reciprocals are exact, so that Chrome's rounding
-/// can't matter: macOS's headless screen is said to truncate a fractional
+/// Whether zendriver measured headless Chrome's rounding at fractional
+/// device pixel ratios (see [`chrome_axis`]) on the OS it runs on: on Linux
+/// and Windows. macOS's headless screen is said to truncate a fractional
 /// ratio, and wasn't measured.
+const FRACTIONAL_RATIOS_MEASURED: bool = cfg!(any(target_os = "linux", target_os = "windows"));
+
+/// Whether [`headless_screen_switches`] takes the device pixel ratio of
+/// `quarters` quarters. Where [`FRACTIONAL_RATIOS_MEASURED`], it takes 1,
+/// 1.25, 1.5, … 4, which cover Windows' scaling steps. Elsewhere it takes
+/// only 1 and 2 (macOS's), whose `f32` reciprocals are exact, so that
+/// Chrome's rounding can't matter.
 fn ratio_taken(quarters: u64) -> bool {
-    if cfg!(any(target_os = "linux", target_os = "windows")) {
+    if FRACTIONAL_RATIOS_MEASURED {
         (4..=16).contains(&quarters)
     } else {
         quarters == 4 || quarters == 8
@@ -74,13 +78,15 @@ fn chrome_physical(what: &str, css: u32, exact: u32, dpr: f32) -> Result<u32, St
 /// headless Chrome to report a screen `css` CSS pixels long, whose work
 /// area (from its left or top edge) is `avail` CSS pixels long, at the
 /// ratio `dpr`. `exact` and `exact_avail` are `css` and `avail` times the
-/// ratio, which are whole numbers.
+/// ratio, which are whole numbers, with `avail` at most `css`.
 ///
 /// Measured with Chrome 157: on Linux, Chrome divides the screen's size by
 /// the ratio, which is exact, and scales the inset by the ratio's `f32`
 /// reciprocal; on Windows, it scales the screen's size and the work area's
-/// size by that reciprocal instead, and the inset is their difference.
-/// Either way, [`chrome_physical`] gives the values scaled.
+/// size by that reciprocal instead, and the inset is their difference. So
+/// for each value that Chrome scales by the reciprocal (the inset on
+/// Linux; the screen's size and the work area's size on Windows), this
+/// passes the physical pixels that [`chrome_physical`] finds.
 fn chrome_axis(
     css: u32,
     avail: u32,
@@ -88,6 +94,10 @@ fn chrome_axis(
     exact_avail: u32,
     dpr: f32,
 ) -> Result<[u32; 2], StealthError> {
+    assert!(
+        avail <= css && exact_avail <= exact,
+        "work area {avail} ({exact_avail} physical) beyond the screen {css} ({exact} physical)"
+    );
     if cfg!(target_os = "windows") {
         let size = chrome_physical("screen size", css, exact, dpr)?;
         let work = chrome_physical("work-area size", avail, exact_avail, dpr)?;
@@ -116,8 +126,9 @@ fn chrome_window_size(css: u32, dpr: f32) -> Result<u32, StealthError> {
 /// window filling its work area: `--screen-info` for the screen, and
 /// `--window-size` plus `--window-position=0,0` for the windows.
 ///
-/// `--screen-info` takes the size and the work area in physical pixels: the
-/// CSS pixels of `screen` times its device pixel ratio. The work area is
+/// `--screen-info` takes the size and the work area in physical pixels:
+/// the CSS pixels of `screen` times its device pixel ratio, or 1 less where
+/// [`chrome_axis`] makes up for Chrome's rounding. The work area is
 /// `avail_width` by `avail_height`, at the top left; an unset `avail_width`
 /// keeps the full width, and an unset `avail_height` leaves
 /// [`DEFAULT_TASKBAR_HEIGHT`]. `--window-size` takes CSS pixels.
@@ -143,10 +154,10 @@ fn headless_screen_switches(screen: &ScreenSpec) -> Result<Vec<String>, StealthE
     let ratio = screen.device_pixel_ratio;
     let quarters = ratio * 4.0;
     if !(quarters.is_finite() && quarters.fract() == 0.0 && ratio_taken(quarters as u64)) {
-        let taken = if cfg!(any(target_os = "linux", target_os = "windows")) {
+        let taken = if FRACTIONAL_RATIOS_MEASURED {
             "1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3, 3.25, 3.5, 3.75 or 4"
         } else {
-            "1 or 2 (zendriver takes the others only on Linux and Windows)"
+            "1 or 2 (zendriver takes 1.25, 1.5, 1.75, 2.25, … 4 only on Linux and Windows)"
         };
         return Err(StealthError::InvalidOverride(format!(
             "the screen's device_pixel_ratio must be {taken}, not {ratio}"
@@ -171,7 +182,8 @@ fn headless_screen_switches(screen: &ScreenSpec) -> Result<Vec<String>, StealthE
             screen.width, screen.height
         )));
     }
-    // `css` CSS pixels in physical pixels, as `--screen-info` takes them.
+    // `css` CSS pixels in physical pixels: exactly `css` times the ratio,
+    // which `chrome_axis` may make 1 less for `--screen-info`.
     let physical = |name: &str, css: u32| -> Result<u32, StealthError> {
         let quarter_pixels = u64::from(css) * quarters;
         if css == 0 || quarter_pixels % 4 != 0 || quarter_pixels / 4 > MAX_PHYSICAL {
@@ -1904,8 +1916,9 @@ mod persona_reaches_cdp_tests {
         );
     }
 
-    /// Measured with Chrome 157: at 1.75, Chrome reports 84 physical pixels
-    /// of inset as 49 CSS pixels, and a `--window-size` of 1596 as 1597.
+    /// Measured with Chrome 157: at 1.75, Chrome on Linux reports 84
+    /// physical pixels of inset as 49 CSS pixels, and Chrome on Linux and
+    /// Windows reports a `--window-size` of 1596 as 1597.
     #[test]
     fn chromes_rounding_is_made_up_for() {
         assert_eq!(chrome_physical("inset", 48, 84, 1.75).unwrap(), 83);
@@ -1916,7 +1929,8 @@ mod persona_reaches_cdp_tests {
     }
 
     /// `chrome_physical` and `chrome_window_size` find a value for every
-    /// size that `headless_screen_switches` can pass them: every ratio from
+    /// size that `headless_screen_switches` can pass them on Linux and
+    /// Windows (a superset of what it can pass elsewhere): every ratio from
     /// 1 to 4 in quarters, and every size of whole physical pixels up to
     /// `MAX_PHYSICAL`.
     #[test]
