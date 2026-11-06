@@ -118,8 +118,9 @@ pub struct Logs {
 }
 
 impl Logs {
-    /// What this thread logs from now on.
-    pub(crate) fn from_now_on() -> Self {
+    /// What this thread logs from now on. Like [`crate::launch_for_test`],
+    /// it sees a task only if the task runs on this thread.
+    pub fn from_now_on() -> Self {
         let buffer = Buffer::of_this_thread();
         let from = buffer.lines().len();
         Self { buffer, from }
