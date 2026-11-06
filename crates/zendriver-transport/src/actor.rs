@@ -110,16 +110,22 @@ struct TargetDetached {
     session_id: String,
 }
 
-/// Whether a failed socket read or write is expected, and so not an error:
-/// the actor's `shutdown` was requested, or the socket's death was declared
-/// with [`Connection::expect_disconnect`] on the connection that `weak_inner`
-/// points to.
-fn socket_death_expected(shutdown: &CancellationToken, weak_inner: &Weak<ConnectionInner>) -> bool {
+/// Whether a failed read or write on an actor's socket is expected, and so
+/// not an error: the actor's `shutdown` was requested, or
+/// [`Connection::expect_disconnect`] declared the death of this actor's
+/// socket. `weak_inner` points to the actor's connection, and `generation`
+/// is the actor's generation.
+fn socket_death_expected(
+    shutdown: &CancellationToken,
+    weak_inner: &Weak<ConnectionInner>,
+    generation: u64,
+) -> bool {
     shutdown.is_cancelled()
         || weak_inner.upgrade().is_some_and(|inner| {
-            inner
-                .disconnect_expected
-                .load(std::sync::atomic::Ordering::Relaxed)
+            let declared = inner
+                .disconnect_expected_generation
+                .load(std::sync::atomic::Ordering::Relaxed);
+            declared == generation
         })
 }
 
@@ -196,7 +202,7 @@ pub(crate) async fn run_actor<S>(
                     Ok(s) => {
                         trace!(id, method = %cmd.method, "send");
                         if let Err(e) = ws.send(Message::text(s)).await {
-                            if socket_death_expected(&shutdown, &weak_inner) {
+                            if socket_death_expected(&shutdown, &weak_inner, accounted.generation) {
                                 debug!("ws send failed, as expected: {e}");
                             } else {
                                 error!("ws send failed: {e}");
@@ -270,9 +276,8 @@ pub(crate) async fn run_actor<S>(
                         // After a requested shutdown this is the expected teardown:
                         // closing a target resets its socket, and with one socket
                         // per tab that reset races the shutdown signal. And a
-                        // quitting Chrome resets every socket, which the browser
-                        // declares beforehand with `expect_disconnect`.
-                        if socket_death_expected(&shutdown, &weak_inner) {
+                        // death declared with `expect_disconnect` is expected.
+                        if socket_death_expected(&shutdown, &weak_inner, accounted.generation) {
                             debug!("ws read failed, as expected: {e}");
                         } else {
                             error!("ws read failed: {e}");
@@ -1428,6 +1433,28 @@ mod tests {
                 ("third", "S-multi".to_string()),
             ]
         );
+
+        conn.shutdown();
+    }
+
+    /// A death declared with `expect_disconnect` is expected only of the
+    /// socket that was current at the declaration, not of the socket that a
+    /// later reconnect brings.
+    #[tokio::test]
+    async fn a_declared_death_is_expected_only_of_the_socket_it_was_about() {
+        let (ws, _inbound, _outbound) = duplex_pair();
+        let conn = crate::connection::spawn_actor(ws);
+        let weak_inner = Arc::downgrade(&conn.inner);
+        let not_shut_down = CancellationToken::new();
+        assert!(!socket_death_expected(&not_shut_down, &weak_inner, 1));
+
+        conn.expect_disconnect();
+        assert!(socket_death_expected(&not_shut_down, &weak_inner, 1));
+
+        let (ws, _inbound, _outbound) = duplex_pair();
+        conn.reconnect(ws);
+        assert_eq!(conn.connection_generation(), 2);
+        assert!(!socket_death_expected(&not_shut_down, &weak_inner, 2));
 
         conn.shutdown();
     }

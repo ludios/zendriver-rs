@@ -168,11 +168,14 @@ pub(crate) struct ConnectionInner {
     /// Read via [`actor_gone_error`]; see the store in
     /// [`crate::actor::run_actor`] for the ordering that makes it reliable.
     pub(crate) socket_died: AtomicBool,
-    /// Whether the current socket's death is expected, so the actor logs it
-    /// at debug instead of error. Set by [`Connection::expect_disconnect`];
-    /// cleared by [`Connection::reconnect`]. `Relaxed` suffices: it decides
-    /// only a log level.
-    pub(crate) disconnect_expected: AtomicBool,
+    /// The [`generation`](Self::generation) of the actor whose socket's
+    /// death is expected, so that the actor logs the death at debug instead
+    /// of error; `0` (no generation) when none is. Set by
+    /// [`Connection::expect_disconnect`]. Keyed by generation so that a
+    /// declaration about one socket never applies to the socket of a later
+    /// [`Connection::reconnect`]. `Relaxed` suffices: it decides only a log
+    /// level.
+    pub(crate) disconnect_expected_generation: AtomicU64,
     /// Total pending-reply entries reaped across every sweep this connection
     /// has run, summed over all actor generations. Monotonic; never reset by
     /// [`Connection::reconnect`].
@@ -206,7 +209,10 @@ impl std::fmt::Debug for ConnectionInner {
             .field("observer_timeout", &self.observer_timeout)
             .field("call_timeout_ms", &self.call_timeout_ms)
             .field("socket_died", &self.socket_died)
-            .field("disconnect_expected", &self.disconnect_expected)
+            .field(
+                "disconnect_expected_generation",
+                &self.disconnect_expected_generation,
+            )
             .field("swept_total", &self.swept_total)
             .field(
                 "observers",
@@ -516,12 +522,13 @@ impl Connection {
     /// Chrome is about to quit), so its death is logged at debug instead of
     /// error.
     ///
-    /// Changes nothing else: the connection keeps working until the socket
-    /// dies, and then everything that would observe an unexpected death still
-    /// does — in-flight and later calls fail with
+    /// Changes nothing else about the connection: it keeps working until the
+    /// socket dies, and the death is then reported exactly as an undeclared
+    /// one — calls in flight and later calls fail with
     /// [`TransportError::Disconnected`], and
-    /// [`AccountedRawEvent::Disconnected`] still ends the streams waiting on
-    /// it. A [`Connection::reconnect`] clears the declaration.
+    /// [`AccountedRawEvent::Disconnected`] is sent on the accounted bus. The
+    /// declaration is about the current socket only: the socket of a later
+    /// [`Connection::reconnect`] is not affected.
     ///
     /// # Examples
     ///
@@ -534,9 +541,10 @@ impl Connection {
     /// # }
     /// ```
     pub fn expect_disconnect(&self) {
+        let generation = self.inner.generation.load(Ordering::Relaxed);
         self.inner
-            .disconnect_expected
-            .store(true, Ordering::Relaxed);
+            .disconnect_expected_generation
+            .store(generation, Ordering::Relaxed);
     }
 
     /// Public accessor for advanced users who need to drive the underlying
@@ -671,10 +679,6 @@ impl Connection {
         // flag while an actor is still running, and the ordering argument above
         // would no longer cover it.
         self.inner.socket_died.store(false, Ordering::Release);
-        // An earlier `expect_disconnect` was about the old socket.
-        self.inner
-            .disconnect_expected
-            .store(false, Ordering::Relaxed);
     }
 
     /// Dial `ws_url` afresh (re-applying the P-A A4 [`WebSocketConfig`] max-size
@@ -885,7 +889,7 @@ where
         observer_timeout,
         call_timeout_ms: AtomicU64::new(DEFAULT_CALL_TIMEOUT.as_millis() as u64),
         socket_died: AtomicBool::new(false),
-        disconnect_expected: AtomicBool::new(false),
+        disconnect_expected_generation: AtomicU64::new(0),
         swept_total: AtomicU64::new(0),
         // Retain the observer chain so `reconnect` can re-spawn the actor with
         // the same observers without the caller re-supplying them.
@@ -1053,7 +1057,7 @@ mod tests {
 
     /// A connection with exactly one `call_raw` already on the wire and
     /// awaiting its reply — so the actor is provably up before a test kills
-    /// it. Shared by the four drain tests below, which all need this same
+    /// it. Shared by the five drain tests below, which all need this same
     /// setup and then differ only in how the connection dies and what they
     /// assert afterwards.
     struct InFlightCall {
@@ -1134,12 +1138,16 @@ mod tests {
 
     /// `expect_disconnect` changes only how a socket's death is logged: a
     /// call in flight when the socket dies still drains as `Disconnected`.
+    /// The socket dies by the read error a quitting Chrome causes.
     #[tokio::test]
     async fn an_expected_disconnect_still_drains_as_disconnected() {
+        use tokio_tungstenite::tungstenite::error::{Error, ProtocolError};
+
         let f = connection_with_one_call_in_flight().await;
 
         f.conn.expect_disconnect();
-        drop(f.inbound);
+        let reset = Error::Protocol(ProtocolError::ResetWithoutClosingHandshake);
+        f.inbound.send(Err(reset)).await.unwrap();
 
         let res = f.call.await.unwrap();
         assert!(
@@ -1263,7 +1271,7 @@ mod tests {
             observer_timeout: DEFAULT_OBSERVER_TIMEOUT,
             call_timeout_ms: AtomicU64::new(DEFAULT_CALL_TIMEOUT.as_millis() as u64),
             socket_died: AtomicBool::new(false),
-            disconnect_expected: AtomicBool::new(false),
+            disconnect_expected_generation: AtomicU64::new(0),
             swept_total: AtomicU64::new(0),
             observers: Vec::new(),
         });
