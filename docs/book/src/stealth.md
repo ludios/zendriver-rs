@@ -85,13 +85,14 @@ in the page:
   Chrome, it passes `--screen-info` for a 1920x1080 screen with a
   48-pixel taskbar (or the screen you configure with
   `StealthProfile::screen` or a persona's `screen`), and
-  `--start-maximized`, which sizes every window to that screen's work
-  area. Chrome itself then reports a screen, window and viewport that
-  agree: by default a 1920x1080 screen, a 1920x1032 window at (0, 0),
+  `--window-size` plus `--window-position`, which make every window fill
+  that screen's work area. Chrome itself then reports a screen, window
+  and viewport that agree: by default a 1920x1080 screen, a 1920x1032 window at (0, 0),
   and a 1920x945 viewport (the window minus the browser's toolbars,
   which headless Chrome emulates). A `--screen-info` or `--window-size`
   that you pass with `BrowserBuilder::arg` wins. A headed launch gets
-  neither switch, since Chrome then reports the real display and window.
+  none of these switches, since Chrome then reports the real display and
+  window.
   `--screen-info` needs Chrome 133 or later. Chrome takes the screen in
   physical pixels, so a configured screen's sizes (`width`, `height`,
   `avail_width`, `avail_height`) times its `device_pixel_ratio` must be

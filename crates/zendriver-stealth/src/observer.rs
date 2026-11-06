@@ -16,16 +16,23 @@ use crate::persona::GeoPos;
 use crate::persona::specs::{ScreenSpec, UaMetadata};
 use crate::{Fingerprint, Persona, ProfileKind, StealthError, StealthProfile};
 
-/// The height that [`screen_info_switch`] leaves for a taskbar when the
+/// The height that [`headless_screen_switches`] leaves for a taskbar when the
 /// screen has no `avail_height`; the default that [`ScreenSpec`] documents.
 const DEFAULT_TASKBAR_HEIGHT: u32 = 48;
 
-/// Headless Chrome's `--screen-info` switch for `screen`.
+/// The switches that give headless Chrome the screen `screen`, with each
+/// window filling its work area: `--screen-info` for the screen, and
+/// `--window-size` plus `--window-position=0,0` for the windows.
 ///
-/// Chrome takes the size and the work area in physical pixels: the CSS
-/// pixels of `screen` times its device pixel ratio. The work area is the
-/// screen minus the `avail_*` insets. An unset `avail_width` keeps the full
-/// width, and an unset `avail_height` leaves [`DEFAULT_TASKBAR_HEIGHT`].
+/// `--screen-info` takes the size and the work area in physical pixels: the
+/// CSS pixels of `screen` times its device pixel ratio. The work area is
+/// `avail_width` by `avail_height`, at the top left; an unset `avail_width`
+/// keeps the full width, and an unset `avail_height` leaves
+/// [`DEFAULT_TASKBAR_HEIGHT`]. `--window-size` takes CSS pixels.
+///
+/// The window isn't maximized (`--start-maximized`), because Chrome then
+/// ignores the size of the first `Browser.setWindowBounds`, which only
+/// restores the window from its maximized state.
 ///
 /// # Errors
 /// Returns [`StealthError::InvalidOverride`] for a screen that Chrome would
@@ -35,7 +42,7 @@ const DEFAULT_TASKBAR_HEIGHT: u32 = 48;
 /// physical pixels: Chrome would round it to one, report a different size
 /// in CSS pixels, and maximize windows to 1 CSS pixel more than the work
 /// area (measured with Chrome 157 at a ratio of 1.75).
-fn screen_info_switch(screen: &ScreenSpec) -> Result<String, StealthError> {
+fn headless_screen_switches(screen: &ScreenSpec) -> Result<Vec<String>, StealthError> {
     let dpr = screen.device_pixel_ratio;
     if !(dpr.is_finite() && dpr >= 0.5) {
         return Err(StealthError::InvalidOverride(format!(
@@ -68,13 +75,18 @@ fn screen_info_switch(screen: &ScreenSpec) -> Result<String, StealthError> {
         }
     }
     let physical = |css: u32| (f64::from(css) * dpr).round() as u32;
-    Ok(format!(
+    let screen_info = format!(
         "--screen-info={{{}x{} devicePixelRatio={dpr} workAreaRight={} workAreaBottom={}}}",
         physical(screen.width),
         physical(screen.height),
         physical(screen.width) - physical(avail_width),
         physical(screen.height) - physical(avail_height),
-    ))
+    );
+    Ok(vec![
+        screen_info,
+        format!("--window-size={avail_width},{avail_height}"),
+        "--window-position=0,0".to_string(),
+    ])
 }
 
 /// Observer that applies a [`StealthProfile`] + [`Fingerprint`] to every page
@@ -176,10 +188,11 @@ impl StealthObserver {
     /// For `Native`, they are `--screen-info`, which gives headless Chrome
     /// the screen that the persona or the [`StealthProfile::screen`] pin
     /// configures (else 1920x1080, with a 48-pixel taskbar), and
-    /// `--start-maximized`, which sizes each window to that screen's work
-    /// area. Chrome then reports a screen, window and viewport that agree,
-    /// with no `Emulation.setDeviceMetricsOverride` and no JS patch. A headed
-    /// Chrome needs neither switch, since it reports the real display.
+    /// `--window-size` plus `--window-position=0,0`, which make each window
+    /// fill that screen's work area. Chrome then reports a screen, window and
+    /// viewport that agree, with no `Emulation.setDeviceMetricsOverride` and
+    /// no JS patch. A headed Chrome needs none of these switches, since it
+    /// reports the real display.
     ///
     /// # Errors
     /// Returns [`StealthError::InvalidOverride`] for a screen that Chrome
@@ -191,10 +204,7 @@ impl StealthObserver {
         if self.profile.kind() != ProfileKind::Native {
             return Ok(Vec::new());
         }
-        Ok(vec![
-            screen_info_switch(&self.screen())?,
-            "--start-maximized".to_string(),
-        ])
+        headless_screen_switches(&self.screen())
     }
 }
 
@@ -1634,7 +1644,8 @@ mod persona_reaches_cdp_tests {
             native_headless_flags(None, None).unwrap(),
             [
                 "--screen-info={1920x1080 devicePixelRatio=1 workAreaRight=0 workAreaBottom=48}",
-                "--start-maximized",
+                "--window-size=1920,1032",
+                "--window-position=0,0",
             ]
         );
     }
@@ -1649,8 +1660,12 @@ mod persona_reaches_cdp_tests {
         )
         .unwrap();
         assert_eq!(
-            flags[0],
-            "--screen-info={2880x1800 devicePixelRatio=2 workAreaRight=80 workAreaBottom=80}"
+            flags,
+            [
+                "--screen-info={2880x1800 devicePixelRatio=2 workAreaRight=80 workAreaBottom=80}",
+                "--window-size=1400,860",
+                "--window-position=0,0",
+            ]
         );
     }
 

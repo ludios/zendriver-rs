@@ -1,8 +1,8 @@
 //! The screen, window and viewport that a headless launch's pages see under
 //! the `native` stealth profile (the default). Instead of patching the page,
-//! it launches headless Chrome with a screen (`--screen-info`) and maximized
-//! windows (see `StealthObserver::headless_flags`), so Chrome itself reports
-//! geometry that agrees.
+//! it launches headless Chrome with a screen (`--screen-info`) and windows
+//! that fill its work area (see `StealthObserver::headless_flags`), so
+//! Chrome itself reports geometry that agrees.
 
 #![cfg(feature = "integration-tests")]
 
@@ -29,10 +29,10 @@ async fn geometry(server: &FixtureServer, tab: &Tab) -> Value {
 
 /// Assert that `seen` (from [`geometry`]) describes a screen of
 /// `screen_size` (CSS pixels) at `device_pixel_ratio`, with a work area of
-/// `work_area` at its top left, and a window maximized to that work area
+/// `work_area` at its top left, and a window that fills that work area,
 /// whose viewport is as wide as the window and shorter (by the browser's
 /// toolbars, which headless Chrome emulates).
-fn assert_maximized_on(
+fn assert_fills_work_area(
     seen: &Value,
     screen_size: [u64; 2],
     work_area: [u64; 2],
@@ -76,7 +76,7 @@ async fn geometry_of_first_tab_and_new_window(builder: BrowserBuilder) -> [Value
 #[tokio::test]
 async fn the_default_screen_is_1920x1080_with_a_taskbar() {
     for seen in geometry_of_first_tab_and_new_window(Browser::builder()).await {
-        assert_maximized_on(&seen, [1920, 1080], [1920, 1032], 1.0);
+        assert_fills_work_area(&seen, [1920, 1080], [1920, 1032], 1.0);
     }
 }
 
@@ -96,7 +96,7 @@ async fn a_configured_screen_reaches_chrome() {
            "avail_width": 1400, "avail_height": 860"#,
     );
     for seen in geometry_of_first_tab_and_new_window(builder).await {
-        assert_maximized_on(&seen, [1440, 900], [1400, 860], 2.0);
+        assert_fills_work_area(&seen, [1440, 900], [1400, 860], 2.0);
     }
 }
 
@@ -109,16 +109,33 @@ async fn a_screen_at_a_fractional_ratio_reaches_chrome_exactly() {
            "avail_width": 1536, "avail_height": 824"#,
     );
     for seen in geometry_of_first_tab_and_new_window(builder).await {
-        assert_maximized_on(&seen, [1536, 864], [1536, 824], 1.25);
+        assert_fills_work_area(&seen, [1536, 864], [1536, 824], 1.25);
     }
 }
 
-/// Chrome keeps the last of several `--screen-info` switches, and zendriver
-/// leaves its own out.
+/// zendriver leaves out its own screen switches then (and its window
+/// switches, which describe its own screen).
 #[tokio::test]
 async fn the_callers_screen_info_wins() {
     let builder = Browser::builder().arg("--screen-info={1366x768 workAreaBottom=40}");
     for seen in geometry_of_first_tab_and_new_window(builder).await {
-        assert_maximized_on(&seen, [1366, 768], [1366, 728], 1.0);
+        assert_eq!(seen["screen"], json!([1366, 768]), "{seen}");
+        assert_eq!(seen["workArea"], json!([0, 0, 1366, 728]), "{seen}");
     }
+}
+
+/// The window fills the work area without being maximized: Chrome would
+/// ignore the size that the first `Browser.setWindowBounds` asks a maximized
+/// window for, and only restore it to a default size.
+#[tokio::test]
+async fn set_window_size_takes_effect() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    tab.set_window_size(1280, 720)
+        .await
+        .expect("set_window_size");
+    let seen = geometry(&server, &tab).await;
+    browser.close().await;
+    assert_eq!(seen["window"], json!([0, 0, 1280, 720]), "{seen}");
 }

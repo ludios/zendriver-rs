@@ -871,8 +871,8 @@ impl BrowserBuilder {
     /// pointer, Chrome also gets the Blink settings of a mouse (see
     /// [`StealthProfile::pointer_blink_settings`]), with the `native` or
     /// `spoofed` stealth profile (`native` is the default). With `native`,
-    /// Chrome also gets a screen (`--screen-info`) and maximized windows (see
-    /// [`StealthProfile::native`]).
+    /// Chrome also gets a screen (`--screen-info`), and windows that fill its
+    /// work area (see [`StealthProfile::native`]).
     /// Pass `false` to launch a visible window (useful for local debugging).
     ///
     /// # Examples
@@ -1945,11 +1945,13 @@ impl BrowserBuilder {
     /// The switches that `observer` asks for in a headless launch (none in a
     /// headed launch), minus each switch that the caller also passes, with
     /// [`arg`](Self::arg) or in `profile_flags` (the stealth profile's own
-    /// flags), so that the caller's value wins.
+    /// flags), so that the caller's value wins. A caller's `--screen-info`
+    /// drops all of them, since they describe zendriver's screen.
     ///
     /// # Errors
     /// Returns the error of [`StealthObserver::headless_flags`] for a
-    /// configured screen that Chrome would crash on.
+    /// configured screen that Chrome can't take, unless the caller passes
+    /// `--screen-info`.
     fn headless_stealth_flags(
         &self,
         observer: &StealthObserver,
@@ -1965,6 +1967,11 @@ impl BrowserBuilder {
             .filter_map(|flag| parse_switch(flag))
             .map(|(name, _)| name)
             .collect();
+        // Our window size fits our screen, so it goes with it; and a screen
+        // that won't be used mustn't fail the launch.
+        if callers.contains(&"screen-info") {
+            return Ok(Vec::new());
+        }
         let mut ours = observer.headless_flags()?;
         ours.retain(|flag| parse_switch(flag).is_none_or(|(name, _)| !callers.contains(&name)));
         Ok(ours)
@@ -6237,14 +6244,17 @@ mod tests {
     }
 
     #[test]
-    fn a_headless_native_launch_gets_a_screen_and_a_maximized_window() {
+    fn a_headless_native_launch_gets_a_screen_and_a_window_that_fills_it() {
         let flags = headless_stealth_flags_of(&Browser::builder());
-        assert_eq!(flags.len(), 2, "{flags:?}");
+        assert_eq!(flags.len(), 3, "{flags:?}");
         assert!(
             flags[0].starts_with("--screen-info={1920x1080 "),
             "{flags:?}"
         );
-        assert_eq!(flags[1], "--start-maximized");
+        assert_eq!(
+            flags[1..],
+            ["--window-size=1920,1032", "--window-position=0,0"]
+        );
     }
 
     #[test]
@@ -6253,16 +6263,52 @@ mod tests {
         assert_eq!(headless_stealth_flags_of(&builder), Vec::<String>::new());
     }
 
-    /// Whether the caller passes it with `BrowserBuilder::arg` or with the
-    /// stealth profile's own `arg`.
+    /// zendriver's window switches describe its own screen, so they go with
+    /// it, whether the caller passes `--screen-info` with
+    /// `BrowserBuilder::arg` or with the stealth profile's own `arg`.
     #[test]
-    fn the_callers_screen_info_wins_over_zendrivers() {
+    fn the_callers_screen_info_drops_all_of_zendrivers_switches() {
         let builder_arg = Browser::builder().arg("--screen-info={1280x720}");
         let profile_arg =
             Browser::builder().stealth(StealthProfile::native().arg("--screen-info={1280x720}"));
         for builder in [builder_arg, profile_arg] {
-            assert_eq!(headless_stealth_flags_of(&builder), ["--start-maximized"]);
+            assert_eq!(headless_stealth_flags_of(&builder), Vec::<String>::new());
         }
+    }
+
+    #[test]
+    fn the_callers_window_size_drops_only_zendrivers() {
+        let flags = headless_stealth_flags_of(&Browser::builder().arg("--window-size=1280,720"));
+        assert!(flags[0].starts_with("--screen-info="), "{flags:?}");
+        assert_eq!(flags[1..], ["--window-position=0,0"]);
+    }
+
+    /// A configured screen that zendriver would reject doesn't fail the
+    /// launch when the caller's `--screen-info` replaces it.
+    #[test]
+    fn the_callers_screen_info_skips_checking_the_configured_screen() {
+        let unusable: zendriver_stealth::ScreenSpec =
+            serde_json::from_str(r#"{"width": 1920, "height": 1080, "device_pixel_ratio": 0.25}"#)
+                .expect("screen JSON");
+        let profile = StealthProfile::native().screen(unusable);
+        let fingerprint = profile
+            .resolve_fingerprint(Path::new(""), &[])
+            .expect("fingerprint");
+        let observer = StealthObserver::new(profile.clone(), fingerprint);
+        let builder = Browser::builder().stealth(profile.clone());
+        assert!(
+            builder
+                .headless_stealth_flags(&observer, &profile.build_flags())
+                .is_err(),
+            "zendriver must reject that screen"
+        );
+        let builder = builder.arg("--screen-info={1366x768}");
+        assert_eq!(
+            builder
+                .headless_stealth_flags(&observer, &profile.build_flags())
+                .expect("the caller's screen"),
+            Vec::<String>::new()
+        );
     }
 
     /// The argv that `launch` passes to Chrome for `builder`.
