@@ -128,7 +128,7 @@ impl InterceptBuilder {
     ///
     /// Composes with rules, and with [`subscribe`](Self::subscribe). While
     /// several layers of a session have credentials, the newest layer's go
-    /// to the proxy. [`BrowserBuilder::proxy_auth`] in the `zendriver` crate
+    /// to the proxy. `BrowserBuilder::proxy_auth` in the `zendriver` crate
     /// installs this for you.
     ///
     /// See cdpdriver/zendriver#208.

@@ -170,7 +170,10 @@ Chrome accepted (say, after a panic mid-flow, or an action whose headers
 Chrome refused) is continued unchanged, and so is each request the stream
 took that nobody read when the stream is dropped. Rules get the same
 treatment: a rule whose closure panics, or whose release Chrome refuses,
-logs it and continues the request unchanged.
+logs it and continues the request unchanged. And if the tab's interception
+ever falls so far behind that it loses events (a pause it never saw would
+stay paused), it disables and re-enables `Fetch`, which continues every
+paused request, those a stream holds included.
 
 ## Tracker / fingerprinter blocklist
 

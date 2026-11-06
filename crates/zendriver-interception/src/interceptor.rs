@@ -19,9 +19,16 @@
 //! only if one of its own patterns matches the request's URL, resource type
 //! and stage. A stream layer takes every request it considers; a rule layer
 //! takes one if one of its rules matches the URL and acts at that stage, and
-//! otherwise leaves it to the next layer. A request that no layer takes is continued unchanged. A
-//! proxy's challenge gets the credentials of the newest layer that has
-//! some.
+//! otherwise leaves it to the next layer. A request that no layer takes is
+//! continued unchanged. A proxy's challenge gets the credentials of the
+//! newest layer that has some.
+//!
+//! If the multiplexer falls so far behind that the connection drops some
+//! of its events, it disables `Fetch` and enables it again: a pause it
+//! missed would otherwise stay paused, and `Fetch.disable` continues every
+//! paused request, including those a stream holds (whose release then
+//! fails). When the session's socket dies, or is replaced by a reconnect,
+//! the layers are dropped, which ends their streams.
 //!
 //! [`InterceptBuilder::start`]: crate::InterceptBuilder::start
 //! [`InterceptBuilder::subscribe`]: crate::InterceptBuilder::subscribe
