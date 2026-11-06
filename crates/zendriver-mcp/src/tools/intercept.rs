@@ -696,9 +696,10 @@ impl ModifyRequestOverlay {
     /// case-insensitive name match. Case-insensitive: HTTP header names are
     /// case-insensitive per RFC 7230, and Chrome's emission casing isn't
     /// stable across versions. With no header overlay, the headers are left
-    /// alone: the reported ones aren't all that Chrome sends. `url` /
-    /// `method` / `post_data` are passed straight through — `None` leaves
-    /// Chrome's original untouched.
+    /// alone: CDP reports them as an object, so a list rebuilt from it has
+    /// lost their order and merged duplicate names. `url` / `method` /
+    /// `post_data` are passed straight through — `None` leaves Chrome's
+    /// original untouched.
     fn build(&self, original_headers: &[(String, String)]) -> RequestOverrides {
         let headers = if self.headers.is_empty() {
             None
