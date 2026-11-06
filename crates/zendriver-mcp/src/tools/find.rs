@@ -195,7 +195,7 @@ macro_rules! apply_selector_to {
         } else if let Some(t) = sel.text_exact.as_deref() {
             Ok(builder.text_exact(t))
         } else if let Some(pat) = sel.text_regex.as_deref() {
-            Ok(builder.text_regex_with_flags(pat, ""))
+            Ok(builder.text_regex(pat))
         } else if let Some(role_str) = sel.role.as_deref() {
             let role = parse_role(role_str)?;
             Ok(match sel.role_name.as_deref() {

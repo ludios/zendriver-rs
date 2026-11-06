@@ -75,10 +75,10 @@ async fn a_query_whose_script_throws_fails_at_once_with_the_exception() {
     )
     .await;
     assert_fails_at_once(
-        r#"tab.find().text_regex_with_flags("(?i)plain", "").one()"#,
+        r#"tab.find().text_regex("(?i)plain").one()"#,
         "Invalid group",
         tab.find()
-            .text_regex_with_flags("(?i)plain", "")
+            .text_regex("(?i)plain")
             .timeout(QUERY_TIMEOUT)
             .one(),
     )
