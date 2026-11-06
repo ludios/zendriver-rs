@@ -1907,32 +1907,45 @@ impl BrowserInner {
     /// [`BrowserBuilder::proxy_auth`]'s), and tracker blocking, as the
     /// entry `browser.trackers` at the front of the list. Returns once
     /// Chrome has applied them. Does nothing when neither applies.
+    ///
+    /// # Errors
+    ///
+    /// The first refusal of the two (each is tried whatever the other
+    /// did).
     pub(crate) async fn start_browser_intercept(&self, tab: &Tab) -> Result<(), ZendriverError> {
         let mut credentials = self.proxy_auth.clone();
         if let Some(context) = tab.inner.browser_context_id.as_deref() {
             credentials = self.context_proxy_auth.lock().await.get(context).cloned();
         }
+        // The two are independent: one that fails doesn't keep the other
+        // off.
+        let mut result = Ok(());
         if let Some(crate::proxy::ProxyCredentials { user, password }) = credentials {
             let auth = zendriver_interception::ProxyAuth {
                 user,
                 password,
                 pause: zendriver_interception::AuthPause::EveryRequest,
             };
-            tab.interceptor().set_proxy_auth(Some(auth)).await?;
+            result = tab.interceptor().set_proxy_auth(Some(auth)).await;
         }
         #[cfg(feature = "tracker-blocking")]
         if let Some(matcher) = self.tracker_matcher.clone() {
             use zendriver_interception::{AbortReason, Action, Match, Position, Rule};
             let block = Action::Block(AbortReason::BlockedByClient);
             let trackers = Rule::new(Match::hosts(matcher), block)?.label(TRACKER_LABEL);
-            let handle = tab
+            match tab
                 .interceptor()
                 .insert(vec![trackers], Position::First)
-                .await?;
-            debug_assert!(tab.inner.browser_intercept.get().is_none());
-            let _ = tab.inner.browser_intercept.set(handle);
+                .await
+            {
+                Ok(handle) => {
+                    debug_assert!(tab.inner.browser_intercept.get().is_none());
+                    let _ = tab.inner.browser_intercept.set(handle);
+                }
+                Err(e) => result = result.and(Err(e)),
+            }
         }
-        Ok(())
+        Ok(result?)
     }
 }
 
