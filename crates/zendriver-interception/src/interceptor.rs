@@ -39,7 +39,7 @@ use serde::Deserialize as _;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};
-use zendriver_transport::{RawEvent, SessionHandle};
+use zendriver_transport::{AccountedRawEvent, RawEvent, SessionHandle};
 
 use crate::builder::RequestPattern;
 use crate::error::InterceptionError;
@@ -286,8 +286,9 @@ pub(crate) enum Command {
     ),
 }
 
-/// A session's `Fetch` events.
-type FetchEvents = Pin<Box<dyn Stream<Item = RawEvent> + Send>>;
+/// A session's `Fetch` events, with its connection's reports of lost
+/// events and of the socket's end.
+type FetchEvents = Pin<Box<dyn Stream<Item = AccountedRawEvent> + Send>>;
 
 /// How long the multiplexer remembers having answered a proxy challenge with
 /// the credentials. Chrome repeats a challenge whose credentials the proxy
@@ -363,17 +364,25 @@ fn auth_response(
     })
 }
 
-/// `session`'s `Fetch` events.
+/// `session`'s `Fetch` events, read from the loss-accounted bus, which also
+/// says when events were lost and when the socket ended.
 fn fetch_events(session: &SessionHandle) -> FetchEvents {
     let session_id = session.session_id().map(str::to_owned);
-    Box::pin(session.connection().subscribe_raw().filter(move |ev| {
-        std::future::ready(ev.session_id == session_id && ev.method.starts_with("Fetch."))
+    let events = session.connection().subscribe_raw_accounted();
+    Box::pin(events.filter(move |ev| {
+        let wanted = match ev {
+            AccountedRawEvent::Event { event, .. } => {
+                event.session_id == session_id && event.method.starts_with("Fetch.")
+            }
+            _ => true,
+        };
+        std::future::ready(wanted)
     }))
 }
 
 /// The next of `events`, or `None` if they ended. Never ready while there
 /// are no events to read.
-async fn next_event(events: &mut Option<FetchEvents>) -> Option<RawEvent> {
+async fn next_event(events: &mut Option<FetchEvents>) -> Option<AccountedRawEvent> {
     match events {
         Some(events) => events.next().await,
         None => std::future::pending().await,
@@ -556,6 +565,23 @@ impl Mux {
         }
     }
 
+    /// Some events were lost, so a request paused then may have been missed,
+    /// and would stay paused for good: disable `Fetch`, which continues
+    /// every request still paused (including those a stream holds), and
+    /// enable it again.
+    async fn recover(&mut self, missed: u64) {
+        warn!(
+            missed,
+            "interception: lost events; disabling Fetch, which continues every paused request, then enabling it again"
+        );
+        if let Err(e) = self.session.call("Fetch.disable", json!({})).await {
+            warn!(error = %e, "interception: Fetch.disable failed");
+        }
+        if let Err(e) = apply(&self.session, &self.layers).await {
+            warn!(error = %e, "interception: Fetch.enable failed; the layers are inert");
+        }
+    }
+
     /// The session's events ended (its socket closed): drop every layer,
     /// which ends their streams.
     fn end(&mut self) {
@@ -657,8 +683,12 @@ async fn run(session: SessionHandle, mut commands: mpsc::UnboundedReceiver<Comma
                 mux.obey(command).await;
             }
             event = next_event(&mut mux.events) => match event {
-                Some(event) => mux.on_event(event),
-                None => mux.end(),
+                Some(AccountedRawEvent::Event { event, .. }) => mux.on_event(event),
+                Some(AccountedRawEvent::Lagged { missed, .. }) => mux.recover(missed).await,
+                // A reconnect gives the connection a new socket, where this
+                // session doesn't exist.
+                Some(AccountedRawEvent::Reconnected { .. } | AccountedRawEvent::Disconnected { .. })
+                | None => mux.end(),
             },
         }
     }
@@ -741,6 +771,8 @@ pub(crate) mod testing {
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use std::time::Duration;
+
+    use zendriver_transport::testing::MockConnection;
 
     use super::testing::{answered, applied, mock_interceptor, pause, sent_until_quiet};
     use super::*;
@@ -970,6 +1002,38 @@ mod tests {
         assert_eq!(
             answered(&mut mock, "Fetch.continueRequest").await,
             json!({ "requestId": "R2" })
+        );
+        conn.shutdown();
+    }
+
+    /// Lost events make the multiplexer disable `Fetch` (which continues
+    /// any pause it missed) and enable it again with every layer's
+    /// patterns.
+    #[tokio::test]
+    async fn lost_events_disable_fetch_and_enable_it_again() {
+        let (mut mock, conn) = MockConnection::pair_with_accounted_capacity(4);
+        let interceptor = Interceptor::new(SessionHandle::new(conn.clone(), "S1"));
+        let first = InterceptBuilder::new(&interceptor).block("*/a/*").unwrap();
+        let (_first, _) = applied(&mut mock, first.start()).await;
+
+        // While the multiplexer waits for Chrome, more events arrive than
+        // its bus holds.
+        let second = InterceptBuilder::new(&interceptor).block("*/b/*").unwrap();
+        let second = tokio::spawn(second.start());
+        let id = mock.expect_cmd("Fetch.enable").await;
+        for _ in 0..10 {
+            mock.emit_event_for_session("Page.lifecycleEvent", json!({}), "S1")
+                .await;
+        }
+        mock.reply(id, json!({})).await;
+        let _second = second.await.unwrap().unwrap();
+
+        let sent = sent_until_quiet(&mut mock).await;
+        let methods: Vec<&str> = sent.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(methods, ["Fetch.disable", "Fetch.enable"], "{sent:?}");
+        assert_eq!(
+            sent[1].1["patterns"],
+            json!([{ "urlPattern": "*/a/*" }, { "urlPattern": "*/b/*" }])
         );
         conn.shutdown();
     }
