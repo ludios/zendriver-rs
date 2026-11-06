@@ -2502,6 +2502,16 @@ const BROWSER_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 /// close that is merely slow but still making progress.
 const BROWSER_CLOSE_DEADLINE: Duration = Duration::from_secs(15);
 
+/// Shut down the socket of each tab in `tabs` that has a socket of its own. A
+/// tab on a flat session shares the browser's socket, which this leaves open.
+fn shutdown_own_sockets<'a>(tabs: impl IntoIterator<Item = &'a Tab>) {
+    for tab in tabs {
+        if tab.session().is_root() {
+            tab.session().connection().shutdown();
+        }
+    }
+}
+
 /// What the `Browser.close` round-trip actually established about the quit.
 ///
 /// Drives two decisions in [`Browser::close_owning`]: whether Chrome has earned
@@ -4638,11 +4648,7 @@ impl Browser {
         // and interception would keep running beside the rebuilt tab's:
         // close that socket.
         let mut tabs = self.inner.tabs.write().await;
-        for tab in tabs.values().chain([&self.inner.main_tab]) {
-            if tab.session().is_root() {
-                tab.session().connection().shutdown();
-            }
-        }
+        shutdown_own_sockets(tabs.values().chain([&self.inner.main_tab]));
         tabs.clear();
         drop(tabs);
 
@@ -4752,7 +4758,22 @@ impl Browser {
     /// bounds every phase; borrows `&self` because the outer wrapper owns the
     /// `Browser` for the duration of the call.
     async fn close_owning(&self, browser_close_budget: Duration) -> Result<(), ZendriverError> {
-        // Ask Chrome to quit over the protocol first. This must precede
+        // Chrome resets every socket it has open as it quits, and an actor
+        // that reads a reset before it is shut down logs an error. The quit
+        // doesn't need the tabs' own sockets, so shut them down first, as
+        // `Tab::close` does. The browser's socket carries the quit, and is
+        // shut down below once Chrome answers; Chrome answers before it
+        // starts to quit.
+        shutdown_own_sockets(
+            self.inner
+                .tabs
+                .read()
+                .await
+                .values()
+                .chain([&self.inner.main_tab]),
+        );
+
+        // Ask Chrome to quit over the protocol. This must precede
         // `conn.shutdown()` — that tears down the very transport the command
         // travels over.
         let quit = timeout(
