@@ -210,3 +210,15 @@ combination. A round-1 fix had made it fail-closed without anyone choosing that;
 the policy deliberately.
 
 Document it in `tracker_blocklist_url`'s rustdoc beside the three bounds already recorded there.
+
+## 15. Interception precedence — DECIDED (2026-11-06)
+
+A tab's interception is one ordered list of entries (each one rule or one stream); the first
+entry that fits a paused request decides it, every insertion states its position (`First`,
+`Last`, `Before(id)`, `After(id)`), tracker blocking is an ordinary visible entry
+(`browser.trackers`), and proxy credentials are one per-tab setting outside the list. It
+replaces the newest-first layers of `e8e6e5aa7`, under which a catch-all user rule silently
+kept requests from tracker blocking. The user asked for "a totally unambiguous, explicit API"
+designed by Astra and Fable; they agreed on it over four rounds, and the user settled the two
+points left (which entries `clear_rules` removes; who sends a stream's answer). The design,
+with its signatures, decision procedure and MCP tools: [interception-precedence.md](interception-precedence.md).
