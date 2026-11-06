@@ -420,14 +420,16 @@ async fn next_event(events: &mut Option<FetchEvents>) -> Option<AccountedRawEven
 }
 
 /// The command (method and params) with which `rule` releases the paused
-/// request `ev`.
-fn command(rule: &Rule, ev: &RequestPausedEvent) -> (&'static str, Value) {
+/// request `ev`, or `None` if it can't take this request: a
+/// `modify_response` rule and a failed response, which has no status or
+/// headers to modify.
+fn command(rule: &Rule, ev: &RequestPausedEvent) -> Option<(&'static str, Value)> {
     let id = ev.request_id.as_str();
     let unchanged = || {
         let params = continue_params(id, RequestOverrides::default());
         ("Fetch.continueRequest", params)
     };
-    match rule {
+    let command = match rule {
         Rule::Block { .. } | Rule::BlockHosts { .. } => (
             "Fetch.failRequest",
             fail_params(id, AbortReason::BlockedByClient),
@@ -456,10 +458,7 @@ fn command(rule: &Rule, ev: &RequestPausedEvent) -> (&'static str, Value) {
             }
         }
         Rule::ModifyResponse { modify, .. } => {
-            // A failed response has no status or headers to modify.
-            let Some(info) = build_response_info(ev) else {
-                return unchanged();
-            };
+            let info = build_response_info(ev)?;
             match run_closure(|| modify(&info)) {
                 Some(overrides) => (
                     "Fetch.continueResponse",
@@ -468,7 +467,8 @@ fn command(rule: &Rule, ev: &RequestPausedEvent) -> (&'static str, Value) {
                 None => unchanged(),
             }
         }
-    }
+    };
+    Some(command)
 }
 
 /// `f()`, or `None` (logged) if it panicked. A rule's closure is the
@@ -661,11 +661,13 @@ impl Mux {
                 }
                 Responder::Rules(rules) => {
                     let url = &ev.request.url;
-                    let Some(rule) = rules.iter().find(|r| r.acts_at(stage) && r.matches(url))
-                    else {
+                    let taken = rules
+                        .iter()
+                        .filter(|r| r.acts_at(stage) && r.matches(url))
+                        .find_map(|r| command(r, &ev));
+                    let Some((method, params)) = taken else {
                         continue;
                     };
-                    let (method, params) = command(rule, &ev);
                     release(&self.session, ev.request_id, method, params);
                     return;
                 }
@@ -1114,6 +1116,28 @@ mod tests {
             matches!(next, Ok(None)),
             "the stream didn't end on shutdown"
         );
+    }
+
+    /// A failed response (no status, no headers) isn't taken by a
+    /// `modify_response` rule, so a later rule of the layer gets it.
+    #[tokio::test]
+    async fn a_failed_response_goes_past_modify_response() {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let builder = InterceptBuilder::new(&interceptor)
+            .pattern("*")
+            .at_response()
+            .modify_response("*", |_| ResponseOverrides::default())
+            .unwrap()
+            .block("*")
+            .unwrap();
+        let (_handle, _) = applied(&mut mock, builder.start()).await;
+        let failed = json!({ "responseErrorReason": "ConnectionRefused" });
+        pause(&mock, "R1", "https://x.test/", failed).await;
+        assert_eq!(
+            answered(&mut mock, "Fetch.failRequest").await["requestId"],
+            "R1"
+        );
+        conn.shutdown();
     }
 
     /// A rule's closure that panics leaves the request continued, unchanged,
