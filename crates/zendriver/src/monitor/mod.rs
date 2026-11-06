@@ -13,13 +13,15 @@
 //!
 //! The correlator subscribes to the connection's loss-accounted event stream
 //! ([`zendriver_transport::Connection::subscribe_raw_accounted`]), so a
-//! delivery gap (a lagging subscriber, a transport reconnect or disconnect),
+//! delivery gap (a lagging subscriber, a transport reconnect, disconnect, or
+//! shutdown),
 //! a correlation-map eviction past [`MAX_TRACKED`], or an undecodable
 //! payload is surfaced as an explicit [`NetworkEvent::DeliveryBoundary`]
 //! instead of silently stitching a possibly-bogus "complete" exchange,
 //! silently dropping an entry, or silently skipping a malformed event. See
 //! [`NetworkDeliveryBoundary`] for the full set of boundaries and
-//! [`MonitorBuilder::start`] for the `Disconnected` restart contract.
+//! [`MonitorBuilder::start`] for the `Disconnected` / `Shutdown` end
+//! contract.
 
 mod events;
 
@@ -140,8 +142,8 @@ pub enum NetworkEvent {
 /// unrelated later request that reused the same `requestId`. Every such gap
 /// now surfaces as one of these variants instead, and the correlator clears
 /// its in-flight state on `Lagged` / `Reconnected` / `Disconnected` /
-/// `Unknown` so a partial exchange spanning the gap is never emitted as
-/// complete.
+/// `Shutdown` / `Unknown` so a partial exchange spanning the gap is never
+/// emitted as complete.
 ///
 /// `DeliveryBoundary` events bypass any [`MonitorBuilder::url_pattern`]
 /// filter — they describe the monitor's own health, not a specific
@@ -177,6 +179,16 @@ pub enum NetworkDeliveryBoundary {
     /// transport recovers; this one will never emit again.
     Disconnected {
         /// Generation whose WebSocket died.
+        generation: u64,
+    },
+    /// The tab's connection was shut down while its WebSocket was alive —
+    /// by [`crate::Tab::close`] or the drop of the tab's last handle (for a
+    /// tab that has its own socket), or by [`crate::Browser::reconnect`]
+    /// retiring the tab. Like `Disconnected`, it ends the monitor task, and
+    /// any exchange still in flight is dropped. To keep observing after a
+    /// reconnect, start a new monitor on the rebuilt tab.
+    Shutdown {
+        /// Generation that was shut down.
         generation: u64,
     },
     /// The in-flight correlation map exceeded [`MAX_TRACKED`] and one entry
@@ -456,12 +468,11 @@ impl MonitorBuilder {
     ///
     /// The task subscribes to the session's loss-accounted CDP event stream
     /// and runs until the monitor is dropped, [`NetworkMonitor::stop`] is
-    /// called, the tab's connection is shut down (e.g. by [`crate::Tab::close`]),
-    /// or — **fail closed** — the underlying transport reports
-    /// [`NetworkDeliveryBoundary::Disconnected`]. After a shutdown, the stream
-    /// returns `None` with no boundary before it. In the `Disconnected` case
-    /// the task emits that boundary event and then ends; the stream returns
-    /// `None` on the next poll. There is no automatic reconnect: a consumer
+    /// called, or — **fail closed** — the underlying transport reports
+    /// [`NetworkDeliveryBoundary::Disconnected`] or
+    /// [`NetworkDeliveryBoundary::Shutdown`]. In those two cases the task
+    /// emits that boundary event and then ends; the stream returns `None` on
+    /// the next poll. There is no automatic reconnect: a consumer
     /// that wants to keep observing across a transport blip must call
     /// [`crate::Tab::monitor`]`().start()` again to spawn a fresh correlator.
     ///
@@ -923,10 +934,15 @@ async fn run_monitor(
                         let _ = emit_boundary(&tx, NetworkDeliveryBoundary::Disconnected { generation }).await;
                         return;
                     }
-                    // The connection was shut down on purpose (the tab was
-                    // closed, say), so nothing was lost that a boundary
-                    // should report: just end.
-                    AccountedRawEvent::Shutdown { .. } => return,
+                    // Like `Disconnected`: the connection ended, so end too,
+                    // and say so — exchanges still in flight are dropped.
+                    AccountedRawEvent::Shutdown { generation } => {
+                        partial.clear();
+                        urls.clear();
+                        streaming.clear();
+                        let _ = emit_boundary(&tx, NetworkDeliveryBoundary::Shutdown { generation }).await;
+                        return;
+                    }
                     // Conservative default for any future `AccountedRawEvent`
                     // variant. `AccountedRawEvent` has exactly the five
                     // variants above today, so this arm is unreachable until
@@ -2318,21 +2334,49 @@ mod tests {
         );
     }
 
-    /// A connection shut down on purpose (as `Tab::close` does) ends the
-    /// monitor stream with no boundary before the end: nothing was lost.
+    /// A connection shut down while its socket is alive (as `Tab::close`
+    /// does to a tab that has its own socket) ends the monitor with a
+    /// `Shutdown` boundary.
     #[tokio::test]
-    async fn shutdown_ends_the_monitor_without_a_boundary() {
+    async fn shutdown_emits_boundary_and_ends_monitor_task() {
         let (mut monitor, _mock, conn) = spawn_monitor(None).await;
 
         conn.shutdown();
 
+        match next_event(&mut monitor).await {
+            NetworkEvent::DeliveryBoundary(NetworkDeliveryBoundary::Shutdown { generation }) => {
+                assert_eq!(generation, 1);
+            }
+            other => panic!("expected DeliveryBoundary::Shutdown, got {other:?}"),
+        }
         let next = tokio::time::timeout(Duration::from_secs(2), monitor.next())
             .await
-            .expect("monitor stream did not end within 2s after shutdown");
-        assert!(
-            next.is_none(),
-            "expected the monitor stream to end after a shutdown, got {next:?}"
-        );
+            .expect("monitor stream did not end within 2s after Shutdown");
+        assert!(next.is_none(), "expected the stream to end, got {next:?}");
+    }
+
+    /// A monitor started on a connection that is already shut down ends at
+    /// once, with the `Shutdown` boundary, rather than waiting forever: its
+    /// task subscribes only after `start()` returns, so this also covers a
+    /// shutdown that comes right after `start()`.
+    #[tokio::test]
+    async fn a_monitor_started_after_a_shutdown_ends() {
+        let (_mock, conn) = MockConnection::pair();
+        let session = SessionHandle::new(conn.clone(), "S1");
+        conn.shutdown();
+        // Let the actor stop, and so end its generation.
+        let gone = conn
+            .call_raw("Runtime.evaluate", serde_json::json!({}), None)
+            .await;
+        assert!(gone.is_err(), "{gone:?}");
+
+        let mut monitor = MonitorBuilder::new(session).start().await.unwrap();
+        match next_event(&mut monitor).await {
+            NetworkEvent::DeliveryBoundary(NetworkDeliveryBoundary::Shutdown { generation }) => {
+                assert_eq!(generation, 1);
+            }
+            other => panic!("expected DeliveryBoundary::Shutdown, got {other:?}"),
+        }
     }
 
     // `MockConnection::pair()` spawns the connection actor, which requires a
@@ -2423,11 +2467,9 @@ mod tests {
     }
 
     /// Every `NetworkDeliveryBoundary` variant is constructible, `Debug`,
-    /// `Clone`, and `Eq` — including `Reconnected` and `Unknown`, which the
-    /// live correlator tests above don't otherwise exercise (`Reconnected`
-    /// has no public `MockConnection` injection point; `Unknown` is a
-    /// defensive fallback unreachable while `AccountedRawEvent` has exactly
-    /// its current five variants).
+    /// `Clone`, and `Eq` — including `Unknown`, which the live correlator
+    /// tests above can't exercise: it is a defensive fallback, unreachable
+    /// while `AccountedRawEvent` has exactly its current five variants.
     #[test]
     fn network_delivery_boundary_variants_construct_and_debug() {
         let variants = [
@@ -2440,6 +2482,7 @@ mod tests {
                 generation: 2,
             },
             NetworkDeliveryBoundary::Disconnected { generation: 1 },
+            NetworkDeliveryBoundary::Shutdown { generation: 1 },
             NetworkDeliveryBoundary::CorrelationEvicted {
                 url: "https://example.com/evicted".into(),
             },

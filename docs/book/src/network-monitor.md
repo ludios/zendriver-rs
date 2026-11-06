@@ -163,6 +163,7 @@ same stream:
 | `Lagged { missed, generation }` | this subscription fell behind the connection's accounted event bus | clears all in-flight correlation state — a gap means any partial exchange spanning it can't be trusted |
 | `Reconnected { previous, generation }` | the transport re-established a fresh WebSocket | clears all in-flight correlation state — nothing from the old socket will ever complete |
 | `Disconnected { generation }` | the transport's WebSocket died unexpectedly | clears state, then **ends the monitor task** — see below |
+| `Shutdown { generation }` | the tab's connection was shut down while its WebSocket was alive: `tab.close()` or the drop of the tab's last handle (for a tab with its own socket), or `browser.reconnect()` retiring the tab | clears state, then **ends the monitor task** — see below |
 | `CorrelationEvicted { url }` | the in-flight correlation map exceeded its 10k bound | evicts one entry (previously silent beyond a `tracing` warning) |
 | `DecodeFailed` | a CDP payload didn't match the shape expected for its method | skips that one event only — no raw payload is ever included |
 | `Unknown` | a future transport-level variant this correlator doesn't yet recognize | conservatively clears state, but keeps running |
@@ -184,14 +185,13 @@ match event {
 }
 ```
 
-**`Disconnected` ends the monitor task — fail closed.** There is no
-automatic reconnect: once a `Disconnected` boundary is emitted, the
-correlator task returns and the [`NetworkMonitor`] stream ends (`None` on the
-next poll). A consumer that wants to keep observing across a transport blip
-must call `tab.monitor()...start()` again to spawn a fresh correlator.
-
-When the tab's connection is shut down on purpose instead (by `tab.close()`,
-for example), the stream just ends, with no boundary before it.
+**`Disconnected` and `Shutdown` end the monitor task — fail closed.** There
+is no automatic reconnect: once either boundary is emitted, the correlator
+task returns and the [`NetworkMonitor`] stream ends (`None` on the next
+poll), dropping any exchange still in flight. A consumer that wants to keep
+observing across a transport blip must call `tab.monitor()...start()` again
+to spawn a fresh correlator — after `browser.reconnect()`, on a tab from
+`browser.tabs()`.
 
 ### Bounded response bodies
 

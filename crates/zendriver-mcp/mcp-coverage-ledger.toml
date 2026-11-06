@@ -685,6 +685,10 @@ api = "zendriver::monitor::NetworkDeliveryBoundary::Disconnected"
 covered = "browser_monitor_read (delivery_boundary: boundary=\"disconnected\", generation)"
 
 [[entry]]
+api = "zendriver::monitor::NetworkDeliveryBoundary::Shutdown"
+covered = "browser_monitor_read (delivery_boundary: boundary=\"shutdown\", generation)"
+
+[[entry]]
 api = "zendriver::monitor::NetworkDeliveryBoundary::CorrelationEvicted"
 covered = "browser_monitor_read (delivery_boundary: boundary=\"correlation_evicted\", url)"
 

@@ -232,13 +232,14 @@ never errors out over this. See
 mechanism.
 
 `browser_monitor_read` can also return a `delivery_boundary` event: a
-lagged/reconnected/disconnected transport, a correlation-map eviction, or an
-undecodable payload on the underlying event stream, surfaced explicitly
-instead of silently dropped. Its `boundary` field is one of `"lagged"` |
-`"reconnected"` | `"disconnected"` | `"correlation_evicted"` |
-`"decode_failed"` | `"unknown"`, with `generation` / `missed` / `previous` /
-`url` populated depending on which. A `"disconnected"` boundary means the
-underlying monitor's correlator task has ended — no further events will ever
+lagged/reconnected/disconnected/shut-down transport, a correlation-map
+eviction, or an undecodable payload on the underlying event stream, surfaced
+explicitly instead of silently dropped. Its `boundary` field is one of
+`"lagged"` | `"reconnected"` | `"disconnected"` | `"shutdown"` |
+`"correlation_evicted"` | `"decode_failed"` | `"unknown"`, with `generation` /
+`missed` / `previous` / `url` populated depending on which. A
+`"disconnected"` or `"shutdown"` boundary means the underlying monitor's
+correlator task has ended — no further events will ever
 be buffered for that handle; call `browser_monitor_start` again for a fresh
 one. See [Network monitor](./network-monitor.md#delivery-loss-boundaries) for
 the full semantics.

@@ -2989,6 +2989,8 @@ pub zendriver::monitor::NetworkDeliveryBoundary::Lagged::missed: u64
 pub zendriver::monitor::NetworkDeliveryBoundary::Reconnected
 pub zendriver::monitor::NetworkDeliveryBoundary::Reconnected::generation: u64
 pub zendriver::monitor::NetworkDeliveryBoundary::Reconnected::previous: u64
+pub zendriver::monitor::NetworkDeliveryBoundary::Shutdown
+pub zendriver::monitor::NetworkDeliveryBoundary::Shutdown::generation: u64
 pub zendriver::monitor::NetworkDeliveryBoundary::Unknown
 impl core::clone::Clone for zendriver::monitor::NetworkDeliveryBoundary
 pub fn zendriver::monitor::NetworkDeliveryBoundary::clone(&self) -> zendriver::monitor::NetworkDeliveryBoundary
@@ -5642,6 +5644,8 @@ pub zendriver::NetworkDeliveryBoundary::Lagged::missed: u64
 pub zendriver::NetworkDeliveryBoundary::Reconnected
 pub zendriver::NetworkDeliveryBoundary::Reconnected::generation: u64
 pub zendriver::NetworkDeliveryBoundary::Reconnected::previous: u64
+pub zendriver::NetworkDeliveryBoundary::Shutdown
+pub zendriver::NetworkDeliveryBoundary::Shutdown::generation: u64
 pub zendriver::NetworkDeliveryBoundary::Unknown
 impl core::clone::Clone for zendriver::monitor::NetworkDeliveryBoundary
 pub fn zendriver::monitor::NetworkDeliveryBoundary::clone(&self) -> zendriver::monitor::NetworkDeliveryBoundary

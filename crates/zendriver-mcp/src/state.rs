@@ -322,15 +322,16 @@ pub enum MonitorEvent {
     /// its own correlation bookkeeping) — a wire mirror of
     /// `zendriver::NetworkDeliveryBoundary`. Previously these losses were
     /// silent; they're now explicit events on the same stream. A
-    /// `disconnected` boundary means the underlying lib-side monitor's
-    /// correlator task has ended — no further events will be buffered for
-    /// this handle; start a new monitor to resume.
+    /// `disconnected` or `shutdown` boundary means the underlying lib-side
+    /// monitor's correlator task has ended — no further events will be
+    /// buffered for this handle; start a new monitor to resume.
     DeliveryBoundary {
-        /// `"lagged"` | `"reconnected"` | `"disconnected"` |
+        /// `"lagged"` | `"reconnected"` | `"disconnected"` | `"shutdown"` |
         /// `"correlation_evicted"` | `"decode_failed"` | `"unknown"`.
         boundary: String,
-        /// Present for `lagged` / `reconnected` / `disconnected`: the
-        /// transport connection generation active when the boundary occurred.
+        /// Present for `lagged` / `reconnected` / `disconnected` /
+        /// `shutdown`: the transport connection generation active when the
+        /// boundary occurred.
         #[serde(skip_serializing_if = "Option::is_none")]
         generation: Option<u64>,
         /// Present for `lagged`: number of events this subscription missed.

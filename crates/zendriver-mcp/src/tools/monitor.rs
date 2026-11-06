@@ -312,6 +312,13 @@ fn convert_boundary(boundary: NetworkDeliveryBoundary) -> MonitorEvent {
             previous: None,
             url: None,
         },
+        NetworkDeliveryBoundary::Shutdown { generation } => MonitorEvent::DeliveryBoundary {
+            boundary: "shutdown".to_string(),
+            generation: Some(generation),
+            missed: None,
+            previous: None,
+            url: None,
+        },
         NetworkDeliveryBoundary::CorrelationEvicted { url } => MonitorEvent::DeliveryBoundary {
             boundary: "correlation_evicted".to_string(),
             generation: None,
@@ -669,6 +676,10 @@ mod tests {
             (
                 NetworkDeliveryBoundary::Disconnected { generation: 1 },
                 "disconnected",
+            ),
+            (
+                NetworkDeliveryBoundary::Shutdown { generation: 1 },
+                "shutdown",
             ),
             (
                 NetworkDeliveryBoundary::CorrelationEvicted {

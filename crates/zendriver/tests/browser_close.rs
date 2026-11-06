@@ -65,10 +65,10 @@ async fn close_ends_the_waits_on_a_tab() {
     );
 }
 
-/// `Tab::close` shuts the tab's socket down before Chrome closes the tab,
-/// and that ends what was waiting on the tab: an expectation fails with
-/// `EventStreamIncomplete` instead of waiting out its timeout, and a
-/// monitor's stream ends.
+/// `Tab::close` shuts the socket of a tab that has its own socket down
+/// before Chrome closes the tab, and that ends what was waiting on the tab:
+/// an expectation fails with `EventStreamIncomplete` instead of waiting out
+/// its timeout, and a monitor's last event is the shutdown.
 #[tokio::test]
 async fn tab_close_ends_the_waits_on_the_tab() {
     let server = FixtureServer::start().await;
@@ -86,8 +86,17 @@ async fn tab_close_ends_the_waits_on_the_tab() {
         matches!(matched, Err(ZendriverError::EventStreamIncomplete)),
         "{matched:?}"
     );
-    timeout(PROMPTLY, monitor.collect::<Vec<NetworkEvent>>())
+    let events: Vec<NetworkEvent> = timeout(PROMPTLY, monitor.collect())
         .await
         .expect("the monitor's stream outlived the tab");
+    assert!(
+        matches!(
+            events.last(),
+            Some(NetworkEvent::DeliveryBoundary(
+                NetworkDeliveryBoundary::Shutdown { .. }
+            ))
+        ),
+        "{events:?}"
+    );
     browser.close().await;
 }
