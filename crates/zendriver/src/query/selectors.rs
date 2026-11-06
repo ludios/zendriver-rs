@@ -812,8 +812,9 @@ async fn accessible_name_matches(
 // ---------------------------------------------------------------------
 
 /// Turn a `Runtime.evaluate` / `Runtime.callFunctionOn` reply whose
-/// script returns a *single node* into a `RemoteRef`. `response` is the
-/// whole CDP reply, so a thrown exception fails with
+/// script returns a *single node* into a `RemoteRef`. `response` is what
+/// the command returned (`{ result, exceptionDetails? }`), not its
+/// `result` field, so a thrown exception fails with
 /// [`ZendriverError::JsException`] instead of looking like no match. Null
 /// subtype (`document.querySelector` returned `null`) or `undefined` =>
 /// `Ok(None)`.
@@ -847,8 +848,9 @@ pub(crate) async fn extract_node_ref(
 /// Turn a `Runtime.evaluate` / `Runtime.callFunctionOn` reply whose
 /// script returns an *array* of nodes into a `Vec<RemoteRef>` by
 /// enumerating numeric properties via `Runtime.getProperties` and
-/// describing each element node. `response` is the whole CDP reply, so a
-/// thrown exception (such as the `SyntaxError` of an invalid CSS selector
+/// describing each element node. `response` is what the command returned
+/// (`{ result, exceptionDetails? }`), not its `result` field, so a thrown
+/// exception (such as the `SyntaxError` of an invalid CSS selector
 /// or regex) fails with [`ZendriverError::JsException`] instead of looking
 /// like no match. Empty array yields an empty Vec, not an error.
 ///
@@ -901,10 +903,9 @@ pub(crate) async fn extract_array_refs(
             });
         }
     }
-    // Sort by numeric index so the returned order matches the JS array
-    // order. `Runtime.getProperties` is documented as preserving
-    // insertion order in practice, but the explicit sort defends
-    // against engine-specific reorderings.
+    // `out` is in array order: `Runtime.getProperties` lists own
+    // properties in JavaScript's [[OwnPropertyKeys]] order, which puts an
+    // array's indices first, ascending.
     Ok(out)
 }
 

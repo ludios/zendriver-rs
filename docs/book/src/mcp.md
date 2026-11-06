@@ -114,7 +114,11 @@ starts_with | ends_with`. It is rejected for `has`, which has no value to
 fold case on, and for `regex`, whose pattern is made case-insensitive by
 wrapping it in a `(?i:…)` group (Chrome 125 or newer; JavaScript rejects a
 bare `(?i)` prefix). The same `(?i:…)` group is the only way to make
-`text_regex` case-insensitive. State-changing tools accept
+`text_regex` case-insensitive. `text_regex` is JavaScript `RegExp` syntax
+in both modes (so a lookbehind such as `(?<=Total: )\d+` works). A
+selector whose css, xpath or regex the page can't run is an
+`invalid_params` error that quotes the browser's message, rather than
+`found: false`. State-changing tools accept
 `return_snapshot: bool` for one-call action + observe. `browser_pdf` /
 `_save_mhtml` / `_download` return a binary-output shape (`{ byte_len,
 saved_path? , base64? }`): bytes go to `save_path` on the MCP host when

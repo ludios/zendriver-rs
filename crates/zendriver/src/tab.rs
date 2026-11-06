@@ -2711,7 +2711,8 @@ impl Tab {
     ///
     /// # Errors
     ///
-    /// Returns [`ZendriverError::ElementNotFound`] if no element matches.
+    /// Returns [`ZendriverError::ElementNotFound`] if no element matches,
+    /// and [`ZendriverError::JsException`] at once if `css` is invalid.
     ///
     /// # Examples
     ///
@@ -2733,7 +2734,8 @@ impl Tab {
     ///
     /// # Errors
     ///
-    /// Returns [`ZendriverError::ElementNotFound`] if no elements match.
+    /// Returns [`ZendriverError::ElementNotFound`] if no elements match,
+    /// and [`ZendriverError::JsException`] at once if `css` is invalid.
     ///
     /// # Examples
     ///

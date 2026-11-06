@@ -132,8 +132,8 @@ pub enum ZendriverError {
     /// starts with `Name: message`; for a thrown string, that string.
     ///
     /// A query (`tab.find()` and the like) also fails this way, at once, when
-    /// its CSS selector, XPath or regex is invalid: the string is then the
-    /// browser's `SyntaxError`.
+    /// its JavaScript throws, as it does when the query's CSS selector, XPath
+    /// or regex is invalid: the string is then the browser's `SyntaxError`.
     #[error("javascript exception: {0}")]
     JsException(String),
 

@@ -114,7 +114,8 @@ impl Element {
     /// # Errors
     ///
     /// Returns [`crate::error::ZendriverError::ElementNotFound`] if no element
-    /// matches.
+    /// matches, and [`crate::error::ZendriverError::JsException`] at once if
+    /// `css` is invalid.
     ///
     /// # Examples
     ///
@@ -137,7 +138,8 @@ impl Element {
     /// # Errors
     ///
     /// Returns [`crate::error::ZendriverError::ElementNotFound`] if no elements
-    /// match.
+    /// match, and [`crate::error::ZendriverError::JsException`] at once if
+    /// `css` is invalid.
     ///
     /// # Examples
     ///

@@ -902,9 +902,9 @@ impl<'scope> FindBuilder<'scope> {
     /// # Errors
     ///
     /// Returns [`ZendriverError::ElementNotFound`] if no element matches
-    /// within the timeout, and [`ZendriverError::JsException`] at once, without
-    /// waiting out the timeout, if the query's CSS selector, XPath or regex is
-    /// invalid.
+    /// within the timeout, and [`ZendriverError::JsException`] at once,
+    /// without waiting out the timeout, if the query's JavaScript throws, as
+    /// it does when the query's CSS selector, XPath or regex is invalid.
     ///
     /// # Examples
     ///
@@ -1031,7 +1031,9 @@ impl<'scope> FindBuilder<'scope> {
     }
 
     /// Like [`Self::one`], but returns `None` instead of erroring when no
-    /// element matches within the timeout.
+    /// element matches within the timeout. Any other error of
+    /// [`Self::one`], such as [`ZendriverError::JsException`] for an invalid
+    /// selector, is still returned.
     ///
     /// # Examples
     ///
@@ -1316,9 +1318,9 @@ impl<'scope> FindAllBuilder<'scope> {
     /// # Errors
     ///
     /// Returns [`ZendriverError::ElementNotFound`] if no element matches
-    /// within the timeout, and [`ZendriverError::JsException`] at once, without
-    /// waiting out the timeout, if the query's CSS selector, XPath or regex is
-    /// invalid.
+    /// within the timeout, and [`ZendriverError::JsException`] at once,
+    /// without waiting out the timeout, if the query's JavaScript throws, as
+    /// it does when the query's CSS selector, XPath or regex is invalid.
     ///
     /// # Examples
     ///
@@ -1420,7 +1422,9 @@ impl<'scope> FindAllBuilder<'scope> {
     }
 
     /// Like [`Self::many`], but returns an empty `Vec` instead of erroring
-    /// when no element matches within the timeout.
+    /// when no element matches within the timeout. Any other error of
+    /// [`Self::many`], such as [`ZendriverError::JsException`] for an
+    /// invalid selector, is still returned.
     ///
     /// # Examples
     ///
