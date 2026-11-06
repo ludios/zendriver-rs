@@ -31,9 +31,10 @@ struct Response {
 
 /// Watch `session` for the first 2xx response from an Imperva sensor.
 ///
-/// Returns the receiver that gets `()` then, and the guard that stops the
-/// watch when dropped. If `Network.enable` fails, the receiver's sender is
-/// dropped, and the bypass relies on polling alone.
+/// Returns a receiver that gets `()` when that response arrives (its sender
+/// is dropped if the session's events end first), and a guard that stops
+/// the watch when dropped. A failed `Network.enable` is only logged: the
+/// session may have Network enabled already (a `Tab`'s always has).
 pub(crate) fn spawn_signal(session: &SessionHandle) -> (oneshot::Receiver<()>, SignalGuard) {
     let (tx, rx) = oneshot::channel();
     // Subscribed before `Network.enable`, so no response between the two is
@@ -42,8 +43,7 @@ pub(crate) fn spawn_signal(session: &SessionHandle) -> (oneshot::Receiver<()>, S
     let session = session.clone();
     let task = tokio::spawn(async move {
         if let Err(e) = session.call("Network.enable", json!({})).await {
-            tracing::warn!(error = %e, "imperva: Network.enable failed; detecting clearance by polling only");
-            return;
+            tracing::warn!(error = %e, "imperva: Network.enable failed; watching for sensor responses anyway");
         }
         while let Some(ResponseReceived { response }) = responses.next().await {
             let is_sensor = SENSOR_URL_PARTS.iter().any(|p| response.url.contains(p));
@@ -74,8 +74,8 @@ mod tests {
     use zendriver_transport::testing::MockConnection;
 
     /// The signal comes from a sensor's 2xx response, not from another
-    /// URL's 2xx or a sensor's 403, and nothing is paused: the only command
-    /// sent is `Network.enable`.
+    /// URL's 2xx or a sensor's 403, even when `Network.enable` failed, and
+    /// nothing is paused: the only command sent is `Network.enable`.
     #[tokio::test]
     async fn a_sensor_2xx_response_signals_and_nothing_is_paused() {
         let (mut mock, conn) = MockConnection::pair();
@@ -85,7 +85,7 @@ mod tests {
         let enable = mock.recv_cmd_timeout(Duration::from_secs(2)).await;
         let (method, id) = enable.expect("no command sent");
         assert_eq!(method, "Network.enable");
-        mock.reply(id, json!({})).await;
+        mock.reply_err(id, -32000, "Network domain is busy").await;
 
         let respond = |url: &str, status: u16| json!({ "requestId": "R", "response": { "url": url, "status": status } });
         for (url, status) in [

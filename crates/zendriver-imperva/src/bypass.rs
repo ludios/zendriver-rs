@@ -251,9 +251,8 @@ impl<'tab> ImpervaBypass<'tab> {
         // reese84 device check to a CAPTCHA a few seconds in, so the loop owns
         // that branch and the pre-loop snapshot just primes it.
 
-        // Optional sensor-response fast path. The guard's `Drop` cooperatively
-        // cancels the spawned task (token check at every loop boundary)
-        // with `abort()` as a backstop.
+        // Optional sensor-response fast path. Dropping the guard aborts the
+        // watch.
         let (interception_rx, interception_guard) = if self.interception_enabled {
             let (rx, guard) = crate::sensor_signal::spawn_signal(self.session);
             (Some(rx), Some(guard))
@@ -444,7 +443,7 @@ impl<'tab> ImpervaBypass<'tab> {
                 () = tokio::time::sleep_until(deadline) => {
                     return Ok(ClearanceOutcome::TimedOut { last_surface });
                 }
-                Ok(()) = async {
+                _ = async {
                     match interception_rx.as_mut() {
                         Some(rx) => rx.await,
                         // Never-resolves fallback keeps this arm inert when
@@ -453,8 +452,10 @@ impl<'tab> ImpervaBypass<'tab> {
                         None => std::future::pending().await,
                     }
                 } => {
-                    // Drop the receiver so we don't re-await a closed channel
-                    // on the next iteration; loop body re-probes immediately.
+                    // The signal fired, or its sender is gone (the watch
+                    // ended). Either way the receiver is finished, and
+                    // polling it again would panic, so drop it; the loop
+                    // body re-probes at once.
                     interception_rx = None;
                 }
             }
@@ -1450,6 +1451,49 @@ mod tests {
 
         let err = fut.await.unwrap().unwrap_err();
         assert!(matches!(err, ImpervaError::CaptchaSolver(_)));
+        conn.shutdown();
+    }
+
+    /// A watch that ends without signalling (its sender dropped) leaves the
+    /// loop polling until the deadline, rather than polling the finished
+    /// receiver again, which panics.
+    #[tokio::test]
+    async fn poll_loop_keeps_polling_after_the_signal_sender_is_dropped() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        drop(tx);
+        let fut = tokio::spawn({
+            let s = sess.clone();
+            async move {
+                ImpervaBypass::new(&s)
+                    .poll_interval(Duration::from_millis(5))
+                    .poll_loop(
+                        Instant::now() + Duration::from_millis(100),
+                        None,
+                        Some(rx),
+                        None,
+                    )
+                    .await
+            }
+        });
+        while let Some((_, id)) = mock.recv_cmd_timeout(Duration::from_millis(300)).await {
+            mock.reply(
+                id,
+                snapshot_reply(json!({
+                    "surface": { "kind": "Reese84" },
+                    "reese84": null,
+                    "body_clean": false,
+                    "sessions": [],
+                    "has_imperva_signal": true,
+                })),
+            )
+            .await;
+        }
+        match fut.await.unwrap().unwrap() {
+            ClearanceOutcome::TimedOut { .. } => {}
+            other => panic!("expected TimedOut, got {other:?}"),
+        }
         conn.shutdown();
     }
 

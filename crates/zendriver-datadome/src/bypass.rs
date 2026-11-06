@@ -159,8 +159,7 @@ impl<'tab> DataDomeBypass<'tab> {
 
         // Optional sensor-response fast path. Spawned before any escalation so
         // the CAPTCHA route gets the same fast wake-up as the device-check
-        // route. The guard's `Drop` cooperatively cancels the spawned task
-        // (token check at every loop boundary) with `abort()` as a backstop.
+        // route. Dropping the guard aborts the watch.
         let (interception_rx, interception_guard) = if self.interception_enabled {
             let (rx, guard) = crate::sensor_signal::spawn_signal(self.session);
             (Some(rx), Some(guard))
@@ -340,7 +339,7 @@ impl<'tab> DataDomeBypass<'tab> {
                 () = tokio::time::sleep_until(deadline) => {
                     return Ok(ClearanceOutcome::TimedOut { last_surface });
                 }
-                Ok(()) = async {
+                _ = async {
                     match interception_rx.as_mut() {
                         Some(rx) => rx.await,
                         // Never-resolves fallback keeps this arm inert when
@@ -349,8 +348,10 @@ impl<'tab> DataDomeBypass<'tab> {
                         None => std::future::pending().await,
                     }
                 } => {
-                    // Drop the receiver so we don't re-await a closed channel
-                    // on the next iteration; loop body re-probes immediately.
+                    // The signal fired, or its sender is gone (the watch
+                    // ended). Either way the receiver is finished, and
+                    // polling it again would panic, so drop it; the loop
+                    // body re-probes at once.
                     interception_rx = None;
                 }
             }
@@ -700,6 +701,39 @@ mod tests {
         });
         // First in-loop probe is received but NEVER answered → deadline fires.
         let _id = mock.expect_cmd("Runtime.evaluate").await;
+        match fut.await.unwrap().unwrap() {
+            ClearanceOutcome::TimedOut { .. } => {}
+            other => panic!("expected TimedOut, got {other:?}"),
+        }
+        conn.shutdown();
+    }
+
+    /// A watch that ends without signalling (its sender dropped) leaves the
+    /// loop polling until the deadline, rather than polling the finished
+    /// receiver again, which panics.
+    #[tokio::test]
+    async fn poll_loop_keeps_polling_after_the_signal_sender_is_dropped() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        drop(tx);
+        let fut = tokio::spawn({
+            let s = sess.clone();
+            async move {
+                DataDomeBypass::new(&s)
+                    .poll_interval(Duration::from_millis(5))
+                    .poll_loop(
+                        Instant::now() + Duration::from_millis(100),
+                        None,
+                        Some(rx),
+                        None,
+                    )
+                    .await
+            }
+        });
+        while let Some((_, id)) = mock.recv_cmd_timeout(Duration::from_millis(300)).await {
+            mock.reply(id, snap_reply(device_check_snap())).await;
+        }
         match fut.await.unwrap().unwrap() {
             ClearanceOutcome::TimedOut { .. } => {}
             other => panic!("expected TimedOut, got {other:?}"),
