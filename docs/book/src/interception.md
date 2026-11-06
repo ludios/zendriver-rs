@@ -1,10 +1,9 @@
 # Interception
 
-The `interception` Cargo feature wraps Chrome's [`Fetch`] CDP domain in a
-fluent rule-based API plus a lower-level `Stream` of paused requests. It
-lets you block, redirect, synthesize, or rewrite any subresource a page
-asks for — useful for ad blocking, response mocking, header injection,
-and offline-replay tests.
+The `interception` Cargo feature wraps Chrome's [`Fetch`] CDP domain: it
+lets you block, redirect, synthesize, or rewrite any request a page makes —
+useful for ad blocking, response mocking, header injection, and
+offline-replay tests.
 
 [`Fetch`]: https://chromedevtools.github.io/devtools-protocol/tot/Fetch/
 
@@ -15,35 +14,95 @@ Enable it in `Cargo.toml`:
 zendriver = { version = "0.1", features = ["interception"] }
 ```
 
-The entry point is [`Tab::intercept`], which returns an
-[`InterceptBuilder`] for one layer of that tab's interception. The builder
-has two terminal methods, both `async`: [`start`] adds a layer of
-declarative rules, and [`subscribe`] adds a layer that hands each paused
-request to the returned stream, for the manual escape-hatch path. Both
-return once Chrome intercepts, so a request sent afterwards is
-intercepted.
+## One ordered list per tab
 
-[`Tab::intercept`]: https://docs.rs/zendriver/latest/zendriver/struct.Tab.html#method.intercept
-[`InterceptBuilder`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html
-[`start`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html#method.start
-[`subscribe`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html#method.subscribe
+A tab's interception is **one ordered list of entries**, each one rule or
+one stream, and the **first entry that fits a paused request decides it**.
+Every insertion says where in the list it goes: `Position::First`,
+`Position::Last`, `Position::Before(id)` or `Position::After(id)`. Nothing
+is ordered behind your back, and [`snapshot`] shows the list as a paused
+request walks it. In full (from [`zendriver::interception`]):
 
-## Rule-based API
+1. `insert`, `start`, `subscribe` and `move_rule` put entries where their
+   `Position` says in the list as it is at that moment; a builder's rules go
+   in consecutively, in call order. Removing an entry keeps the others'
+   order. A `Before(id)` / `After(id)` naming no entry is an error.
+2. Chrome pauses a request at the Request stage when some `Request` entry
+   fits its URL and resource type, or while proxy credentials are set (every
+   request, or only documents under `AuthPause::DocumentsOnly`), and at the
+   Response stage when some `ResponseHeaders` or `ResponseError` entry fits.
+3. A pause's kind is `Request`, `ResponseHeaders` (Chrome has a status, 4xx
+   and 5xx included) or `ResponseError` (the request failed before any
+   status).
+4. The first entry, front to back, whose `Match` fits the pause (its kind,
+   URL and resource type) decides it: its action answers Chrome, and no
+   later entry runs. A pause no entry fits is continued unchanged.
+5. Every pause walks the list anew: deciding a Request pause says nothing
+   about the Response pause, and each 3xx hop is a new request to Chrome.
+6. A stream entry owns every pause it decides: the consumer answers each
+   through its `PausedRequest`.
+7. A proxy's challenge gets the tab's credentials once; a repeated
+   challenge is cancelled; a server's challenge always gets Chrome's
+   default.
 
-The rule methods chain on the builder and dispatch the matching
-terminal action automatically when the URL pattern fires. Patterns use
-CDP wildcard syntax, with Chrome's meaning: `*` matches any characters, `?`
-matches zero or one character, and `\` makes the next character literal
-(`\*` matches a `*`).
+With [tracker blocking](#tracker--fingerprinter-blocklist) on, a tab's list
+starts with the entry `browser.trackers`. A rule at `Last` comes after it,
+so tracker requests stay blocked whatever the rule does; a rule at `First`
+decides the tracker requests it fits ahead of it, so `allow` or
+`modify_request` there lets them through, visibly so in the call and in
+[`snapshot`].
+
+[`snapshot`]: https://docs.rs/zendriver/latest/zendriver/interception/struct.Interceptor.html#method.snapshot
+[`zendriver::interception`]: https://docs.rs/zendriver/latest/zendriver/interception/interceptor/index.html
+
+## Rules
+
+[`Tab::intercept`] returns an [`InterceptBuilder`], shorthand for
+inserting rules: each method adds one rule, and [`start`] inserts them at
+the `Position` it is given and returns once Chrome intercepts, so a request
+sent afterwards is decided by them. Each method's `glob` is matched against
+the request's URL in CDP wildcard syntax, with Chrome's meaning: `*` matches
+any characters, `?` matches zero or one character, and `\` makes the next
+character literal (`\*` matches a `*`).
 
 | Method | Action | Use case |
 |--------|--------|----------|
 | [`block`] | `Fetch.failRequest` with `BlockedByClient` | Ad / tracker blocking |
-| [`redirect`] | `Fetch.continueRequest` with new URL | Move an endpoint without page changes |
-| [`respond`] | `Fetch.fulfillRequest` with synthetic body | Mock an API for tests |
+| `block_hosts` | the same, for a set of hosts and their subdomains | Large blocklists |
+| `allow` | `Fetch.continueRequest`, unchanged | An exception ahead of a broader entry |
+| [`redirect`] | `Fetch.continueRequest` with a new URL | Move an endpoint without page changes |
+| [`respond`] | `Fetch.fulfillRequest` with a synthetic body | Mock an API for tests |
 | [`modify_request`] | `Fetch.continueRequest` with overrides | Inject headers, change method/body |
-| [`modify_response`] | `Fetch.continueResponse` with overrides, once the response is in | Change a response's status or headers |
+| [`modify_response`] | `Fetch.continueResponse` with overrides, at the `ResponseHeaders` pause | Change a response's status or headers |
 
+For anything else — another kind of pause, a resource type, a label — build
+a `Rule` from a `Match` and an `Action` and add it with `.rule(..)`, or
+`insert` it through [`Tab::interceptor`]:
+
+```rust,ignore
+use zendriver::interception::{AbortReason, Action, Match, PauseKind, Position, ResourceType, Rule};
+
+// Serve a stand-in when the API can't be reached at all.
+let offline = Match::url("*/api/*")?.at(PauseKind::ResponseError);
+let stand_in = Action::Respond { status: 503, headers: vec![], body: b"offline".to_vec() };
+// Block third-party scripts only.
+let scripts = Match::url("https://cdn.example.com/*")?.resource(ResourceType::Script);
+let _rules = tab
+    .interceptor()
+    .insert(
+        vec![
+            Rule::new(offline, stand_in)?.label("api offline"),
+            Rule::new(scripts, Action::Block(AbortReason::BlockedByClient))?,
+        ],
+        Position::Last,
+    )
+    .await?;
+```
+
+[`Tab::intercept`]: https://docs.rs/zendriver/latest/zendriver/struct.Tab.html#method.intercept
+[`Tab::interceptor`]: https://docs.rs/zendriver/latest/zendriver/struct.Tab.html#method.interceptor
+[`InterceptBuilder`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html
+[`start`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html#method.start
 [`block`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html#method.block
 [`redirect`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html#method.redirect
 [`respond`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html#method.respond
@@ -56,18 +115,17 @@ matches zero or one character, and `\` makes the next character literal
 {{#include ../../../crates/zendriver/examples/intercept_block_ads.rs}}
 ```
 
-[`start`] returns an [`InterceptHandle`]. The handle keeps the rules in
-force — when you drop it, its layer is removed, and the tab's other layers
-keep working (`Fetch.disable` is sent once no layer is left). Await
-[`stop`] instead of dropping it to wait until Chrome has applied the
-change. **Bind the handle to a variable; letting it drop immediately
-silently removes its rules.**
-Use `let _intercept = ...` (note the leading underscore: a plain `_` is
-no binding at all, so the handle drops at the end of the statement, not
-of the scope).
+[`start`] returns an [`InterceptHandle`]. The handle keeps its rules in the
+list — when you drop it, they are removed, and the tab's other entries
+keep their order (`Fetch.disable` is sent once no entry and no credentials
+are left). Await [`stop`] instead of dropping it to wait until Chrome has
+applied the change. **Bind the handle to a variable; letting it drop
+immediately silently removes its rules.** Use `let _intercept = ...` (note
+the leading underscore: a plain `_` is no binding at all, so the handle
+drops at the end of the statement, not of the scope).
 
-[`stop`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptHandle.html#method.stop
 [`InterceptHandle`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptHandle.html
+[`stop`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptHandle.html#method.stop
 [`RequestInfo`]: https://docs.rs/zendriver/latest/zendriver/struct.RequestInfo.html
 
 ### Modifying headers
@@ -90,56 +148,42 @@ since CDP sends those as an array.
 
 The closure runs synchronously per-event on the tab's interception task;
 it should not block, and can't wait for anything async. When deciding the
-override needs an async call, use the [stream API](#stream-api) instead.
+override needs an async call, use a [stream](#streams) instead.
 
-### Redirect and synthesize
+### Exceptions and order
+
+Since the first fitting entry decides, an exception goes ahead of the
+broader entry it excepts:
 
 ```rust,ignore
-let _intercept = tab.intercept()
-    .redirect("*/old-api/*", "https://example.com/new-api/")?
-    .respond(
-        "*/api/health*",
-        200,
-        vec![("content-type".into(), "application/json".into())],
-        b"{\"ok\":true}".to_vec(),
-    )?
-    .start()
+use zendriver::interception::Position;
+
+let block_api = tab.intercept().block("*/api/*")?.start(Position::Last).await?;
+let _health = tab
+    .intercept()
+    .respond("*/api/health", 200, vec![], b"ok".to_vec())?
+    .start(Position::Before(block_api.ids()[0]))
     .await?;
+// /api/health gets the stand-in; every other /api/ request is blocked.
 ```
 
-Both `redirect` and `respond` reach an internal `Fetch.continueRequest`
-or `Fetch.fulfillRequest` — the first rule that matches decides per event,
-so a single `InterceptHandle` can host any mix of the rule types.
+Two rules of one `start` go in in call order, so within one builder the
+earlier rule wins where both fit. `move_rule` moves an entry later, and
+`remove` takes out any entry, `browser.trackers` included.
 
-### Several layers on one tab
-
-Each `start()` or `subscribe()` adds a layer, and a tab's layers share its
-one `Fetch` configuration: Chrome pauses what any of them asks for. A
-paused request goes to the layers newest first. A layer considers it only
-if one of its own patterns matches the request's URL, resource type and
-stage; a rule layer takes it if one of its rules matches, a stream layer
-takes every request it considers, and a request no layer takes is
-continued unchanged. So a later layer overrides an earlier one where both
-apply, and leaves it working everywhere else. The browser's own
-[tracker blocking](#tracker--fingerprinter-blocklist) and proxy
-credentials are the tab's oldest layer. A proxy's challenge gets the
-credentials of the newest layer that has some.
-
-## Stream API
+## Streams
 
 When rules are too restrictive — e.g. you need to inspect the upstream
 response body before deciding what to do, or you want to forward events
-to your own pipeline — call [`subscribe`] instead of `start`:
+to your own pipeline — [`subscribe`] inserts a stream entry instead:
 
 ```rust,ignore
 use futures::StreamExt;
-use zendriver::{AbortReason, RequestStage};
+use zendriver::interception::{Match, PauseKind, Position};
+use zendriver::AbortReason;
 
-let mut stream = tab
-    .intercept()
-    .at_response()  // pause AFTER headers come back
-    .subscribe()
-    .await?;
+let responses = Match::url("*")?.at(PauseKind::ResponseHeaders);
+let mut stream = tab.interceptor().subscribe(responses, Position::Last).await?;
 
 while let Some(paused) = stream.next().await {
     let body = paused.body().await?;
@@ -152,16 +196,16 @@ while let Some(paused) = stream.next().await {
 ```
 
 Each [`PausedRequest`] is consumed by exactly one of
-[`continue_`] / [`abort`] / [`respond`] / [`modify_and_continue`] /
-[`continue_response`] (at the `Response` stage). The
-[`body`] method is `&self` and reads the upstream response body
-non-destructively — only useful at the `Response` stage; at the `Request`
-stage Chrome has no body yet.
+[`continue_`] / [`abort`] / [`respond`][paused-respond] / [`modify_and_continue`] /
+[`continue_response`] (at a `ResponseHeaders` pause). The [`body`] method
+is `&self` and reads the upstream response body non-destructively — only
+useful at a `ResponseHeaders` pause; before the response Chrome has no body.
 
+[`subscribe`]: https://docs.rs/zendriver/latest/zendriver/interception/struct.Interceptor.html#method.subscribe
 [`PausedRequest`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html
 [`continue_`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.continue_
 [`abort`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.abort
-[`respond`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.respond
+[paused-respond]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.respond
 [`modify_and_continue`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.modify_and_continue
 [`continue_response`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.continue_response
 [`body`]: https://docs.rs/zendriver/latest/zendriver/struct.PausedRequest.html#method.body
@@ -177,15 +221,31 @@ logs it and continues the request unchanged. And if the tab's interception
 ever falls so far behind that it loses events (a pause it never saw would
 stay paused), it disables and re-enables `Fetch`, which continues every
 paused request, those a stream holds included. When the tab's socket
-closes or its session detaches, its layers are dropped, which ends their
+closes or its session detaches, its entries are dropped, which ends their
 streams.
+
+## Proxy credentials
+
+A tab's proxy credentials are one setting, outside the list:
+[`set_proxy_auth`] replaces them (`None` removes them). `BrowserBuilder::proxy_auth`
+sets them on every tab of the default browser context, and
+`BrowserContextBuilder::proxy_auth` on every tab of that context. They go
+only to a proxy's challenge, never to a site's (HTTP 401). Chrome surfaces a
+challenge only for a request it paused at the Request stage, so while
+credentials are set it pauses every request (`AuthPause::EveryRequest`), or
+only documents (`AuthPause::DocumentsOnly`: fewer round trips, but a 407 on
+another request's connection is missed unless an entry pauses it).
+
+[`set_proxy_auth`]: https://docs.rs/zendriver/latest/zendriver/interception/struct.Interceptor.html#method.set_proxy_auth
 
 ## Tracker / fingerprinter blocklist
 
 The `tracker-blocking` feature builds a ready-made host-blocking rule on top
 of interception, so you can block third-party trackers and fingerprinters
-without writing patterns. Enable it on the builder and it installs on the main
-tab and every new tab automatically.
+without writing patterns. Enable it on the builder and every tab starts with
+it, as the first entry of its list, `browser.trackers` (see
+[One ordered list per tab](#one-ordered-list-per-tab)); its id is
+[`Tab::tracker_blocking`].
 
 ```toml
 [dependencies]
@@ -222,40 +282,11 @@ launch. The body is decoded as UTF-8 lossily, so a list whose licence header
 carries a latin-1 byte still loads: host lines are ASCII, and the replacement
 character only ever lands in text the parser discards.
 
+[`Tab::tracker_blocking`]: https://docs.rs/zendriver/latest/zendriver/struct.Tab.html#method.tracker_blocking
 [`block_trackers(true)`]: https://docs.rs/zendriver/latest/zendriver/struct.BrowserBuilder.html#method.block_trackers
 [`tracker_blocklist_add`]: https://docs.rs/zendriver/latest/zendriver/struct.BrowserBuilder.html#method.tracker_blocklist_add
 [`tracker_blocklist_file`]: https://docs.rs/zendriver/latest/zendriver/struct.BrowserBuilder.html#method.tracker_blocklist_file
 [`tracker_blocklist_url`]: https://docs.rs/zendriver/latest/zendriver/struct.BrowserBuilder.html#method.tracker_blocklist_url
-
-## Pattern + stage filters
-
-By default a rule layer pauses for each rule its URL pattern, at the
-`Response` stage for `modify_response` and at the `Request` stage for the
-others; `block_hosts` and proxy credentials pause every request at the
-`Request` stage. A `subscribe()` stream pauses every request
-at the `Request` stage. Choose the patterns yourself with builder
-modifiers:
-
-```rust,ignore
-use zendriver::ResourceType;
-
-let _h = tab.intercept()
-    .pattern("*/static/*")   // URL filter for next-emitted RequestPattern
-    .resource(ResourceType::Image)  // only images
-    .at_response()           // pause after response headers, not before request
-    .block("*/static/*")?
-    .start()
-    .await?;
-```
-
-Each call to `pattern()` opens a new `Fetch.RequestPattern`; chained
-`resource` / `at_request` / `at_response` modifiers mutate that most-recent
-pattern. The patterns are also the requests the layer considers (see
-[Several layers on one tab](#several-layers-on-one-tab)). Within a layer,
-the first rule that matches the URL and can act at the stage wins: a
-`modify_response` rule is skipped before there is a response, and
-`redirect` / `modify_request` after, so a later rule can take the
-request.
 
 ## Gotchas
 
@@ -264,9 +295,9 @@ request.
   latency. On heavy pages, expect 10-30% throughput loss even with a
   no-op `continue_` handler. Scope patterns tightly; prefer
   resource-type filters over `*` patterns.
-- **A stream layer takes everything it pauses.** A `subscribe()` with the
-  default `*` pattern sees every request before any older layer does,
-  tracker blocking included: block or continue each one yourself.
+- **A stream decides everything it fits.** A `subscribe()` of `*` at
+  `First` gets every request ahead of every other entry, tracker requests
+  included: block or continue each one yourself, or put it at `Last`.
 - **CSP-restricted pages.** `Fetch.fulfillRequest` synthesizes responses
   that may violate a page's `Content-Security-Policy` (especially for
   scripts). Combine with `StealthProfile::spoofed()` which sets
@@ -277,7 +308,11 @@ request.
 
 ## See also
 
-- [`InterceptBuilder` rustdoc] for every modifier method.
+- [`InterceptBuilder` rustdoc] for every shorthand method, and the
+  [`zendriver::interception`] module for `Interceptor`, `Rule`, `Match`,
+  `Action` and `Position`.
+- The [design record](https://github.com/TurtIeSocks/zendriver-rs/blob/main/docs/api-audit/interception-precedence.md)
+  of the ordered list.
 - [`Expect()`](./expect.md) for the orthogonal "wait for this network
   event" surface — `expect_request` observes without holding traffic;
   `intercept` actively rewrites it.

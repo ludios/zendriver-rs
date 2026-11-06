@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use zendriver::Browser;
+use zendriver::interception::Position;
 use zendriver_testkit::{FixtureServer, SITE_A, assert_eventually, eval, launch_for_test, load};
 
 /// The tabs from before a reconnect lose their own sockets: a call on one
@@ -21,7 +22,7 @@ async fn reconnect_closes_the_sockets_of_the_tabs_from_before() {
         .intercept()
         .respond("*/plain?old-rule", 200, Vec::new(), b"old rule".to_vec())
         .unwrap()
-        .start()
+        .start(Position::Last)
         .await
         .unwrap();
 

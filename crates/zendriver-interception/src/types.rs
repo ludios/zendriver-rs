@@ -1,30 +1,35 @@
 //! Public types for the Fetch interception API.
 //!
-//! - [`RequestStage`] selects which lifecycle point Chrome pauses on.
+//! - [`PauseKind`] says what a paused request is waiting on.
 //! - [`ResourceType`] mirrors Chrome's `Network.ResourceType` enum.
 //! - [`AbortReason`] mirrors Chrome's `Network.ErrorReason` enum used by
 //!   `Fetch.failRequest`.
 //! - [`RequestInfo`] / [`ResponseInfo`] / [`RequestOverrides`] carry the
 //!   payloads surfaced to user code via the rule + stream APIs.
 
-/// The lifecycle stage at which Chrome pauses an intercepted request.
-///
-/// Maps to the `stage` field of CDP's `Fetch.RequestPattern`.
+/// What a paused request is waiting on. Chrome pauses a request before
+/// sending it, and again once its response's headers are in or it has
+/// failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
-pub enum RequestStage {
-    /// Pause before the request is sent.
+pub enum PauseKind {
+    /// Before the request is sent (CDP's `Request` stage).
     Request,
-    /// Pause after the response headers have been received.
-    Response,
+    /// The response's status and headers are in, a 4xx or 5xx one included
+    /// (CDP's `Response` stage).
+    ResponseHeaders,
+    /// The request failed before any response came, e.g. the connection was
+    /// refused (CDP's `Response` stage, with a `responseErrorReason`).
+    ResponseError,
 }
 
-impl RequestStage {
-    /// CDP wire-string for this stage (`"Request"` / `"Response"`).
+impl PauseKind {
+    /// The CDP stage (`"Request"` / `"Response"`) Chrome pauses at for this
+    /// kind.
     #[must_use]
-    pub fn as_cdp_str(&self) -> &'static str {
+    pub fn as_cdp_stage(&self) -> &'static str {
         match self {
             Self::Request => "Request",
-            Self::Response => "Response",
+            Self::ResponseHeaders | Self::ResponseError => "Response",
         }
     }
 }
@@ -245,9 +250,10 @@ mod tests {
     #[test]
     fn enum_cdp_strings_snapshot() {
         let pairs = serde_json::json!({
-            "RequestStage": [
-                ["Request", RequestStage::Request.as_cdp_str()],
-                ["Response", RequestStage::Response.as_cdp_str()],
+            "PauseKind": [
+                ["Request", PauseKind::Request.as_cdp_stage()],
+                ["ResponseHeaders", PauseKind::ResponseHeaders.as_cdp_stage()],
+                ["ResponseError", PauseKind::ResponseError.as_cdp_stage()],
             ],
             "ResourceType": [
                 ["Document", ResourceType::Document.as_cdp_str()],

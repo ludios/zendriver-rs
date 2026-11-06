@@ -192,7 +192,7 @@ Two paths:
 
 - **Observe only** — use [`expect_request`](./expect.md) /
   `expect_response` for individual events, or stash a
-  `tab.intercept().subscribe()` stream that auto-`continue_()`s and logs
+  `tab.interceptor().subscribe(..)` stream that auto-`continue_()`s and logs
   each `PausedRequest`.
 - **Modify** — use [`Interception`](./interception.md)'s rule API
   (block / redirect / respond / modify_request / modify_response).

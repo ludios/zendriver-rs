@@ -20,6 +20,7 @@ use serial_test::serial;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zendriver::Browser;
+use zendriver::interception::Position;
 
 #[tokio::test]
 #[serial]
@@ -65,7 +66,7 @@ async fn interception_block_rule_prevents_request() {
         .intercept()
         .block("*/blocked/*")
         .unwrap()
-        .start()
+        .start(Position::Last)
         .await
         .unwrap();
 
@@ -130,7 +131,7 @@ async fn interception_respond_serves_fake_body() {
             body,
         )
         .unwrap()
-        .start()
+        .start(Position::Last)
         .await
         .unwrap();
 

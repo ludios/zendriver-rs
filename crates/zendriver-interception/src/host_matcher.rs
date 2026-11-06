@@ -50,6 +50,13 @@ impl HostMatcher {
         self.blocked.is_empty()
     }
 
+    /// The blocked host names, sorted.
+    pub fn hosts(&self) -> Vec<&str> {
+        let mut hosts: Vec<&str> = self.blocked.iter().map(String::as_str).collect();
+        hosts.sort_unstable();
+        hosts
+    }
+
     /// Returns `true` if `host` is blocked.
     ///
     /// Matching is suffix-on-dot: `a.b.evil.com` is blocked when `evil.com`

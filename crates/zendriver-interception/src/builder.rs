@@ -1,95 +1,43 @@
-//! [`InterceptBuilder`] — fluent rule + pattern registration.
+//! [`InterceptBuilder`]: shorthand for inserting several [`Rule`]s at once.
 //!
-//! Two-phase API:
-//! - **Configure**: chain [`block`], [`block_hosts`], [`redirect`], [`respond`],
-//!   [`modify_request`], [`modify_response`] for declarative rules, plus
-//!   [`pattern`] / [`at_request`] / [`at_response`] / [`resource`] to control
-//!   which CDP `Fetch.RequestPattern` entries are sent on `Fetch.enable`.
-//! - **Activate**: [`start`](InterceptBuilder::start) adds the rules, with
-//!   the patterns, to the session's [`Interceptor`] as one layer, returning
-//!   an [`InterceptHandle`] that removes the layer when dropped.
-//!   Alternatively, [`subscribe`](InterceptBuilder::subscribe) adds a layer
-//!   that hands each paused request to the returned [`InterceptStream`], for
-//!   the caller to release.
+//! Each method adds one rule, and [`start`](InterceptBuilder::start) puts
+//! them into the session's interception, consecutively and in call order, at
+//! the [`Position`] it is given, under one [`InterceptHandle`]. A rule the
+//! methods can't express goes in with [`rule`](InterceptBuilder::rule).
 //!
 //! `Tab::intercept()` in `zendriver` builds on the tab's [`Interceptor`].
-//!
-//! [`block`]: InterceptBuilder::block
-//! [`block_hosts`]: InterceptBuilder::block_hosts
-//! [`redirect`]: InterceptBuilder::redirect
-//! [`respond`]: InterceptBuilder::respond
-//! [`modify_request`]: InterceptBuilder::modify_request
-//! [`modify_response`]: InterceptBuilder::modify_response
-//! [`pattern`]: InterceptBuilder::pattern
-//! [`at_request`]: InterceptBuilder::at_request
-//! [`at_response`]: InterceptBuilder::at_response
-//! [`resource`]: InterceptBuilder::resource
 
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
-
 use crate::error::InterceptionError;
 use crate::host_matcher::HostMatcher;
-use crate::interceptor::{Filter, InterceptHandle, InterceptStream, Interceptor, Layer, Responder};
-use crate::rule::Rule;
+use crate::interceptor::{InterceptHandle, Interceptor, Position};
+use crate::rule::{Action, Match, Rule};
 use crate::types::{
-    RequestInfo, RequestOverrides, RequestStage, ResourceType, ResponseInfo, ResponseOverrides,
+    AbortReason, PauseKind, RequestInfo, RequestOverrides, ResponseInfo, ResponseOverrides,
 };
-use crate::url_pattern::UrlPattern;
 
-/// A pending `Fetch.RequestPattern` entry to send on `Fetch.enable`.
+/// Fluent shorthand for inserting several rules into a session's
+/// interception at once.
 ///
-/// CDP's [`Fetch.RequestPattern`] takes an optional `urlPattern`,
-/// `resourceType`, and `requestStage`. We mirror it 1:1 here. The builder
-/// accumulates these via [`InterceptBuilder::pattern`] / `at_request` /
-/// `at_response` / `resource`, mutating the last-pushed entry per chain — so
-/// `builder.pattern("*").at_response().resource(Image)` produces a single
-/// `RequestPattern` with all three fields set.
-///
-/// [`Fetch.RequestPattern`]: https://chromedevtools.github.io/devtools-protocol/tot/Fetch/#type-RequestPattern
-#[derive(Debug, Clone, Default)]
-pub struct RequestPattern {
-    /// URL pattern in CDP wildcard syntax. `None` means "match any URL"
-    /// (CDP default).
-    pub url_pattern: Option<String>,
-    /// Resource type filter (e.g. `Image`, `XHR`). `None` means "all types".
-    pub resource_type: Option<ResourceType>,
-    /// Lifecycle stage at which to pause. `None` means CDP's default
-    /// (`Request`).
-    pub request_stage: Option<RequestStage>,
-}
-
-/// Fluent builder for one layer of a session's interception.
-///
-/// Construct via `Tab::intercept()` (gated `feature = "interception"`) or
-/// [`InterceptBuilder::new`]. Chain configuration methods to register rules
-/// and declare the CDP `Fetch` patterns, then call [`start`](Self::start) to
-/// have the rules applied, or [`subscribe`](Self::subscribe) to release each
-/// paused request yourself.
+/// Every method that takes a `glob` matches it against the request's URL
+/// (CDP wildcard syntax; see [`crate::UrlPattern`]) at the
+/// [`Request`](PauseKind::Request) pause, for any resource type, except
+/// [`modify_response`](Self::modify_response), which matches at the
+/// [`ResponseHeaders`](PauseKind::ResponseHeaders) pause. Those methods
+/// fail with [`InterceptionError::InvalidPattern`] for a `glob` that
+/// doesn't compile.
 //
 // `Debug` works because `Rule` has a hand-written `Debug` impl that renders
-// the closure variant's body as `<closure>`. Inner `Vec<Rule>` derives via
-// that.
+// the closure variant's body as `<closure>`.
 #[derive(Debug)]
 pub struct InterceptBuilder {
     interceptor: Interceptor,
-    patterns: Vec<RequestPattern>,
     rules: Vec<Rule>,
-    /// Optional proxy credentials. When set, `Fetch.enable` is sent with
-    /// `handleAuthRequests: true` and a proxy's `Fetch.authRequired` is
-    /// answered with these credentials. See cdpdriver/zendriver#208.
-    proxy_auth: Option<(String, String)>,
-    /// The pattern that pauses requests for `proxy_auth`, whose challenges
-    /// Chrome surfaces only for paused requests: every request's, or only
-    /// documents' ([`handle_proxy_auth_scoped_to_document`]).
-    ///
-    /// [`handle_proxy_auth_scoped_to_document`]: Self::handle_proxy_auth_scoped_to_document
-    auth_pattern: RequestPattern,
 }
 
 impl InterceptBuilder {
-    /// Construct a fresh builder for a layer of `interceptor`'s session.
+    /// A builder for rules of `interceptor`'s session.
     ///
     /// End users go through `Tab::intercept()` rather than calling this
     /// directly.
@@ -97,11 +45,11 @@ impl InterceptBuilder {
     /// ```no_run
     /// # async fn ex(interceptor: &zendriver_interception::Interceptor)
     /// #   -> Result<(), zendriver_interception::InterceptionError> {
-    /// use zendriver_interception::InterceptBuilder;
+    /// use zendriver_interception::{InterceptBuilder, Position};
     ///
     /// let _handle = InterceptBuilder::new(interceptor)
     ///     .block("*/tracker.js")?
-    ///     .start()
+    ///     .start(Position::Last)
     ///     .await?;
     /// # Ok(()) }
     /// ```
@@ -109,339 +57,139 @@ impl InterceptBuilder {
     pub fn new(interceptor: &Interceptor) -> Self {
         Self {
             interceptor: interceptor.clone(),
-            patterns: Vec::new(),
             rules: Vec::new(),
-            proxy_auth: None,
-            auth_pattern: RequestPattern {
-                url_pattern: Some("*".into()),
-                ..RequestPattern::default()
-            },
         }
     }
 
-    /// Answer a proxy's auth challenges with the given credentials.
-    ///
-    /// `Fetch.enable` is sent with `handleAuthRequests: true`, and each
-    /// `Fetch.authRequired` whose challenge comes from a proxy is answered
-    /// with `Fetch.continueWithAuth { authChallengeResponse: { response:
-    /// "ProvideCredentials", username, password } }`. Each request gets the
-    /// credentials once per proxy and auth scheme: if the same proxy
-    /// challenges it again with the same scheme within a minute, which means
-    /// it rejected them, the challenge is cancelled and the request fails.
-    /// (After a PAC failover to another proxy, or a fallback to another
-    /// scheme, the request gets them again, and so does a repeat that comes
-    /// over a minute later.) A
-    /// challenge from the server (HTTP 401) gets `Default`, never these
-    /// credentials, so a site can't collect them. To log into a site's own
-    /// HTTP auth, add an `Authorization` header to its requests with
-    /// [`modify_request`](Self::modify_request).
-    ///
-    /// Composes with rules, and with [`subscribe`](Self::subscribe). While
-    /// several layers of a session have credentials, the newest layer's go
-    /// to the proxy. `BrowserBuilder::proxy_auth` in the `zendriver` crate
-    /// installs this for you.
-    ///
-    /// See cdpdriver/zendriver#208.
+    /// Add `rule`, for what the other methods can't express (a host set at
+    /// another pause, a resource type, a label, ...).
     #[must_use]
-    pub fn handle_proxy_auth(mut self, user: impl Into<String>, pass: impl Into<String>) -> Self {
-        self.proxy_auth = Some((user.into(), pass.into()));
+    pub fn rule(mut self, rule: Rule) -> Self {
+        self.rules.push(rule);
         self
     }
 
-    /// Answer a proxy's auth challenges with the given credentials, for
-    /// `Document`-type requests only.
-    ///
-    /// Like [`handle_proxy_auth`](Self::handle_proxy_auth), but for the
-    /// credentials the layer pauses only document requests (`*` of
-    /// `ResourceType::Document`) rather than every request: Chrome surfaces
-    /// a proxy's challenge only for a request it paused. The rules' own
-    /// patterns are unchanged.
-    ///
-    /// Narrowing to `Document` means only the navigations of the page and
-    /// its frames pause and round-trip through the multiplexer for the
-    /// credentials; other requests (XHR, subresources, and any
-    /// parallel/pipelined connection that also needs credentials) are not
-    /// paused for them, and their auth challenges are not answered unless
-    /// another pattern pauses them. Use plain
-    /// [`handle_proxy_auth`](Self::handle_proxy_auth) if you need every
-    /// connection's 407 covered.
+    /// Add a rule that lets the requests `glob` matches go on unchanged
+    /// ([`Action::Continue`]): an explicit exception ahead of later entries.
+    pub fn allow(self, glob: impl Into<String>) -> Result<Self, InterceptionError> {
+        self.request_rule(glob, Action::Continue)
+    }
+
+    /// Add a rule that fails the requests `glob` matches with
+    /// `BlockedByClient`, the error an ad blocker raises.
+    pub fn block(self, glob: impl Into<String>) -> Result<Self, InterceptionError> {
+        self.request_rule(glob, Action::Block(AbortReason::BlockedByClient))
+    }
+
+    /// Add a rule that fails, with `BlockedByClient`, the requests whose host
+    /// is in `hosts` or is a subdomain of one in it: one set lookup per
+    /// request however many hosts. `BrowserBuilder::block_trackers` in the
+    /// `zendriver` crate installs such a rule for you.
     #[must_use]
-    pub fn handle_proxy_auth_scoped_to_document(
-        mut self,
-        user: impl Into<String>,
-        pass: impl Into<String>,
-    ) -> Self {
-        self.auth_pattern.resource_type = Some(ResourceType::Document);
-        self.handle_proxy_auth(user, pass)
+    pub fn block_hosts(self, hosts: Arc<HostMatcher>) -> Self {
+        // `Block` acts on any pause, so this needs no `Rule::new` check.
+        self.rule(Rule {
+            label: None,
+            when: Match::hosts(hosts),
+            action: Action::Block(AbortReason::BlockedByClient),
+        })
     }
 
-    /// Push a new pattern entry with the given URL pattern string.
-    ///
-    /// Subsequent [`at_request`](Self::at_request) /
-    /// [`at_response`](Self::at_response) / [`resource`](Self::resource) calls
-    /// mutate this newest entry, so a chain like
-    /// `.pattern("*").at_response().resource(ResourceType::XHR)` produces one
-    /// `RequestPattern` with all three fields populated.
-    #[must_use]
-    pub fn pattern(mut self, pattern: impl Into<String>) -> Self {
-        self.patterns.push(RequestPattern {
-            url_pattern: Some(pattern.into()),
-            ..RequestPattern::default()
-        });
-        self
-    }
-
-    /// Pause matching requests at the `Request` stage on the most-recently
-    /// pushed pattern.
-    ///
-    /// If no pattern has been pushed yet, this creates an empty one (matches
-    /// every URL by CDP default) and sets the stage on it.
-    #[must_use]
-    pub fn at_request(mut self) -> Self {
-        self.ensure_pattern().request_stage = Some(RequestStage::Request);
-        self
-    }
-
-    /// Pause matching requests at the `Response` stage on the most-recently
-    /// pushed pattern.
-    #[must_use]
-    pub fn at_response(mut self) -> Self {
-        self.ensure_pattern().request_stage = Some(RequestStage::Response);
-        self
-    }
-
-    /// Restrict the most-recently pushed pattern to a single resource type.
-    #[must_use]
-    pub fn resource(mut self, kind: ResourceType) -> Self {
-        self.ensure_pattern().resource_type = Some(kind);
-        self
-    }
-
-    /// Register a [`Rule::Block`] for `pattern`.
-    ///
-    /// Compiles `pattern` eagerly; an invalid pattern fails the builder chain
-    /// with [`InterceptionError::InvalidPattern`] returned as `Err(Self)` via
-    /// the `Result` wrapper.
-    pub fn block(mut self, pattern: impl Into<String>) -> Result<Self, InterceptionError> {
-        self.rules.push(Rule::Block {
-            pattern: UrlPattern::new(pattern)?,
-        });
-        Ok(self)
-    }
-
-    /// Register a [`Rule::BlockHosts`] backed by `matcher`.
-    ///
-    /// Every request whose host is in `matcher` (exact, or a parent domain on
-    /// a dot boundary) is failed with `BlockedByClient`. Composes with other
-    /// rules in registration order. `zendriver` core's tracker-blocklist
-    /// wiring uses this; most callers reach it via `BrowserBuilder::block_trackers`.
-    #[must_use]
-    pub fn block_hosts(mut self, matcher: Arc<HostMatcher>) -> Self {
-        self.rules.push(Rule::BlockHosts { matcher });
-        self
-    }
-
-    /// Register a [`Rule::Redirect`] that rewrites `from` → `to`.
+    /// Add a rule that sends the requests `glob` matches to the absolute URL
+    /// `to` instead, unseen by the page.
     pub fn redirect(
-        mut self,
-        from: impl Into<String>,
+        self,
+        glob: impl Into<String>,
         to: impl Into<String>,
     ) -> Result<Self, InterceptionError> {
-        self.rules.push(Rule::Redirect {
-            from: UrlPattern::new(from)?,
-            to: to.into(),
-        });
-        Ok(self)
+        self.request_rule(glob, Action::RewriteUrl(to.into()))
     }
 
-    /// Register a [`Rule::Respond`] serving a synthesized response.
+    /// Add a rule that answers the requests `glob` matches with a response
+    /// of `status`, `headers` (as `(name, value)` pairs) and the raw `body`,
+    /// instead of the server's.
     pub fn respond(
-        mut self,
-        pattern: impl Into<String>,
+        self,
+        glob: impl Into<String>,
         status: u16,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> Result<Self, InterceptionError> {
-        self.rules.push(Rule::Respond {
-            pattern: UrlPattern::new(pattern)?,
+        let respond = Action::Respond {
             status,
             headers,
             body,
-        });
-        Ok(self)
+        };
+        self.request_rule(glob, respond)
     }
 
-    /// Register a [`Rule::Modify`] driven by a user closure.
+    /// Add a rule that sends the requests `glob` matches on, rewritten by
+    /// the overrides `modify` returns for each.
     ///
-    /// The closure runs on the multiplexer's task per matching request — it must be
-    /// `Send + Sync` and `'static`. Wrap shared state in `Arc` if needed.
+    /// The closure runs on the session's interception task per request, so
+    /// it must not block, and must be `Send + Sync + 'static` (wrap shared
+    /// state in `Arc`). Header overrides replace the request's headers
+    /// (CDP semantics): return every header you want sent.
     pub fn modify_request<F>(
-        mut self,
-        pattern: impl Into<String>,
+        self,
+        glob: impl Into<String>,
         modify: F,
     ) -> Result<Self, InterceptionError>
     where
         F: Fn(&RequestInfo) -> RequestOverrides + Send + Sync + 'static,
     {
-        self.rules.push(Rule::Modify {
-            pattern: UrlPattern::new(pattern)?,
-            modify: Arc::new(modify),
-        });
-        Ok(self)
+        self.request_rule(glob, Action::ModifyRequest(Arc::new(modify)))
     }
 
-    /// Register a [`Rule::ModifyResponse`] driven by a user closure.
+    /// Add a rule that lets the responses to the requests `glob` matches go
+    /// on, keeping their bodies, rewritten by the overrides `modify` returns
+    /// for each; at the [`ResponseHeaders`](PauseKind::ResponseHeaders)
+    /// pause.
     ///
-    /// The closure rewrites an upstream response's status/headers (keeping
-    /// Chrome's body) and only fires at the `Response` stage. Without
-    /// explicit [`pattern`](Self::pattern)s, the layer pauses there for it;
-    /// with them, give one [`at_response`](Self::at_response).
-    /// Header overrides are *replacement*, not merge (CDP semantics): return
-    /// every header you want forwarded.
-    ///
-    /// Like [`modify_request`](Self::modify_request), the closure runs on the
-    /// multiplexer's task per matching response, so it must be `Send + Sync` and
-    /// `'static`. Wrap shared state in `Arc` if needed.
+    /// As for [`modify_request`](Self::modify_request), the closure must not
+    /// block and must be `Send + Sync + 'static`. Header overrides replace
+    /// the response's headers: return every header you want forwarded.
     pub fn modify_response<F>(
-        mut self,
-        pattern: impl Into<String>,
+        self,
+        glob: impl Into<String>,
         modify: F,
     ) -> Result<Self, InterceptionError>
     where
         F: Fn(&ResponseInfo) -> ResponseOverrides + Send + Sync + 'static,
     {
-        self.rules.push(Rule::ModifyResponse {
-            pattern: UrlPattern::new(pattern)?,
-            modify: Arc::new(modify),
-        });
-        Ok(self)
+        let when = Match::url(glob)?.at(PauseKind::ResponseHeaders);
+        Ok(self.rule(Rule::new(when, Action::ModifyResponse(Arc::new(modify)))?))
     }
 
-    /// Add the rules to the session's interception as one layer, and return
-    /// once Chrome has applied the layer's patterns: a request sent from
-    /// then on is intercepted.
+    /// Insert the rules into the session's interception at `at`,
+    /// consecutively and in the order they were added, and return once
+    /// Chrome pauses the requests they fit: a request sent from then on is
+    /// decided by them (or by an entry ahead of them).
     ///
-    /// The layer stays in force until the returned [`InterceptHandle`] is
-    /// dropped or [stopped](InterceptHandle::stop). Layers added later take
-    /// precedence: a paused request goes to the newest layer that has a
-    /// pattern for it and takes it (see [`crate::interceptor`]).
-    ///
-    /// If no [`pattern`](Self::pattern) entries were added, the patterns
-    /// come from the rules: each rule's URL pattern, at the `Response`
-    /// stage for [`modify_response`](Self::modify_response) and at the
-    /// `Request` stage for the others; and `"*"` at the `Request` stage for
-    /// [`block_hosts`](Self::block_hosts) and for
-    /// [`handle_proxy_auth`](Self::handle_proxy_auth). So, except for those
-    /// two, Chrome pauses only the URLs the rules match.
+    /// The rules stay in until the returned [`InterceptHandle`] is dropped
+    /// or [stopped](InterceptHandle::stop).
     ///
     /// # Errors
     ///
-    /// [`InterceptionError::InvalidPattern`] for a pattern that doesn't
-    /// compile, and [`InterceptionError::Call`] if Chrome refused the
-    /// patterns, or the session is gone.
-    pub async fn start(self) -> Result<InterceptHandle, InterceptionError> {
-        let interceptor = self.interceptor.clone();
-        let layer = self.into_layer(Responder::Rules)?;
-        interceptor.add(layer).await
+    /// As for [`Interceptor::insert`]: [`InterceptionError::NoRules`] with no
+    /// rules, [`InterceptionError::NoSuchRule`] for a `Before` / `After`
+    /// naming no entry, and [`InterceptionError::Call`] if Chrome refused
+    /// the patterns or the session is gone.
+    pub async fn start(self, at: Position) -> Result<InterceptHandle, InterceptionError> {
+        self.interceptor.insert(self.rules, at).await
     }
 
-    /// Add a layer that hands each request it pauses to the returned
-    /// [`InterceptStream`], and return once Chrome has applied the layer's
-    /// patterns.
-    ///
-    /// The layer uses the declared patterns (a single match-all `"*"`
-    /// pattern at the `Request` stage when none were added), and takes
-    /// every request they pause, before any older layer sees it. Release each
-    /// [`PausedRequest`](crate::PausedRequest) with one of its terminal
-    /// methods (`continue_` / `abort` / `respond` / `modify_and_continue` /
-    /// `continue_response`): Chrome holds the request until then.
-    ///
-    /// Rules registered via `block` / `block_hosts` / `redirect` /
-    /// `respond` / `modify_request` / `modify_response` are ignored on this
-    /// path: stream consumers drive
-    /// every paused request themselves. Use [`start`](Self::start) when you
-    /// want them applied. [`handle_proxy_auth`](Self::handle_proxy_auth)
-    /// credentials are honored: a proxy's challenge never reaches the
-    /// stream.
-    ///
-    /// Dropping the stream removes the layer, and continues each request it
-    /// took that wasn't read yet.
-    ///
-    /// # Errors
-    ///
-    /// As for [`start`](Self::start).
-    pub async fn subscribe(self) -> Result<InterceptStream, InterceptionError> {
-        let interceptor = self.interceptor.clone();
-        let (requests, received) = mpsc::unbounded_channel();
-        let layer = self.into_layer(|_| Responder::Stream(requests))?;
-        Ok(InterceptStream {
-            requests: received,
-            _layer: interceptor.add(layer).await?,
-        })
+    /// Add a rule of `action` for the requests `glob` matches at the
+    /// `Request` pause.
+    fn request_rule(
+        self,
+        glob: impl Into<String>,
+        action: Action,
+    ) -> Result<Self, InterceptionError> {
+        Ok(self.rule(Rule::new(Match::url(glob)?, action)?))
     }
 
-    /// The layer this builder describes, its rules taken by `responder`.
-    ///
-    /// Without explicit patterns, the layer's come from what it does (see
-    /// [`start`](Self::start)): each rule's, a match-all one for a stream,
-    /// and `auth_pattern` (at the `Request` stage) for proxy credentials.
-    /// With explicit patterns, only the Document-scoped `auth_pattern` is
-    /// added to them.
-    /// Chrome (~M132+) rejects `Fetch.enable { patterns: [],
-    /// handleAuthRequests: true }` with CDP error -32602 "Can't specify
-    /// empty patterns with handleAuth set", and only surfaces the
-    /// challenges of requests that a Request-stage pattern paused.
-    ///
-    /// On the auth-only path this pauses (and immediately continues) every
-    /// request. If that per-request CDP round-trip regresses a
-    /// timing-sensitive bot sensor, a caller can register an explicit
-    /// narrower pattern (e.g. `resource_type: Document`, so only the main
-    /// navigation — which carries the first proxy 407 — is paused), at the
-    /// risk of missing 407s on parallel proxy connections.
-    fn into_layer(
-        mut self,
-        responder: impl FnOnce(Vec<Rule>) -> Responder,
-    ) -> Result<Layer, InterceptionError> {
-        let responder = responder(self.rules);
-        let match_all = || RequestPattern {
-            url_pattern: Some("*".into()),
-            ..RequestPattern::default()
-        };
-        let documents_only = self.auth_pattern.resource_type.is_some();
-        if self.patterns.is_empty() {
-            match &responder {
-                Responder::Rules(rules) => self.patterns.extend(rules.iter().map(Rule::pattern)),
-                Responder::Stream(_) => self.patterns.push(match_all()),
-            }
-            if self.proxy_auth.is_some() {
-                self.patterns.push(self.auth_pattern);
-            }
-        } else if documents_only {
-            self.patterns.push(self.auth_pattern);
-        }
-        let filters = self
-            .patterns
-            .into_iter()
-            .map(Filter::new)
-            .collect::<Result<_, _>>()?;
-        Ok(Layer::new(filters, responder, self.proxy_auth))
-    }
-
-    /// Lazily push an empty pattern if none exists, so the stage/resource
-    /// setters always have a target. Mirrors CDP's "missing fields default to
-    /// match-all" semantics.
-    fn ensure_pattern(&mut self) -> &mut RequestPattern {
-        if self.patterns.is_empty() {
-            self.patterns.push(RequestPattern::default());
-        }
-        self.patterns
-            .last_mut()
-            .expect("ensure_pattern pushed if empty")
-    }
-
-    /// Test-only accessor: number of registered rules. Used by the Task 5
-    /// builder tests without exposing the rule list
-    /// as public API.
+    /// Test-only accessor: the number of rules added.
     #[cfg(test)]
     pub(crate) fn rules_count(&self) -> usize {
         self.rules.len()
@@ -451,149 +199,45 @@ impl InterceptBuilder {
 #[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
-    use std::time::Duration;
-
-    use futures::StreamExt;
-    use serde_json::{Value, json};
-    use zendriver_transport::testing::MockConnection;
+    use serde_json::json;
 
     use super::*;
-    use crate::interceptor::testing::{applied, mock_interceptor, pause};
+    use crate::interceptor::testing::{applied, mock_interceptor};
 
-    /// The `Fetch.enable` parameters that `builder.start()` sends.
-    async fn enable_params(mock: &mut MockConnection, builder: InterceptBuilder) -> Value {
-        applied(mock, builder.start()).await.1
-    }
-
-    /// Register three rules (block + redirect + respond) on a fresh builder
-    /// and assert the rule list grew to length 3. Verifies the chain wiring
-    /// without touching Chrome.
+    /// Every method adds one rule, and `start` asks Chrome for each rule's
+    /// pattern, at its pause.
     #[tokio::test]
-    async fn three_rules_register_and_count() {
-        let (_mock, conn, interceptor) = mock_interceptor();
-        let builder = InterceptBuilder::new(&interceptor)
-            .block("*/ads/*")
-            .unwrap()
-            .redirect("*/old/*", "https://example.com/new/")
-            .unwrap()
-            .respond(
-                "*/api/health",
-                200,
-                vec![("content-type".into(), "application/json".into())],
-                br#"{"ok":true}"#.to_vec(),
-            )
-            .unwrap();
-
-        assert_eq!(builder.rules_count(), 3);
-        conn.shutdown();
-    }
-
-    /// Without explicit [`pattern`](InterceptBuilder::pattern)s, `start()`
-    /// pauses what the rules act on: each rule's URL pattern at its stage,
-    /// and every URL for `block_hosts`.
-    #[tokio::test]
-    async fn start_derives_the_patterns_from_the_rules() {
+    async fn each_method_adds_one_rule_with_its_own_pattern() {
         let (mut mock, conn, interceptor) = mock_interceptor();
         let hosts = Arc::new(HostMatcher::new(["evil.test".to_string()]));
         let builder = InterceptBuilder::new(&interceptor)
-            .block("*/blocked/*")
-            .unwrap()
-            .modify_response("*/api/*", |_| crate::ResponseOverrides::default())
-            .unwrap()
-            .block_hosts(hosts);
-        let params = enable_params(&mut mock, builder).await;
-        assert_eq!(
-            params["patterns"],
-            json!([
-                { "urlPattern": "*/blocked/*" },
-                { "urlPattern": "*/api/*", "requestStage": "Response" },
-                { "urlPattern": "*" },
-            ])
-        );
-        conn.shutdown();
-    }
-
-    /// Regression guard for the "empty patterns with handleAuth" breakage: the
-    /// proxy-auth-ONLY path (`handle_proxy_auth`, no rules, no explicit
-    /// pattern) must still send a NON-empty `patterns` on `Fetch.enable`.
-    /// Modern Chrome (~M132+) rejects `{ patterns: [], handleAuthRequests:
-    /// true }` with CDP -32602 ("Can't specify empty patterns with handleAuth
-    /// set"), which silently disables proxy-auth handling and 407s every
-    /// navigation.
-    #[tokio::test]
-    async fn start_auth_only_sends_match_all_pattern_with_handle_proxy_auth() {
-        let (mut mock, conn, interceptor) = mock_interceptor();
-        let builder = InterceptBuilder::new(&interceptor).handle_proxy_auth("puser", "ppass");
-        let params = enable_params(&mut mock, builder).await;
-        assert_eq!(params["handleAuthRequests"], true);
-        assert_eq!(params["patterns"], json!([{ "urlPattern": "*" }]));
-        conn.shutdown();
-    }
-
-    /// The Document-scoped preset pauses only documents for the
-    /// credentials (the difference from plain `handle_proxy_auth`), and
-    /// leaves the rules' own patterns as they are.
-    #[tokio::test]
-    async fn start_auth_scoped_to_document_adds_a_document_pattern() {
-        let (mut mock, conn, interceptor) = mock_interceptor();
-        let builder = InterceptBuilder::new(&interceptor)
             .block("*/ads/*")
             .unwrap()
-            .handle_proxy_auth_scoped_to_document("puser", "ppass");
-        assert_eq!(builder.rules_count(), 1);
-        let params = enable_params(&mut mock, builder).await;
-        assert_eq!(params["handleAuthRequests"], true);
+            .modify_response("*/api/*", |_| ResponseOverrides::default())
+            .unwrap()
+            .block_hosts(hosts);
+        assert_eq!(builder.rules_count(), 3);
+        let (_handle, enable) = applied(&mut mock, builder.start(Position::Last)).await;
         assert_eq!(
-            params["patterns"],
+            enable["patterns"],
             json!([
-                { "urlPattern": "*/ads/*" },
-                { "urlPattern": "*", "resourceType": "Document" },
+                { "urlPattern": "*/ads/*", "requestStage": "Request" },
+                { "urlPattern": "*/api/*", "requestStage": "Response" },
+                { "urlPattern": "*", "requestStage": "Request" },
             ])
         );
         conn.shutdown();
     }
 
-    /// On the `subscribe()` path: each `Fetch.requestPaused` event becomes
-    /// a `PausedRequest` yielded from the stream, with the request payload
-    /// decoded into [`RequestInfo`](crate::RequestInfo).
+    /// A builder with no rules has nothing to insert.
     #[tokio::test]
-    async fn subscribe_yields_paused_request_per_event() {
-        let (mut mock, conn, interceptor) = mock_interceptor();
-        let (mut stream, _) =
-            applied(&mut mock, InterceptBuilder::new(&interceptor).subscribe()).await;
-
-        let headers = json!({ "request": {
-            "url": "https://example.test/widget.json",
-            "method": "GET",
-            "headers": { "accept": "application/json" },
-        }});
-        pause(&mock, "REQ-1", "https://example.test/widget.json", headers).await;
-        let paused = tokio::time::timeout(Duration::from_secs(2), stream.next())
+    async fn starting_no_rules_is_an_error() {
+        let (_mock, conn, interceptor) = mock_interceptor();
+        let err = InterceptBuilder::new(&interceptor)
+            .start(Position::Last)
             .await
-            .expect("subscribe() stream did not yield within 2s")
-            .expect("subscribe() stream closed before yielding");
-        assert_eq!(paused.request_id, "REQ-1");
-        assert_eq!(paused.request.url, "https://example.test/widget.json");
-        assert_eq!(paused.request.method, "GET");
-        assert_eq!(
-            paused.request.headers,
-            vec![("accept".to_string(), "application/json".to_string())]
-        );
-        assert!(
-            paused.response.is_none(),
-            "request-stage event has no response"
-        );
-        conn.shutdown();
-    }
-
-    /// `subscribe()` honors `handle_proxy_auth`: the multiplexer answers the
-    /// challenges, so `handleAuthRequests` can be on.
-    #[tokio::test]
-    async fn subscribe_honors_credentials() {
-        let (mut mock, conn, interceptor) = mock_interceptor();
-        let builder = InterceptBuilder::new(&interceptor).handle_proxy_auth("puser", "ppass");
-        let (_stream, params) = applied(&mut mock, builder.subscribe()).await;
-        assert_eq!(params["handleAuthRequests"], true);
+            .unwrap_err();
+        assert!(matches!(err, InterceptionError::NoRules));
         conn.shutdown();
     }
 }

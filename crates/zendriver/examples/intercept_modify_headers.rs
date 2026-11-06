@@ -16,6 +16,7 @@
 
 use zendriver::Browser;
 use zendriver::RequestOverrides;
+use zendriver::interception::Position;
 
 #[tokio::main]
 #[allow(clippy::result_large_err)] // example boundary; users wrap in their own Error
@@ -38,7 +39,7 @@ async fn main() -> zendriver::Result<()> {
                 ..Default::default()
             }
         })?
-        .start()
+        .start(Position::Last)
         .await?;
 
     tab.goto("https://httpbin.org/headers").await?;

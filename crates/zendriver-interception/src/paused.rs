@@ -27,9 +27,11 @@ use zendriver_transport::SessionHandle;
 
 use crate::error::InterceptionError;
 use crate::fetch;
-use crate::types::{AbortReason, RequestInfo, RequestOverrides, ResponseInfo, ResponseOverrides};
+use crate::types::{
+    AbortReason, PauseKind, RequestInfo, RequestOverrides, ResponseInfo, ResponseOverrides,
+};
 
-/// A request paused by Chrome at the configured [`RequestStage`].
+/// A request that Chrome paused and a stream entry decides.
 ///
 /// `PausedRequest` is consumed by exactly one of the action methods
 /// ([`continue_`](Self::continue_), [`abort`](Self::abort),
@@ -46,13 +48,14 @@ use crate::types::{AbortReason, RequestInfo, RequestOverrides, ResponseInfo, Res
 /// dispatches a best-effort `Fetch.continueRequest` in a detached task so
 /// Chrome doesn't hold the request open indefinitely. See
 /// cdpdriver/zendriver#126 for the freeze pattern this prevents.
-///
-/// [`RequestStage`]: crate::types::RequestStage
+
 #[derive(Debug)]
 pub struct PausedRequest {
     /// Opaque CDP request id (`requestId` on `Fetch.requestPaused`). Must be
     /// echoed back on whichever terminal action releases the pause.
     pub request_id: String,
+    /// What the request is paused waiting on.
+    pub pause: PauseKind,
     /// Decoded request payload as Chrome surfaced it.
     pub request: RequestInfo,
     /// Decoded response payload — populated only when Chrome paused at the
@@ -74,12 +77,14 @@ impl PausedRequest {
     /// never assemble a `PausedRequest` by hand.
     pub(crate) fn new(
         request_id: impl Into<String>,
+        pause: PauseKind,
         request: RequestInfo,
         response: Option<ResponseInfo>,
         session: SessionHandle,
     ) -> Self {
         Self {
             request_id: request_id.into(),
+            pause,
             request,
             response,
             session,
@@ -97,9 +102,9 @@ impl PausedRequest {
     /// # use futures::StreamExt;
     /// # async fn ex(tab: &zendriver_interception::Interceptor)
     /// #   -> Result<(), zendriver_interception::InterceptionError> {
-    /// use zendriver_interception::InterceptBuilder;
+    /// use zendriver_interception::{Match, Position};
     ///
-    /// let mut stream = InterceptBuilder::new(tab).subscribe().await?;
+    /// let mut stream = tab.subscribe(Match::url("*")?, Position::Last).await?;
     /// while let Some(req) = stream.next().await {
     ///     req.continue_().await?;
     /// }
@@ -119,9 +124,9 @@ impl PausedRequest {
     /// # use futures::StreamExt;
     /// # async fn ex(tab: &zendriver_interception::Interceptor)
     /// #   -> Result<(), zendriver_interception::InterceptionError> {
-    /// use zendriver_interception::{AbortReason, InterceptBuilder};
+    /// use zendriver_interception::{AbortReason, Match, Position};
     ///
-    /// let mut stream = InterceptBuilder::new(tab).subscribe().await?;
+    /// let mut stream = tab.subscribe(Match::url("*")?, Position::Last).await?;
     /// while let Some(req) = stream.next().await {
     ///     req.abort(AbortReason::BlockedByClient).await?;
     /// }
@@ -191,10 +196,10 @@ impl PausedRequest {
     /// # use futures::StreamExt;
     /// # async fn ex(tab: &zendriver_interception::Interceptor)
     /// #   -> Result<(), zendriver_interception::InterceptionError> {
-    /// use zendriver_interception::InterceptBuilder;
+    /// use zendriver_interception::{Match, PauseKind, Position};
     ///
-    /// let builder = InterceptBuilder::new(tab).pattern("*").at_response();
-    /// let mut stream = builder.subscribe().await?;
+    /// let responses = Match::url("*")?.at(PauseKind::ResponseHeaders);
+    /// let mut stream = tab.subscribe(responses, Position::Last).await?;
     /// while let Some(req) = stream.next().await {
     ///     // Rewrite to 204 No Content, keep the upstream body.
     ///     req.continue_response(Some(204), None, None).await?;
@@ -332,7 +337,7 @@ mod tests {
     async fn continue_dispatches_fetch_continue_request() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new("REQ-1", make_request_info(), None, sess);
+        let req = PausedRequest::new("REQ-1", PauseKind::Request, make_request_info(), None, sess);
 
         let fut = tokio::spawn(async move { req.continue_().await });
 
@@ -357,7 +362,13 @@ mod tests {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         {
-            let req = PausedRequest::new("REQ-DROP", make_request_info(), None, sess);
+            let req = PausedRequest::new(
+                "REQ-DROP",
+                PauseKind::Request,
+                make_request_info(),
+                None,
+                sess,
+            );
             drop(req);
         }
         // The Drop spawns the call on the current runtime; expect_cmd waits
@@ -375,7 +386,13 @@ mod tests {
     async fn a_refused_release_is_continued_on_drop() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new("REQ-REFUSED", make_request_info(), None, sess);
+        let req = PausedRequest::new(
+            "REQ-REFUSED",
+            PauseKind::Request,
+            make_request_info(),
+            None,
+            sess,
+        );
         let abort = tokio::spawn(req.abort(AbortReason::Failed));
         let id = mock.expect_cmd("Fetch.failRequest").await;
         mock.reply_err(id, -32602, "Invalid InterceptionId.").await;
@@ -392,7 +409,13 @@ mod tests {
     async fn an_action_cancelled_in_flight_is_not_followed_by_a_continue() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new("REQ-CANCELLED", make_request_info(), None, sess);
+        let req = PausedRequest::new(
+            "REQ-CANCELLED",
+            PauseKind::Request,
+            make_request_info(),
+            None,
+            sess,
+        );
         let abort = tokio::spawn(req.abort(AbortReason::Failed));
         mock.expect_cmd("Fetch.failRequest").await;
         abort.abort();
@@ -412,7 +435,13 @@ mod tests {
         // round-trips.
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new("REQ-ONCE", make_request_info(), None, sess);
+        let req = PausedRequest::new(
+            "REQ-ONCE",
+            PauseKind::Request,
+            make_request_info(),
+            None,
+            sess,
+        );
 
         let fut = tokio::spawn(async move { req.continue_().await });
 
@@ -436,7 +465,7 @@ mod tests {
     async fn respond_dispatches_fetch_fulfill_with_base64_body() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new("REQ-2", make_request_info(), None, sess);
+        let req = PausedRequest::new("REQ-2", PauseKind::Request, make_request_info(), None, sess);
 
         let body = b"hello world".to_vec();
         let expected_b64 = BASE64.encode(&body);
@@ -470,6 +499,7 @@ mod tests {
         let sess = SessionHandle::new(conn.clone(), "S1");
         let req = PausedRequest::new(
             "REQ-CR",
+            PauseKind::ResponseHeaders,
             make_request_info(),
             Some(make_response_info()),
             sess,
@@ -509,7 +539,13 @@ mod tests {
         // and dispatch nothing.
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new("REQ-WS", make_request_info(), None, sess);
+        let req = PausedRequest::new(
+            "REQ-WS",
+            PauseKind::Request,
+            make_request_info(),
+            None,
+            sess,
+        );
 
         let err = req
             .continue_response(Some(200), None, None)
@@ -541,6 +577,7 @@ mod tests {
         let sess = SessionHandle::new(conn.clone(), "S1");
         let req = PausedRequest::new(
             "REQ-CR-ONCE",
+            PauseKind::ResponseHeaders,
             make_request_info(),
             Some(make_response_info()),
             sess,

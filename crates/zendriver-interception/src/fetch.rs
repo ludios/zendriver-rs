@@ -8,9 +8,8 @@ use serde::Deserialize;
 use serde::de::{Deserializer, MapAccess, Visitor};
 use serde_json::{Map, Value, json};
 
-use crate::builder::RequestPattern;
 use crate::types::{
-    AbortReason, RequestInfo, RequestOverrides, RequestStage, ResourceType, ResponseInfo,
+    AbortReason, PauseKind, RequestInfo, RequestOverrides, ResourceType, ResponseInfo,
     ResponseOverrides,
 };
 
@@ -39,13 +38,15 @@ pub(crate) struct RequestPausedEvent {
 }
 
 impl RequestPausedEvent {
-    /// The stage Chrome paused the request at: `Response` once Chrome has the
-    /// response's status or its failure.
-    pub(crate) fn stage(&self) -> RequestStage {
-        if self.response_status_code.is_some() || self.response_error_reason.is_some() {
-            RequestStage::Response
+    /// What the request is paused waiting on: its failure, or its
+    /// response's status, or (with neither) being sent.
+    pub(crate) fn pause_kind(&self) -> PauseKind {
+        if self.response_error_reason.is_some() {
+            PauseKind::ResponseError
+        } else if self.response_status_code.is_some() {
+            PauseKind::ResponseHeaders
         } else {
-            RequestStage::Request
+            PauseKind::Request
         }
     }
 }
@@ -127,25 +128,6 @@ pub(crate) struct PostDataEntry {
 pub(crate) struct HeaderPair {
     pub(crate) name: String,
     pub(crate) value: String,
-}
-
-/// Serialize a [`RequestPattern`] into the JSON shape CDP expects on
-/// `Fetch.enable.patterns[]`. All three fields are optional per CDP.
-pub(crate) fn serialize_pattern(p: &RequestPattern) -> Value {
-    let mut obj = Map::new();
-    if let Some(url) = &p.url_pattern {
-        obj.insert("urlPattern".into(), Value::String(url.clone()));
-    }
-    if let Some(rt) = p.resource_type {
-        obj.insert("resourceType".into(), Value::String(rt.as_cdp_str().into()));
-    }
-    if let Some(stage) = p.request_stage {
-        obj.insert(
-            "requestStage".into(),
-            Value::String(stage.as_cdp_str().into()),
-        );
-    }
-    Value::Object(obj)
 }
 
 /// Build a [`RequestInfo`] from the decoded event for `Modify` closures.

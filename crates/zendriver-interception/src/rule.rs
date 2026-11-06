@@ -1,264 +1,305 @@
-//! Declarative interception rules.
-//!
-//! Each rule pairs a matcher (a [`UrlPattern`], or a [`HostMatcher`] for
-//! [`BlockHosts`]) with one of six actions ([`Block`], [`Redirect`],
-//! [`Respond`], [`Modify`], [`ModifyResponse`], [`BlockHosts`]). The multiplexer
-//! walks a layer's rule list in registration order on each `Fetch.requestPaused`
-//! event; the first rule that matches the request URL and acts at the stage
-//! Chrome paused it at wins.
-//!
-//! [`Block`]: Rule::Block
-//! [`Redirect`]: Rule::Redirect
-//! [`Respond`]: Rule::Respond
-//! [`Modify`]: Rule::Modify
-//! [`ModifyResponse`]: Rule::ModifyResponse
-//! [`BlockHosts`]: Rule::BlockHosts
-//! [`HostMatcher`]: crate::host_matcher::HostMatcher
+//! Interception rules: which paused requests a rule fits ([`Match`]), and
+//! what it does with them ([`Action`]).
 
 use std::fmt;
 use std::sync::Arc;
 
-use crate::builder::RequestPattern;
-use crate::host_matcher::HostMatcher;
-use crate::types::{RequestInfo, RequestOverrides, RequestStage, ResponseInfo, ResponseOverrides};
+use serde_json::{Map, Value};
+
+use crate::error::InterceptionError;
+use crate::host_matcher::{HostMatcher, host_of};
+use crate::types::{
+    AbortReason, PauseKind, RequestInfo, RequestOverrides, ResourceType, ResponseInfo,
+    ResponseOverrides,
+};
 use crate::url_pattern::UrlPattern;
 
-/// A single interception rule.
-///
-/// Each variant carries its own [`UrlPattern`], so different rules in the same
-/// [`InterceptBuilder`](crate::builder::InterceptBuilder) can match disjoint
-/// URL sets. Rules are evaluated in registration order — earlier rules
-/// shadow later ones for overlapping patterns.
-//
-// Not `Clone`: `Modify` holds an `Arc<dyn Fn ...>` which is cheap to clone,
-// but the other variants own `Vec`s/`String`s that we'd rather not silently
-// duplicate. The multiplexer reads the rule list by reference (`&Rule`) so a
-// `Clone` impl is unnecessary in practice.
-pub enum Rule {
-    /// Abort matching requests with `Fetch.failRequest`
-    /// (`errorReason: "BlockedByClient"`).
-    Block {
-        /// URL pattern matched against `Fetch.requestPaused.request.url`.
-        pattern: UrlPattern,
-    },
-    /// Redirect matching requests to `to` via `Fetch.continueRequest { url }`.
-    Redirect {
-        /// URL pattern matched against the incoming request URL.
-        from: UrlPattern,
-        /// Absolute target URL substituted into the continued request.
-        to: String,
-    },
-    /// Serve a synthesized response with `Fetch.fulfillRequest`.
+/// Which URLs a [`Match`] fits.
+#[derive(Debug, Clone)]
+pub enum UrlMatch {
+    /// The URLs a CDP wildcard pattern matches (see [`UrlPattern`]).
+    Glob(UrlPattern),
+    /// The URLs whose host is in the set, or is a subdomain of one in it.
+    Hosts(Arc<HostMatcher>),
+}
+
+/// The paused requests an entry decides: one kind of pause, the URLs, and
+/// optionally one resource type.
+#[derive(Debug, Clone)]
+pub struct Match {
+    pause: PauseKind,
+    url: UrlMatch,
+    resource_type: Option<ResourceType>,
+}
+
+impl Match {
+    /// Requests whose URL `glob` matches (CDP wildcard syntax; see
+    /// [`UrlPattern`]), at the [`Request`](PauseKind::Request) pause, of any
+    /// resource type.
+    ///
+    /// # Errors
+    ///
+    /// [`InterceptionError::InvalidPattern`] if `glob` doesn't compile.
+    pub fn url(glob: impl Into<String>) -> Result<Self, InterceptionError> {
+        Ok(Self {
+            pause: PauseKind::Request,
+            url: UrlMatch::Glob(UrlPattern::new(glob)?),
+            resource_type: None,
+        })
+    }
+
+    /// Requests whose host is in `hosts` or is a subdomain of one in it, at
+    /// the [`Request`](PauseKind::Request) pause, of any resource type.
+    #[must_use]
+    pub fn hosts(hosts: Arc<HostMatcher>) -> Self {
+        Self {
+            pause: PauseKind::Request,
+            url: UrlMatch::Hosts(hosts),
+            resource_type: None,
+        }
+    }
+
+    /// The same requests, at the `pause` kind instead.
+    #[must_use]
+    pub fn at(mut self, pause: PauseKind) -> Self {
+        self.pause = pause;
+        self
+    }
+
+    /// The same requests, of `resource_type` only. `XHR`, `Fetch` and
+    /// `EventSource` are one type to Chrome, so each of them fits all three.
+    #[must_use]
+    pub fn resource(mut self, resource_type: ResourceType) -> Self {
+        self.resource_type = Some(resource_type);
+        self
+    }
+
+    /// The kind of pause this fits.
+    pub fn pause(&self) -> PauseKind {
+        self.pause
+    }
+
+    /// The URLs this fits.
+    pub fn url_match(&self) -> &UrlMatch {
+        &self.url
+    }
+
+    /// The resource type this fits, or `None` for any.
+    pub fn resource_type(&self) -> Option<ResourceType> {
+        self.resource_type
+    }
+
+    /// Whether a request for `url`, of `resource_type`, paused at `pause`,
+    /// fits.
+    pub(crate) fn fits(&self, url: &str, resource_type: ResourceType, pause: PauseKind) -> bool {
+        let url_fits = match &self.url {
+            UrlMatch::Glob(glob) => glob.matches(url),
+            UrlMatch::Hosts(hosts) => host_of(url).is_some_and(|h| hosts.is_blocked(h)),
+        };
+        self.pause == pause
+            && self.resource_type.is_none_or(|t| covers(t, resource_type))
+            && url_fits
+    }
+
+    /// The `Fetch.RequestPattern` that has Chrome pause the requests this
+    /// fits (for a host set, every URL: CDP patterns can't name hosts).
+    pub(crate) fn cdp_pattern(&self) -> Value {
+        let mut pattern = Map::new();
+        let url = match &self.url {
+            UrlMatch::Glob(glob) => glob.pattern_str(),
+            UrlMatch::Hosts(_) => "*",
+        };
+        pattern.insert("urlPattern".into(), Value::String(url.into()));
+        if let Some(t) = self.resource_type {
+            pattern.insert("resourceType".into(), Value::String(t.as_cdp_str().into()));
+        }
+        let stage = self.pause.as_cdp_stage();
+        pattern.insert("requestStage".into(), Value::String(stage.into()));
+        Value::Object(pattern)
+    }
+}
+
+/// Whether a pattern for `pattern`-type requests covers one of `actual`
+/// type. Chrome pauses XHR, Fetch and EventSource requests alike for a
+/// pattern naming any of the three (they are one type to its loader; see
+/// `AddInterceptedResourceType` in Chromium's `fetch_handler.cc`).
+fn covers(pattern: ResourceType, actual: ResourceType) -> bool {
+    let xhr_like = |t| {
+        matches!(
+            t,
+            ResourceType::XHR | ResourceType::Fetch | ResourceType::EventSource
+        )
+    };
+    pattern == actual || (xhr_like(pattern) && xhr_like(actual))
+}
+
+/// What an entry does with a paused request it decides.
+pub enum Action {
+    /// Let it go on unchanged: an explicit exception ahead of later entries.
+    Continue,
+    /// Fail it with `reason` (`Fetch.failRequest`).
+    Block(AbortReason),
+    /// Answer it with this response instead of the server's
+    /// (`Fetch.fulfillRequest`).
     Respond {
-        /// URL pattern matched against the incoming request URL.
-        pattern: UrlPattern,
-        /// HTTP status code returned to the page (`responseCode`).
+        /// The HTTP status code.
         status: u16,
-        /// Response headers as `(name, value)` pairs.
+        /// The response headers, as `(name, value)` pairs.
         headers: Vec<(String, String)>,
-        /// Raw response body bytes (base64-encoded on the wire).
+        /// The raw body.
         body: Vec<u8>,
     },
-    /// Rewrite the outgoing request per-field via a user closure, then
-    /// continue. The closure receives the live [`RequestInfo`] and returns
-    /// the [`RequestOverrides`] to apply.
-    Modify {
-        /// URL pattern matched against the incoming request URL.
-        pattern: UrlPattern,
-        /// Closure invoked per matching request to produce overrides.
-        ///
-        /// Wrapped in [`Arc`] so the multiplexer can cheaply share the closure
-        /// across the rule list without forcing the rule itself to be `Clone`
-        /// or `Send`-by-value.
-        modify: Arc<dyn Fn(&RequestInfo) -> RequestOverrides + Send + Sync>,
-    },
-    /// Rewrite an upstream response's status/headers per a user closure, then
-    /// continue with `Fetch.continueResponse` (keeping Chrome's body). Only
-    /// fires at the `Response` stage — the closure receives the live
-    /// [`ResponseInfo`] and returns the [`ResponseOverrides`] to apply. At the
-    /// `Request` stage it is skipped (there is no response yet), so a later
-    /// rule can take the request.
-    ModifyResponse {
-        /// URL pattern matched against the incoming request URL.
-        pattern: UrlPattern,
-        /// Closure invoked per matching response to produce overrides.
-        ///
-        /// Wrapped in [`Arc`] for the same cheap-share reason as [`Modify`].
-        ///
-        /// [`Modify`]: Rule::Modify
-        modify: Arc<dyn Fn(&ResponseInfo) -> ResponseOverrides + Send + Sync>,
-    },
-    /// Abort requests whose **host** is in a [`HostMatcher`] with
-    /// `Fetch.failRequest { errorReason: "BlockedByClient" }` — the same
-    /// `net::ERR_BLOCKED_BY_CLIENT` a real adblocker / Brave raises.
-    ///
-    /// Unlike [`Block`](Rule::Block), which globs the full URL, this matches
-    /// host-set membership (exact + parent-domain suffix on dot boundaries),
-    /// so a curated list of thousands of hosts is one O(1) set lookup per
-    /// request rather than N glob comparisons. Powers the tracker blocklist.
-    BlockHosts {
-        /// Shared host set; cheap to clone across tabs/rules.
-        matcher: Arc<HostMatcher>,
-    },
+    /// Send it to this absolute URL instead, unseen by the page
+    /// (`Fetch.continueRequest`). [`Request`](PauseKind::Request) pauses
+    /// only.
+    RewriteUrl(String),
+    /// Send it on rewritten by the closure's overrides
+    /// (`Fetch.continueRequest`). [`Request`](PauseKind::Request) pauses
+    /// only. The closure runs on the interception task: it must not block.
+    ModifyRequest(Arc<dyn Fn(&RequestInfo) -> RequestOverrides + Send + Sync>),
+    /// Let the response go on, keeping its body, rewritten by the closure's
+    /// overrides (`Fetch.continueResponse`).
+    /// [`ResponseHeaders`](PauseKind::ResponseHeaders) pauses only.
+    ModifyResponse(Arc<dyn Fn(&ResponseInfo) -> ResponseOverrides + Send + Sync>),
 }
 
-impl Rule {
-    /// Test whether this rule's pattern matches `url`.
-    ///
-    /// Delegates to the embedded [`UrlPattern::matches`]; the field selector
-    /// (`pattern`, `from`) varies per variant but the semantics are identical
-    /// — a CDP-style wildcard match against the full request URL.
-    pub fn matches(&self, url: &str) -> bool {
+impl Action {
+    /// The action's name, as in its variant.
+    pub(crate) fn name(&self) -> &'static str {
         match self {
-            Self::Block { pattern }
-            | Self::Respond { pattern, .. }
-            | Self::Modify { pattern, .. }
-            | Self::ModifyResponse { pattern, .. } => pattern.matches(url),
-            Self::Redirect { from, .. } => from.matches(url),
-            Self::BlockHosts { matcher } => {
-                crate::host_matcher::host_of(url).is_some_and(|h| matcher.is_blocked(h))
-            }
+            Self::Continue => "Continue",
+            Self::Block(_) => "Block",
+            Self::Respond { .. } => "Respond",
+            Self::RewriteUrl(_) => "RewriteUrl",
+            Self::ModifyRequest(_) => "ModifyRequest",
+            Self::ModifyResponse(_) => "ModifyResponse",
         }
     }
 
-    /// Whether this rule can release a request paused at `stage`: the
-    /// request rewrites (`Redirect`, `Modify`) only before the request is
-    /// sent, `ModifyResponse` only once there is a response, and the others
-    /// at either stage.
-    pub(crate) fn acts_at(&self, stage: RequestStage) -> bool {
+    /// Whether this can act on a request paused at `pause`.
+    fn acts_on(&self, pause: PauseKind) -> bool {
         match self {
-            Self::Redirect { .. } | Self::Modify { .. } => stage == RequestStage::Request,
-            Self::ModifyResponse { .. } => stage == RequestStage::Response,
-            Self::Block { .. } | Self::Respond { .. } | Self::BlockHosts { .. } => true,
-        }
-    }
-
-    /// The pattern that has Chrome pause requests for this rule when the
-    /// layer has no explicit ones: its URL pattern (every URL for
-    /// `BlockHosts`), at the `Response` stage for `ModifyResponse` and at
-    /// the `Request` stage for the others (`Block`, `Respond` and
-    /// `BlockHosts` could act at either).
-    pub(crate) fn pattern(&self) -> RequestPattern {
-        let url = match self {
-            Self::Block { pattern }
-            | Self::Respond { pattern, .. }
-            | Self::Modify { pattern, .. }
-            | Self::ModifyResponse { pattern, .. } => pattern.pattern_str(),
-            Self::Redirect { from, .. } => from.pattern_str(),
-            Self::BlockHosts { .. } => "*",
-        };
-        let mut request_stage = None;
-        if matches!(self, Self::ModifyResponse { .. }) {
-            request_stage = Some(RequestStage::Response);
-        }
-        RequestPattern {
-            url_pattern: Some(url.into()),
-            resource_type: None,
-            request_stage,
+            Self::RewriteUrl(_) | Self::ModifyRequest(_) => pause == PauseKind::Request,
+            Self::ModifyResponse(_) => pause == PauseKind::ResponseHeaders,
+            Self::Continue | Self::Block(_) | Self::Respond { .. } => true,
         }
     }
 }
 
-// Hand-written `Debug` because the `Modify` / `ModifyResponse` variants hold
-// `Arc<dyn Fn ...>`, which is not `Debug`. We print the closure as a
-// placeholder so the rest of the rule (the pattern) stays inspectable.
-impl fmt::Debug for Rule {
+// Hand-written because the closures aren't `Debug`.
+impl fmt::Debug for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Block { pattern } => f.debug_struct("Block").field("pattern", pattern).finish(),
-            Self::Redirect { from, to } => f
-                .debug_struct("Redirect")
-                .field("from", from)
-                .field("to", to)
-                .finish(),
+            Self::Block(reason) => f.debug_tuple("Block").field(reason).finish(),
             Self::Respond {
-                pattern,
                 status,
                 headers,
                 body,
             } => f
                 .debug_struct("Respond")
-                .field("pattern", pattern)
                 .field("status", status)
                 .field("headers", headers)
                 .field("body_len", &body.len())
                 .finish(),
-            Self::Modify { pattern, .. } => f
-                .debug_struct("Modify")
-                .field("pattern", pattern)
-                .field("modify", &"<closure>")
-                .finish(),
-            Self::ModifyResponse { pattern, .. } => f
-                .debug_struct("ModifyResponse")
-                .field("pattern", pattern)
-                .field("modify", &"<closure>")
-                .finish(),
-            Self::BlockHosts { matcher } => f
-                .debug_struct("BlockHosts")
-                .field("hosts", &matcher.len())
-                .finish(),
+            Self::RewriteUrl(url) => f.debug_tuple("RewriteUrl").field(url).finish(),
+            other => f.write_str(other.name()),
         }
+    }
+}
+
+/// One interception rule: an [`Action`] for the paused requests that fit
+/// a [`Match`].
+#[derive(Debug)]
+pub struct Rule {
+    pub(crate) label: Option<String>,
+    pub(crate) when: Match,
+    pub(crate) action: Action,
+}
+
+impl Rule {
+    /// A rule that does `action` with the requests `when` fits.
+    ///
+    /// # Errors
+    ///
+    /// [`InterceptionError::MismatchedPause`] if `action` can't act on the
+    /// kind of pause `when` names: `RewriteUrl` and `ModifyRequest` need
+    /// [`Request`](PauseKind::Request), `ModifyResponse` needs
+    /// [`ResponseHeaders`](PauseKind::ResponseHeaders).
+    pub fn new(when: Match, action: Action) -> Result<Self, InterceptionError> {
+        if !action.acts_on(when.pause) {
+            return Err(InterceptionError::MismatchedPause {
+                action: action.name(),
+                pause: when.pause,
+            });
+        }
+        Ok(Self {
+            label: None,
+            when,
+            action,
+        })
+    }
+
+    /// The same rule, named `label` in snapshots and logs.
+    #[must_use]
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
-    fn block_matches_via_pattern() {
-        let rule = Rule::Block {
-            pattern: UrlPattern::new("*/ads/*").unwrap(),
-        };
-        assert!(rule.matches("https://example.com/ads/banner.png"));
-        assert!(!rule.matches("https://example.com/content/main.css"));
+    fn a_match_fits_its_pause_kind_url_and_resource_type() {
+        let api = Match::url("*/api/*").unwrap().resource(ResourceType::XHR);
+        let request = PauseKind::Request;
+        assert!(api.fits("https://a.test/api/x", ResourceType::Fetch, request));
+        assert!(!api.fits("https://a.test/api/x", ResourceType::Image, request));
+        assert!(!api.fits("https://a.test/x", ResourceType::XHR, request));
+        let headers = PauseKind::ResponseHeaders;
+        assert!(!api.fits("https://a.test/api/x", ResourceType::XHR, headers));
+
+        let hosts = Match::hosts(Arc::new(HostMatcher::new(["evil.test".to_string()])));
+        assert!(hosts.fits("https://cdn.evil.test/x.js", ResourceType::Script, request));
+        assert!(!hosts.fits("https://good.test/x.js", ResourceType::Script, request));
     }
 
     #[test]
-    fn redirect_matches_via_from_field() {
-        let rule = Rule::Redirect {
-            from: UrlPattern::new("*/old/*").unwrap(),
-            to: "https://example.com/new/replacement".into(),
-        };
-        assert!(rule.matches("https://example.com/old/page.html"));
-        assert!(!rule.matches("https://example.com/new/page.html"));
+    fn a_match_asks_chrome_for_its_stage_and_type() {
+        let at_response = Match::url("*/api/*")
+            .unwrap()
+            .at(PauseKind::ResponseError)
+            .resource(ResourceType::Document);
+        assert_eq!(
+            at_response.cdp_pattern(),
+            json!({ "urlPattern": "*/api/*", "resourceType": "Document", "requestStage": "Response" })
+        );
+        let hosts = Match::hosts(Arc::new(HostMatcher::new(Vec::new())));
+        assert_eq!(
+            hosts.cdp_pattern(),
+            json!({ "urlPattern": "*", "requestStage": "Request" })
+        );
     }
 
     #[test]
-    fn block_hosts_matches_on_host_and_subdomain() {
-        let rule = Rule::BlockHosts {
-            matcher: Arc::new(HostMatcher::new(["evil.com".to_string()])),
-        };
-        assert!(rule.matches("https://evil.com/track.js"));
-        assert!(rule.matches("https://a.b.evil.com/x?y=1"));
-        assert!(!rule.matches("https://good.com/app.js"));
-        assert!(!rule.matches("https://notevil.com/app.js"));
-
-        // Debug renders the variant name + the host count (the Arc<HostMatcher>
-        // is summarized, not dumped).
-        let dbg = format!("{rule:?}");
-        assert!(dbg.contains("BlockHosts"), "got: {dbg}");
-        assert!(dbg.contains("hosts"), "got: {dbg}");
-    }
-
-    #[test]
-    fn rule_modify_response_matches_and_debug() {
-        let rule = Rule::ModifyResponse {
-            pattern: UrlPattern::new("*/api/*").unwrap(),
-            modify: Arc::new(|_resp: &ResponseInfo| ResponseOverrides {
-                status: Some(418),
-                ..ResponseOverrides::default()
-            }),
-        };
-        assert!(rule.matches("https://example.com/api/users"));
-        assert!(!rule.matches("https://example.com/static/app.js"));
-
-        // Debug renders the pattern + a closure placeholder (the Arc<dyn Fn>
-        // isn't Debug).
-        let dbg = format!("{rule:?}");
-        assert!(dbg.contains("ModifyResponse"), "got: {dbg}");
-        assert!(dbg.contains("*/api/*"), "got: {dbg}");
-        assert!(dbg.contains("<closure>"), "got: {dbg}");
+    fn a_rule_refuses_an_action_its_pause_kind_can_not_take() {
+        let response = Match::url("*").unwrap().at(PauseKind::ResponseHeaders);
+        let err = Rule::new(response, Action::RewriteUrl("https://b.test/".into())).unwrap_err();
+        assert!(matches!(
+            err,
+            InterceptionError::MismatchedPause {
+                action: "RewriteUrl",
+                pause: PauseKind::ResponseHeaders
+            }
+        ));
+        let modify = Action::ModifyResponse(Arc::new(|_| ResponseOverrides::default()));
+        assert!(Rule::new(Match::url("*").unwrap(), modify).is_err());
+        let error = Match::url("*").unwrap().at(PauseKind::ResponseError);
+        assert!(Rule::new(error, Action::Block(AbortReason::Failed)).is_ok());
     }
 }

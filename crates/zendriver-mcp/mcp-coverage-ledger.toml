@@ -555,17 +555,13 @@ excluded = "crate-root re-export of the above builder; same non-goal"
 api = "zendriver::browser::BrowserBuilder::proxy"
 covered = "browser_open.proxy"
 
-# ── InterceptBuilder::handle_proxy_auth (renamed from handle_auth) ──────────
-# Answers only a proxy's challenges now, once per challenge. Not in the
-# zendriver baseline (only the `InterceptBuilder` re-export is), so recorded
-# by hand: browser_open's proxy credentials reach it via BrowserBuilder.
+# ── Proxy credentials: one per-tab setting (Interceptor::set_proxy_auth) ───
+# Not in the zendriver baseline (it reaches the sub-crate only through the
+# `interception` module re-export), so recorded by hand: browser_open's
+# proxy credentials reach it via BrowserBuilder.
 [[entry]]
-api = "zendriver_interception::builder::InterceptBuilder::handle_proxy_auth"
+api = "zendriver_interception::interceptor::Interceptor::set_proxy_auth"
 covered = "browser_open.proxy"
-
-[[entry]]
-api = "zendriver_interception::builder::InterceptBuilder::handle_proxy_auth_scoped_to_document"
-excluded = "Document-only variant of handle_proxy_auth; browser_open wires the match-all one"
 
 [[entry]]
 api = "zendriver::browser::BrowserBuilder::geo_auto"
@@ -1117,3 +1113,16 @@ covered = "browser_click.wait_for_navigation / browser_press.wait_for_navigation
 [[entry]]
 api = "zendriver::tab::Tab::wait_for_url"
 covered = "browser_wait_for_url"
+
+# ── Interception precedence (decision #15): one ordered list per tab ───────
+[[entry]]
+api = "zendriver::interception"
+excluded = "re-export of the zendriver-interception crate for its generic names (Position, Rule, Match, ...); agents reach the list through the browser_intercept_* tools"
+
+[[entry]]
+api = "zendriver::tab::Tab::interceptor"
+covered = "browser_intercept_add_rule / browser_intercept_list_rules / browser_intercept_remove_rule"
+
+[[entry]]
+api = "zendriver::tab::Tab::tracker_blocking"
+covered = "browser_intercept_list_rules (the browser.trackers entry)"

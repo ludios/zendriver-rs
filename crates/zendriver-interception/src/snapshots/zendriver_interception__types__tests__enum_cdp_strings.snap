@@ -31,10 +31,12 @@ AbortReason:
     - BlockedByClient
   - - BlockedByResponse
     - BlockedByResponse
-RequestStage:
+PauseKind:
   - - Request
     - Request
-  - - Response
+  - - ResponseHeaders
+    - Response
+  - - ResponseError
     - Response
 ResourceType:
   - - Document

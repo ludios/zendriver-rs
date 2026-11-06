@@ -6,10 +6,10 @@
 //! Each `browser_intercept_add_rule` call adds one layer to the current
 //! tab's interception (`tab.intercept().<action>.start()`) and keeps the
 //! returned [`InterceptHandle`] in [`SessionState::rules`], under the rule's
-//! own removable id. The tab's layers compose: a request goes to the newest
-//! rule that matches it at the stage Chrome paused it at, and the older
-//! rules (and, after them, the browser's tracker blocking) get only what
-//! no newer rule took. The browser's proxy credentials keep working.
+//! own removable id. The tab's interception is one ordered list: tracker
+//! blocking (`browser.trackers`) first, then the rules in the order they
+//! were added; the first entry that fits a request decides it. The
+//! browser's proxy credentials keep working.
 //! `browser_intercept_remove_rule` stops the handle, which removes only
 //! that layer.
 //!
@@ -242,7 +242,10 @@ pub async fn add_rule(
             (b, "modify_response")
         }
     };
-    let handle = builder.start().await.map_err(zendriver_err)?;
+    let handle = builder
+        .start(zendriver::interception::Position::Last)
+        .await
+        .map_err(zendriver_err)?;
 
     let id: RuleId = uuid::Uuid::new_v4().to_string();
     s.rules.insert(

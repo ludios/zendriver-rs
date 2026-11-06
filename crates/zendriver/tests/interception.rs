@@ -7,9 +7,10 @@
 use std::time::Duration;
 
 use futures::StreamExt;
+use zendriver::interception::{Match, Position};
 use zendriver::{Browser, RequestOverrides, ResponseOverrides};
 use zendriver_testkit::{
-    FixtureServer, PROXY_PASSWORD, PROXY_USER, SITE_A, eval, launch_for_test, load,
+    FixtureServer, PROXY_PASSWORD, PROXY_USER, SITE_A, SITE_B, eval, launch_for_test, load,
 };
 
 /// What a `fetch` of `path` from the page gets:
@@ -38,8 +39,6 @@ async fn response_rules_that_set_only_a_status_or_a_phrase() {
 
     let _intercept = tab
         .intercept()
-        .pattern("*/plain?*")
-        .at_response()
         .modify_response("*/plain?status", |_| ResponseOverrides {
             status: Some(203),
             ..ResponseOverrides::default()
@@ -50,7 +49,7 @@ async fn response_rules_that_set_only_a_status_or_a_phrase() {
             ..ResponseOverrides::default()
         })
         .unwrap()
-        .start()
+        .start(Position::Last)
         .await
         .unwrap();
 
@@ -78,7 +77,7 @@ async fn a_request_right_after_start_is_intercepted() {
         .intercept()
         .respond("*/plain?mocked", 200, Vec::new(), b"Mocked".to_vec())
         .unwrap()
-        .start()
+        .start(Position::Last)
         .await
         .unwrap();
     let body = eval(&tab, "fetch('/plain?mocked').then(r => r.text())").await;
@@ -103,7 +102,7 @@ async fn a_rule_and_the_proxy_credentials_compose() {
         .intercept()
         .respond("*/plain?mocked", 200, html, page)
         .unwrap()
-        .start()
+        .start(Position::Last)
         .await
         .unwrap();
     load(&tab, &server.url(SITE_A, "/plain?mocked")).await;
@@ -137,7 +136,7 @@ async fn rules_pause_at_their_own_stage() {
         .unwrap()
         .block("*/plain?blocked")
         .unwrap()
-        .start()
+        .start(Position::Last)
         .await
         .unwrap();
     assert_eq!(
@@ -170,16 +169,16 @@ async fn a_paused_request_is_released_whatever_goes_wrong() {
         .unwrap()
         .respond("*/plain?refused", 200, bad_header, Vec::new())
         .unwrap()
-        .start()
+        .start(Position::Last)
         .await
         .unwrap();
     assert_eq!(fetch_response(&tab, "/plain?panic").await, upstream);
     assert_eq!(fetch_response(&tab, "/plain?refused").await, upstream);
 
+    let held = Match::url("*/plain?held").unwrap();
     let mut stream = tab
-        .intercept()
-        .pattern("*/plain?held")
-        .subscribe()
+        .interceptor()
+        .subscribe(held, Position::Last)
         .await
         .unwrap();
     let held = tokio::spawn({
@@ -192,5 +191,69 @@ async fn a_paused_request_is_released_whatever_goes_wrong() {
         .unwrap();
     drop(paused);
     assert_eq!(held.await.unwrap(), upstream);
+    browser.close().await;
+}
+
+/// With tracker blocking, a tab starts with the entry `browser.trackers`,
+/// and a catch-all rule inserted at `Last` comes after it: tracker requests
+/// stay blocked, the others get the rule. Moved to `First`, the rule
+/// decides the tracker requests too, and they go through. (The page can't
+/// tell: Chrome hides a cross-site `no-cors` HTML response from it, so the
+/// server's log says what went through.)
+#[tokio::test]
+async fn tracker_blocking_decides_ahead_of_a_rule_behind_it() {
+    let server = FixtureServer::start().await;
+    let builder = Browser::builder().tracker_blocklist_add([SITE_B.to_string()]);
+    let browser = launch_for_test(builder).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/plain")).await;
+    let tracker = format!(
+        "fetch('{}', {{ mode: 'no-cors' }}).then(() => 0, () => 0)",
+        server.url(SITE_B, "/plain?tracked")
+    );
+    let tracked = || {
+        let to_tracker = server.requests_to("/plain");
+        to_tracker.iter().filter(|r| r.host == SITE_B).count()
+    };
+
+    let tag = |req: &zendriver::RequestInfo| {
+        let mut headers = req.headers.clone();
+        headers.push(("x-tag".into(), "1".into()));
+        RequestOverrides {
+            headers: Some(headers),
+            ..RequestOverrides::default()
+        }
+    };
+    let rule = tab
+        .intercept()
+        .modify_request("*", tag)
+        .unwrap()
+        .start(Position::Last)
+        .await
+        .unwrap();
+    let trackers = tab.tracker_blocking().unwrap();
+    let snapshot = tab.interceptor().snapshot(false).await.unwrap();
+    let order: Vec<_> = snapshot.entries.iter().map(|e| e.id).collect();
+    assert_eq!(order, [trackers, rule.ids()[0]]);
+    assert_eq!(
+        snapshot.entries[0].label.as_deref(),
+        Some("browser.trackers")
+    );
+
+    eval(&tab, &tracker).await;
+    assert_eq!(tracked(), 0, "the tracker request went through");
+    eval(&tab, "fetch('/plain?tagged').then(r => r.status)").await;
+    let tagged = server.requests_to("/plain");
+    assert!(
+        tagged.iter().any(|r| r.header("x-tag") == Some("1")),
+        "the rule never tagged a request: {tagged:?}"
+    );
+
+    tab.interceptor()
+        .move_rule(rule.ids()[0], Position::First)
+        .await
+        .unwrap();
+    eval(&tab, &tracker).await;
+    assert_eq!(tracked(), 1, "the tracker request didn't go through");
     browser.close().await;
 }

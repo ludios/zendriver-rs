@@ -1895,32 +1895,40 @@ pub(crate) struct BrowserInner {
     pub(crate) tracker_matcher: Option<std::sync::Arc<crate::HostMatcher>>,
 }
 
+/// The label of the tracker-blocking entry a tab starts with.
+#[cfg(feature = "tracker-blocking")]
+pub(crate) const TRACKER_LABEL: &str = "browser.trackers";
+
 #[cfg(feature = "interception")]
 impl BrowserInner {
-    /// Start `tab`'s layer of interception for the browser's own options:
-    /// tracker blocking, and the credentials for the proxy of `tab`'s
-    /// browser context (an isolated context's own, from
-    /// [`crate::BrowserContextBuilder::proxy_auth`], else
-    /// [`BrowserBuilder::proxy_auth`]'s). Returns once Chrome has applied
-    /// it. Does nothing when neither applies.
+    /// Apply the browser's own options to `tab`'s interception: the proxy
+    /// credentials of `tab`'s browser context (an isolated context's own,
+    /// from [`crate::BrowserContextBuilder::proxy_auth`], else
+    /// [`BrowserBuilder::proxy_auth`]'s), and tracker blocking, as the
+    /// entry `browser.trackers` at the front of the list. Returns once
+    /// Chrome has applied them. Does nothing when neither applies.
     pub(crate) async fn start_browser_intercept(&self, tab: &Tab) -> Result<(), ZendriverError> {
         let mut credentials = self.proxy_auth.clone();
         if let Some(context) = tab.inner.browser_context_id.as_deref() {
             credentials = self.context_proxy_auth.lock().await.get(context).cloned();
         }
-        let mut builder = tab.intercept();
-        let mut wanted = false;
+        if let Some(crate::proxy::ProxyCredentials { user, password }) = credentials {
+            let auth = zendriver_interception::ProxyAuth {
+                user,
+                password,
+                pause: zendriver_interception::AuthPause::EveryRequest,
+            };
+            tab.interceptor().set_proxy_auth(Some(auth)).await?;
+        }
         #[cfg(feature = "tracker-blocking")]
         if let Some(matcher) = self.tracker_matcher.clone() {
-            builder = builder.block_hosts(matcher);
-            wanted = true;
-        }
-        if let Some(crate::proxy::ProxyCredentials { user, password }) = credentials {
-            builder = builder.handle_proxy_auth(user, password);
-            wanted = true;
-        }
-        if wanted {
-            let handle = builder.start().await?;
+            use zendriver_interception::{AbortReason, Action, Match, Position, Rule};
+            let block = Action::Block(AbortReason::BlockedByClient);
+            let trackers = Rule::new(Match::hosts(matcher), block)?.label(TRACKER_LABEL);
+            let handle = tab
+                .interceptor()
+                .insert(vec![trackers], Position::First)
+                .await?;
             debug_assert!(tab.inner.browser_intercept.get().is_none());
             let _ = tab.inner.browser_intercept.set(handle);
         }
@@ -6581,11 +6589,12 @@ mod tests {
     }
 
     /// A page tab whose context has both tracker blocking (`tracker_matcher`)
-    /// and per-context proxy auth (`context_proxy_auth`) gets both in one
-    /// layer, applied with one `Fetch.enable` before the target resumes.
+    /// and per-context proxy auth (`context_proxy_auth`) gets both: the
+    /// credentials, and `browser.trackers` as its first entry, both applied
+    /// before the target resumes.
     #[cfg(all(test, feature = "tracker-blocking"))]
     #[tokio::test]
-    async fn tab_registrar_chains_tracker_and_auth_into_one_layer() {
+    async fn tab_registrar_applies_tracker_blocking_and_auth_before_the_target_runs() {
         use zendriver_transport::testing::MockConnection;
 
         let input_profile = zendriver_stealth::InputProfile::native();
@@ -6637,15 +6646,22 @@ mod tests {
             .filter(|(m, _)| m == "Fetch.enable")
             .map(|(_, p)| p)
             .collect();
-        assert_eq!(enables.len(), 1, "{methods:?}");
-        assert_eq!(enables[0]["handleAuthRequests"], true);
-        let position = |method: &str| {
-            let at = methods.iter().position(|m| *m == method);
-            at.unwrap_or_else(|| panic!("no {method}: {methods:?}"))
-        };
+        let last = enables
+            .last()
+            .unwrap_or_else(|| panic!("no Fetch.enable: {methods:?}"));
+        assert_eq!(last["handleAuthRequests"], true);
+        assert_eq!(
+            last["patterns"],
+            json!([{ "urlPattern": "*", "requestStage": "Request" }])
+        );
+        let resumed = methods
+            .iter()
+            .position(|m| *m == "Runtime.runIfWaitingForDebugger")
+            .unwrap_or_else(|| panic!("never resumed: {methods:?}"));
+        let enabled_after = methods[resumed..].contains(&"Fetch.enable");
         assert!(
-            position("Fetch.enable") < position("Runtime.runIfWaitingForDebugger"),
-            "resumed before Fetch.enable: {methods:?}"
+            !enabled_after,
+            "a Fetch.enable after the resume: {methods:?}"
         );
 
         conn.shutdown();

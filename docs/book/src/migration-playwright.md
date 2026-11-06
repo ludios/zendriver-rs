@@ -42,8 +42,8 @@ same shape).
 | Wait for request | `await page.waitForRequest("**/auth")` | `tab.expect_request("/auth").await?` |
 | Wait for download | `page.waitForEvent("download")` | `tab.expect_download().await?.await?` |
 | Handle dialog | `page.on("dialog", d => d.accept())` | `let d = tab.expect_dialog(); ...; d.await?.accept(None).await?` |
-| Intercept / block | `route.abort()` in `page.route` | `tab.intercept().block("*/ads/*")?.start().await?` |
-| Modify request | `route.continue({headers})` | `tab.intercept().modify_request("...", \|req\| {...})?.start().await?` |
+| Intercept / block | `route.abort()` in `page.route` | `tab.intercept().block("*/ads/*")?.start(Position::Last).await?` |
+| Modify request | `route.continue({headers})` | `tab.intercept().modify_request("...", \|req\| {...})?.start(Position::Last).await?` |
 | Screenshot | `await page.screenshot()` | `tab.screenshot().await?` |
 | Cookies (get all) | `await context.cookies()` | `browser.cookies().all().await?` |
 | LocalStorage | `await page.evaluate("...")` (no helper) | `tab.local_storage().get("k").await?` |

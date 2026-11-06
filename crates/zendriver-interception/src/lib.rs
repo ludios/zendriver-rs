@@ -5,41 +5,39 @@
 //! for narrative examples, glob/regex pattern semantics, and streaming-mode
 //! recipes.
 //!
-//! A session's [`Interceptor`] owns its `Fetch` domain. Each
-//! [`InterceptBuilder`] made for it adds one layer of interception, in one
-//! of two ways:
+//! A session's [`Interceptor`] owns its `Fetch` domain: its interception
+//! is one ordered list of entries, each one [`Rule`] (a [`Match`] and an
+//! [`Action`]) or one stream, and the first entry that fits a paused
+//! request decides it. Every insertion says where in the list it goes
+//! ([`Position`]); see [`interceptor`] for the whole procedure.
 //!
-//! - **Rule-based** — chain
-//!   [`block`](builder::InterceptBuilder::block) /
-//!   [`redirect`](builder::InterceptBuilder::redirect) /
-//!   [`respond`](builder::InterceptBuilder::respond) /
-//!   [`modify_request`](builder::InterceptBuilder::modify_request) /
-//!   [`modify_response`](builder::InterceptBuilder::modify_response) and call
-//!   [`start`](builder::InterceptBuilder::start). Dropping the returned
-//!   [`InterceptHandle`] removes the layer.
-//! - **Stream** — call
-//!   [`subscribe`](builder::InterceptBuilder::subscribe) to get an
-//!   [`InterceptStream`] of [`PausedRequest`]s; release each pause by
-//!   calling one of [`continue_`](PausedRequest::continue_),
+//! - **Rules** — [`Interceptor::insert`] them, or chain
+//!   [`InterceptBuilder`]'s shorthand ([`block`](InterceptBuilder::block),
+//!   [`redirect`](InterceptBuilder::redirect),
+//!   [`respond`](InterceptBuilder::respond),
+//!   [`modify_request`](InterceptBuilder::modify_request),
+//!   [`modify_response`](InterceptBuilder::modify_response), ...) and call
+//!   [`start`](InterceptBuilder::start). Dropping the returned
+//!   [`InterceptHandle`] removes them.
+//! - **Stream** — [`Interceptor::subscribe`] returns an [`InterceptStream`]
+//!   of [`PausedRequest`]s; release each by calling one of
+//!   [`continue_`](PausedRequest::continue_),
 //!   [`abort`](PausedRequest::abort), [`respond`](PausedRequest::respond),
-//!   [`modify_and_continue`](PausedRequest::modify_and_continue), or (at
-//!   the `Response` stage) [`continue_response`](PausedRequest::continue_response).
-//!
-//! Layers of one session compose: see [`interceptor`] for how a paused
-//! request is handed to them.
+//!   [`modify_and_continue`](PausedRequest::modify_and_continue), or (at a
+//!   `ResponseHeaders` pause) [`continue_response`](PausedRequest::continue_response).
 //!
 //! ```no_run
 //! # async fn ex(session: zendriver_transport::SessionHandle)
 //! #   -> Result<(), zendriver_interception::InterceptionError> {
-//! use zendriver_interception::{InterceptBuilder, Interceptor};
+//! use zendriver_interception::{InterceptBuilder, Interceptor, Position};
 //!
 //! let interceptor = Interceptor::new(session);
 //! let _handle = InterceptBuilder::new(&interceptor)
 //!     .block("*/ads/*")?
 //!     .redirect("*/old/*", "https://example.com/new/")?
-//!     .start()
+//!     .start(Position::Last)
 //!     .await?;
-//! // _handle stays in scope -> interception live.
+//! // _handle stays in scope -> the rules stay in.
 //! # Ok(()) }
 //! ```
 
@@ -53,13 +51,17 @@ pub mod rule;
 pub mod types;
 pub mod url_pattern;
 
-pub use builder::{InterceptBuilder, RequestPattern};
+pub use builder::InterceptBuilder;
 pub use error::InterceptionError;
 pub use host_matcher::{HostMatcher, host_of};
-pub use interceptor::{InterceptHandle, InterceptStream, Interceptor};
+pub use interceptor::{
+    ActionKind, AuthPause, Entry, InterceptHandle, InterceptStream, Interceptor, Position,
+    ProxyAuth, RuleId, Snapshot, UrlInfo,
+};
 pub use paused::PausedRequest;
-pub use rule::Rule;
+pub use rule::{Action, Match, Rule, UrlMatch};
 pub use types::{
-    AbortReason, RequestInfo, RequestOverrides, RequestStage, ResourceType, ResponseInfo,
+    AbortReason, PauseKind, RequestInfo, RequestOverrides, ResourceType, ResponseInfo,
     ResponseOverrides,
 };
+pub use url_pattern::UrlPattern;

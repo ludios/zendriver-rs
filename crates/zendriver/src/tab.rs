@@ -367,13 +367,12 @@ pub(crate) struct TabInner {
     /// only installs a default `cwd/downloads` path when this is still
     /// `false`, so it never clobbers a directory the caller chose explicitly.
     pub(crate) download_behavior_set: std::sync::atomic::AtomicBool,
-    /// The one owner of this tab's `Fetch` domain: every layer of
-    /// interception on the tab ([`Tab::intercept`], and the browser's own
-    /// in [`Self::browser_intercept`]) is added through it.
+    /// The one owner of this tab's `Fetch` domain: every entry of the tab's
+    /// interception, and its proxy credentials, go through it.
     #[cfg(feature = "interception")]
     pub(crate) interceptor: zendriver_interception::Interceptor,
-    /// The layer that applies the browser's own interception options to
-    /// this tab (tracker blocking, proxy credentials), when any applies.
+    /// The handle of the browser's own entry in this tab's interception,
+    /// `browser.trackers`, when tracker blocking is on.
     #[cfg(feature = "interception")]
     pub(crate) browser_intercept: std::sync::OnceLock<zendriver_interception::InterceptHandle>,
 }
@@ -3255,33 +3254,28 @@ impl Tab {
 
 #[cfg(feature = "interception")]
 impl Tab {
-    /// Construct a fluent
-    /// [`InterceptBuilder`](zendriver_interception::InterceptBuilder) for a
-    /// layer of this tab's interception.
+    /// Shorthand for inserting rules into this tab's interception: chain
+    /// `.block(..)` / `.block_hosts(..)` / `.allow(..)` / `.redirect(..)` /
+    /// `.respond(..)` / `.modify_request(..)` / `.modify_response(..)` /
+    /// `.rule(..)`, then await
+    /// [`start`](zendriver_interception::InterceptBuilder::start) with the
+    /// [`Position`](zendriver_interception::Position) they go at. The
+    /// returned [`InterceptHandle`](zendriver_interception::InterceptHandle)
+    /// removes them when dropped.
     ///
-    /// Chain rule registration (`.block(...)` / `.block_hosts(...)` /
-    /// `.redirect(...)` / `.respond(...)` / `.modify_request(...)` /
-    /// `.modify_response(...)`) and optional CDP
-    /// `RequestPattern` filters (`.pattern(...)` / `.at_request()` /
-    /// `.at_response()` / `.resource(...)`), then await
-    /// [`start`](zendriver_interception::InterceptBuilder::start) to have
-    /// the rules applied (it returns an
-    /// [`InterceptHandle`](zendriver_interception::InterceptHandle) whose
-    /// `Drop` removes them), or
-    /// [`subscribe`](zendriver_interception::InterceptBuilder::subscribe)
-    /// to receive raw
-    /// [`PausedRequest`](zendriver_interception::PausedRequest)s on a
-    /// stream you drive manually.
-    ///
-    /// Each `start` or `subscribe` adds a layer, and the tab's layers
-    /// compose: a later one takes precedence for the requests it takes,
-    /// and the older ones get the rest. The browser's own
-    /// tracker blocking and proxy credentials are the oldest layer. See
-    /// [`zendriver_interception::interceptor`] for the details.
+    /// The tab's interception is one ordered list of entries, and the first
+    /// entry that fits a paused request decides it, so where a rule goes
+    /// matters: a tab with tracker blocking starts with the entry
+    /// `browser.trackers` ([`Tab::tracker_blocking`]), and a rule at
+    /// `Position::First` decides the tracker requests it fits ahead of it.
+    /// See [`zendriver_interception::interceptor`] for the whole procedure,
+    /// and [`Tab::interceptor`] for streams, snapshots and moving entries.
     ///
     /// ```no_run
     /// # async fn ex(tab: &zendriver::Tab) -> zendriver::Result<()> {
-    /// let _ads = tab.intercept().block("*/ads/*")?.start().await?;
+    /// use zendriver::interception::Position;
+    ///
+    /// let _ads = tab.intercept().block("*/ads/*")?.start(Position::Last).await?;
     /// tab.goto("https://example.com").await?; // ads already blocked
     /// # Ok(()) }
     /// ```
@@ -3290,6 +3284,32 @@ impl Tab {
     #[must_use]
     pub fn intercept(&self) -> zendriver_interception::InterceptBuilder {
         zendriver_interception::InterceptBuilder::new(&self.inner.interceptor)
+    }
+
+    /// This tab's [`Interceptor`](zendriver_interception::Interceptor): its
+    /// interception's entries ([`insert`](zendriver_interception::Interceptor::insert),
+    /// [`subscribe`](zendriver_interception::Interceptor::subscribe),
+    /// [`move_rule`](zendriver_interception::Interceptor::move_rule),
+    /// [`remove`](zendriver_interception::Interceptor::remove),
+    /// [`snapshot`](zendriver_interception::Interceptor::snapshot)) and its
+    /// proxy credentials.
+    ///
+    /// Gated by the `interception` cargo feature.
+    #[must_use]
+    pub fn interceptor(&self) -> &zendriver_interception::Interceptor {
+        &self.inner.interceptor
+    }
+
+    /// The id of the entry `browser.trackers` this tab started with, when
+    /// tracker blocking is on (`BrowserBuilder::block_trackers` /
+    /// `tracker_blocklist_*`): for a `Position` relative to it,
+    /// `move_rule` or `remove`. (The entry may have been removed since.)
+    ///
+    /// Gated by the `interception` cargo feature.
+    #[must_use]
+    pub fn tracker_blocking(&self) -> Option<zendriver_interception::RuleId> {
+        let handle = self.inner.browser_intercept.get()?;
+        handle.ids().first().copied()
     }
 }
 
@@ -4760,24 +4780,30 @@ mod tests {
 
     // --- Tab::intercept (P5 T7, feature = "interception") -------------
 
-    /// Two `tab.intercept()` layers share the tab's one `Fetch`
-    /// configuration: the second `Fetch.enable` carries both layers'
-    /// patterns, and the newer layer gets the request both match.
+    /// Two `tab.intercept()` insertions share the tab's one `Fetch`
+    /// configuration: the second `Fetch.enable` carries both rules'
+    /// patterns, and of two rules that fit a request, the one ahead in the
+    /// list decides it.
     #[cfg(feature = "interception")]
     #[tokio::test]
     async fn intercepts_of_one_tab_share_its_fetch_configuration() {
+        use zendriver_interception::Position;
+
         let (mut mock, conn) = MockConnection::pair();
         let tab = Tab::new_for_test(SessionHandle::new(conn.clone(), "S1"));
         let mut handles = Vec::new();
         let mut enables = Vec::new();
-        for builder in [
-            tab.intercept().pattern("*/a/*").block("*").unwrap(),
-            tab.intercept()
-                .pattern("*/b/*")
-                .respond("*", 204, Vec::new(), Vec::new())
-                .unwrap(),
-        ] {
-            let start = tokio::spawn(builder.start());
+        let builders = [
+            (tab.intercept().block("*/a/*").unwrap(), Position::Last),
+            (
+                tab.intercept()
+                    .respond("*/b/*", 204, Vec::new(), Vec::new())
+                    .unwrap(),
+                Position::First,
+            ),
+        ];
+        for (builder, at) in builders {
+            let start = tokio::spawn(builder.start(at));
             let id = tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Fetch.enable"))
                 .await
                 .expect("no Fetch.enable within 2s");
@@ -4787,7 +4813,10 @@ mod tests {
         }
         assert_eq!(
             enables[1],
-            json!([{ "urlPattern": "*/a/*" }, { "urlPattern": "*/b/*" }])
+            json!([
+                { "urlPattern": "*/b/*", "requestStage": "Request" },
+                { "urlPattern": "*/a/*", "requestStage": "Request" },
+            ])
         );
 
         mock.emit_event_for_session(
@@ -4804,7 +4833,7 @@ mod tests {
             mock.expect_cmd("Fetch.fulfillRequest"),
         )
         .await
-        .expect("the newer layer did not answer within 2s");
+        .expect("the first entry did not answer within 2s");
         assert_eq!(mock.last_sent()["params"]["requestId"], "REQ-1");
         conn.shutdown();
     }

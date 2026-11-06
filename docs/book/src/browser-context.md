@@ -114,8 +114,8 @@ let ctx = browser
 
 Under the hood, `build()` registers the credentials in the browser's
 per-context registry; each tab opened in that context answers
-`Fetch.authRequired` with them, from the same layer of the tab's
-interception as tracker blocking, before the tab's page runs. The tab
+`Fetch.authRequired` with them (they are the tab's proxy-credentials
+setting), before the tab's page runs. The tab
 gives the credentials only to the
 proxy, never to a site that asks for its own with a 401, and only once for
 each combination of request, proxy and auth scheme: if the proxy rejects

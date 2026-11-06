@@ -173,9 +173,16 @@ pub use zendriver_transport::{
 #[cfg(feature = "interception")]
 pub use zendriver_interception::{
     AbortReason, HostMatcher, InterceptBuilder, InterceptHandle, InterceptStream,
-    InterceptionError, Interceptor, PausedRequest, RequestInfo, RequestOverrides, RequestStage,
-    ResourceType, ResponseInfo, ResponseOverrides,
+    InterceptionError, Interceptor, PausedRequest, RequestInfo, RequestOverrides, ResourceType,
+    ResponseInfo, ResponseOverrides,
 };
+
+/// The whole interception API (`Position`, `Rule`, `Match`, `Action`,
+/// `Snapshot`, ...), for the names too generic to re-export at the top.
+///
+/// Gated by the `interception` cargo feature.
+#[cfg(feature = "interception")]
+pub use zendriver_interception as interception;
 
 /// Cloudflare Turnstile bypass re-exports.
 ///
@@ -462,7 +469,8 @@ mod auto_trait_assertions {
         assert_send_sync::<RequestInfo>();
         assert_send_sync::<RequestOverrides>();
         assert_send_sync::<ResponseInfo>();
-        assert_send_sync::<RequestStage>();
+        assert_send_sync::<interception::Position>();
+        assert_send_sync::<interception::Rule>();
         assert_send_sync::<ResourceType>();
         assert_send_sync::<AbortReason>();
     }

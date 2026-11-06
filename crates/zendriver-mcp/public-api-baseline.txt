@@ -49,7 +49,6 @@ pub use zendriver::Platform
 pub use zendriver::Provenance
 pub use zendriver::RequestInfo
 pub use zendriver::RequestOverrides
-pub use zendriver::RequestStage
 pub use zendriver::ResourceType
 pub use zendriver::ResponseInfo
 pub use zendriver::ResponseOverrides
@@ -67,6 +66,7 @@ pub use zendriver::VersionSpec
 pub use zendriver::WebgpuSpec
 pub use zendriver::datadome_detect_surface
 pub use zendriver::detect_surface
+pub use zendriver::interception
 pub use zendriver::list_builds
 pub mod zendriver::browser
 pub enum zendriver::browser::Channel
@@ -4595,6 +4595,8 @@ impl zendriver::tab::Tab
 pub fn zendriver::tab::Tab::imperva(&self) -> zendriver_imperva::bypass::ImpervaBypass<'_>
 impl zendriver::tab::Tab
 pub fn zendriver::tab::Tab::intercept(&self) -> zendriver_interception::builder::InterceptBuilder
+pub fn zendriver::tab::Tab::interceptor(&self) -> &zendriver_interception::interceptor::Interceptor
+pub fn zendriver::tab::Tab::tracker_blocking(&self) -> core::option::Option<zendriver_interception::interceptor::RuleId>
 impl zendriver::tab::Tab
 pub fn zendriver::tab::Tab::pdf_builder(&self) -> zendriver::pdf::PdfBuilder<'_>
 pub async fn zendriver::tab::Tab::print_to_pdf(&self, impl core::convert::AsRef<std::path::Path>) -> zendriver::error::Result<()>
@@ -8741,6 +8743,8 @@ impl zendriver::tab::Tab
 pub fn zendriver::tab::Tab::imperva(&self) -> zendriver_imperva::bypass::ImpervaBypass<'_>
 impl zendriver::tab::Tab
 pub fn zendriver::tab::Tab::intercept(&self) -> zendriver_interception::builder::InterceptBuilder
+pub fn zendriver::tab::Tab::interceptor(&self) -> &zendriver_interception::interceptor::Interceptor
+pub fn zendriver::tab::Tab::tracker_blocking(&self) -> core::option::Option<zendriver_interception::interceptor::RuleId>
 impl zendriver::tab::Tab
 pub fn zendriver::tab::Tab::pdf_builder(&self) -> zendriver::pdf::PdfBuilder<'_>
 pub async fn zendriver::tab::Tab::print_to_pdf(&self, impl core::convert::AsRef<std::path::Path>) -> zendriver::error::Result<()>

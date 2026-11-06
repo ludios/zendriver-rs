@@ -26,6 +26,24 @@ pub enum InterceptionError {
 
     #[error("wrong interception stage: this action is only valid at the Response stage")]
     WrongStage,
+
+    /// No interception entry has this id (it was never inserted, or it
+    /// has been removed): from `move_rule`, `remove`, and a `Position`
+    /// that names it.
+    #[error("no interception entry {0}")]
+    NoSuchRule(crate::interceptor::RuleId),
+
+    /// `insert` (or `InterceptBuilder::start`) was given no rules.
+    #[error("no rules to insert")]
+    NoRules,
+
+    /// A rule's action can't act on the kind of pause its match names
+    /// (e.g. `ModifyResponse` on a `Request` pause).
+    #[error("{action} can't act on a {pause:?} pause")]
+    MismatchedPause {
+        action: &'static str,
+        pause: crate::types::PauseKind,
+    },
 }
 
 impl From<zendriver_transport::CallError> for InterceptionError {

@@ -34,7 +34,7 @@ alias.
 | Run JS | `await tab.evaluate("document.title")` | `tab.evaluate_main::<String>("document.title").await?` |
 | List tabs | `browser.tabs` | `browser.tabs().await` |
 | Wait for response | `await tab.expect_request(url)` | `tab.expect_request(url).await?` (feature `expect`) |
-| Block requests | `tab.add_handler(zd.cdp.fetch.RequestPaused, h)` | `tab.intercept().block("...")?.start().await?` (feature `interception`) |
+| Block requests | `tab.add_handler(zd.cdp.fetch.RequestPaused, h)` | `tab.intercept().block("...")?.start(Position::Last).await?` (feature `interception`) |
 | Solve Cloudflare | `await tab.verify_cf()` | `tab.cloudflare().wait_for_clearance(d).await?` (feature `cloudflare`) |
 | Get cookies | `await browser.cookies.get_all()` | `browser.cookies().all().await?` |
 | Set cookie | `await browser.cookies.set_all([...])` | `browser.cookies().set_many(vec![...]).await?` |
