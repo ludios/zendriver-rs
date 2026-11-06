@@ -421,31 +421,58 @@ pub(crate) async fn run_actor<S>(
         }
     }
 
-    // Latch *why* this actor stopped, so calls that arrive after it is gone
-    // can still tell "Chrome died" from "I closed it". Without this, only
-    // in-flight calls (drained just below with `drain_code`) ever see
-    // `Disconnected`: every later call finds a closed command channel, whose
-    // `SendError` carries no reason, and reports `Shutdown`.
-    //
-    // The **channel** is what makes the flag trustworthy, not the atomic
-    // ordering. `cmd_rx` is dropped when this function returns, which is
-    // strictly after this store; the drop synchronizes with a sender observing
-    // the channel closed; happens-before is transitive. So any sender that
-    // observes the channel closed necessarily observes the flag too — there is
-    // no window where a caller sees the death but not its cause, and a
-    // `Relaxed` store would be visible just the same.
-    //
-    // `Release`/`Acquire` is kept anyway (rather than the `Relaxed` used for
-    // the advisory counters on `ConnectionInner`) because it costs nothing on
-    // this once-per-actor-exit path and keeps the flag correct if a future read
-    // path ever reaches it without going through the channel. Note the pairing
-    // only orders *this* location: adding a second flag would not give an
-    // ordering guarantee between the two.
+    // End this generation, unless a `reconnect()` replaced this actor: that
+    // ended the generation already (with `Reconnected`), and the connection's
+    // state belongs to the new actor now. Under `generation_end`'s lock, which
+    // a reconnect bumps the generation under, so that this actor can't
+    // announce its end after the `Reconnected` of a reconnect that replaced
+    // it, and a subscription that starts after the announcement still learns
+    // of it (see `Connection::subscribe_raw_accounted`).
     if let Some(inner) = weak_inner.upgrade() {
-        inner.socket_died.store(
-            drain_code == crate::connection::DISCONNECTED_CODE,
-            std::sync::atomic::Ordering::Release,
-        );
+        let mut end = inner
+            .generation_end
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner.generation.load(std::sync::atomic::Ordering::Relaxed) == accounted.generation {
+            // Latch *why* this actor stopped, so calls that arrive after it is
+            // gone can still tell "Chrome died" from "I closed it". Without
+            // this, only in-flight calls (drained just below with `drain_code`)
+            // ever see `Disconnected`: every later call finds a closed command
+            // channel, whose `SendError` carries no reason, and reports
+            // `Shutdown`.
+            //
+            // The **channel** is what makes the flag trustworthy, not the
+            // atomic ordering. `cmd_rx` is dropped when this function returns,
+            // which is strictly after this store; the drop synchronizes with a
+            // sender observing the channel closed; happens-before is
+            // transitive. So any sender that observes the channel closed
+            // necessarily observes the flag too — there is no window where a
+            // caller sees the death but not its cause, and a `Relaxed` store
+            // would be visible just the same.
+            //
+            // `Release`/`Acquire` is kept anyway (rather than the `Relaxed`
+            // used for the advisory counters on `ConnectionInner`) because it
+            // costs nothing on this once-per-actor-exit path and keeps the flag
+            // correct if a future read path ever reaches it without going
+            // through the channel. Note the pairing only orders *this*
+            // location: adding a second flag would not give an ordering
+            // guarantee between the two.
+            inner.socket_died.store(
+                drain_code == crate::connection::DISCONNECTED_CODE,
+                std::sync::atomic::Ordering::Release,
+            );
+
+            // A ws death is announced as `Disconnected`, a stop while the ws
+            // was alive as `Shutdown`.
+            let generation = accounted.generation;
+            let announcement = if drain_code == crate::connection::DISCONNECTED_CODE {
+                AccountedRawEvent::Disconnected { generation }
+            } else {
+                AccountedRawEvent::Shutdown { generation }
+            };
+            *end = Some(announcement.clone());
+            let _ = accounted.tx.send(announcement);
+        }
     }
 
     // Drain pending into transport errors so callers don't hang. `drain_code`
@@ -458,24 +485,6 @@ pub(crate) async fn run_actor<S>(
     } else {
         "connection shut down"
     };
-    // Announce the end on the accounted bus, gated the same as the per-event
-    // mirroring above: a ws death as `Disconnected`, and a stop while the ws
-    // was alive as `Shutdown`. But an actor that a `reconnect()` replaced
-    // announces nothing: `Reconnected` already said that its generation
-    // ended. A reconnect bumps the connection's generation before it cancels
-    // this actor, and the cancellation orders the bump before this load.
-    let generation = accounted.generation;
-    let replaced_by_reconnect = weak_inner.upgrade().is_some_and(|inner| {
-        inner.generation.load(std::sync::atomic::Ordering::Relaxed) != generation
-    });
-    if !replaced_by_reconnect && accounted.tx.receiver_count() > 0 {
-        let end = if drain_code == crate::connection::DISCONNECTED_CODE {
-            AccountedRawEvent::Disconnected { generation }
-        } else {
-            AccountedRawEvent::Shutdown { generation }
-        };
-        let _ = accounted.tx.send(end);
-    }
     for (_id, reply) in pending.drain() {
         let _ = reply.send(Err(CdpRpcError {
             code: drain_code,

@@ -134,10 +134,20 @@ pub(crate) struct ConnectionInner {
     /// [`AccountedRawEvent::Reconnected`] marking the transition.
     pub(crate) accounted_tx: broadcast::Sender<AccountedRawEvent>,
     /// Current connection generation, read by [`Connection::connection_generation`].
-    /// Starts at 1; bumped by [`Connection::reconnect`] before the new actor
-    /// is spawned. `Relaxed` suffices: advisory value with no ordering
-    /// relationship to anything else, same rationale as `call_timeout_ms`.
+    /// Starts at 1; bumped by [`Connection::reconnect`] under
+    /// [`generation_end`](Self::generation_end)'s lock, before the previous
+    /// actor is cancelled, which is how that actor tells that it was
+    /// replaced. `Relaxed` suffices: the reads whose ordering matters hold
+    /// that lock; the others are advisory.
     pub(crate) generation: AtomicU64,
+    /// How the current generation ended — the `Disconnected` or `Shutdown`
+    /// that its actor announced — or `None` while that actor runs. The lock
+    /// orders what subscribers must see in order: an actor ends its
+    /// generation under it, [`Connection::reconnect`] starts a new
+    /// generation under it, and [`Connection::subscribe_raw_accounted`]
+    /// subscribes under it, so that a subscriber that comes after an end
+    /// still learns of it.
+    pub(crate) generation_end: Mutex<Option<AccountedRawEvent>>,
     /// Cancellation token of the *current* actor. Swapped on reconnect: the
     /// old actor is cancelled (its already-dead `pending` drains) and the new
     /// actor gets a fresh token. Each spawned actor owns its own clone, so
@@ -205,6 +215,7 @@ impl std::fmt::Debug for ConnectionInner {
             .field("event_tx", &self.event_tx)
             .field("accounted_tx", &self.accounted_tx)
             .field("generation", &self.generation)
+            .field("generation_end", &self.generation_end)
             .field("shutdown", &self.shutdown)
             .field("observer_timeout", &self.observer_timeout)
             .field("call_timeout_ms", &self.call_timeout_ms)
@@ -420,14 +431,18 @@ impl Connection {
     }
 
     /// Subscribe to all events on this connection, annotated with
-    /// generation, sequence, and explicit loss/reconnect/disconnect signals.
+    /// generation, sequence, and explicit loss/reconnect/disconnect/shutdown
+    /// signals.
     ///
     /// Unlike [`Connection::subscribe_raw`], which silently drops frames a
     /// lagging subscriber missed, this stream reports every gap explicitly
     /// via [`AccountedRawEvent::Lagged`], every [`Connection::reconnect`] via
-    /// [`AccountedRawEvent::Reconnected`], and the underlying WebSocket dying
-    /// via [`AccountedRawEvent::Disconnected`] — so a capture/replay/monitor
-    /// consumer is never silently misled about what it saw.
+    /// [`AccountedRawEvent::Reconnected`], the underlying WebSocket dying via
+    /// [`AccountedRawEvent::Disconnected`], and a [`Connection::shutdown`]
+    /// via [`AccountedRawEvent::Shutdown`] — so a capture/replay/monitor
+    /// consumer is never silently misled about what it saw. If the current
+    /// generation ended before this call, the stream starts with the
+    /// `Disconnected` or `Shutdown` that ended it.
     ///
     /// Opt-in and additive: `subscribe_raw` is completely unaffected by
     /// whether this method is ever called. The actor gates the per-event
@@ -469,28 +484,38 @@ impl Connection {
     pub fn subscribe_raw_accounted(
         &self,
     ) -> impl Stream<Item = AccountedRawEvent> + Send + Unpin + use<> {
+        // Subscribe under `generation_end`'s lock, so that an end announced
+        // before this subscription is read here, and one announced after it
+        // arrives on the bus: never both, and never neither.
+        let (receiver, past_end) = {
+            let end = self
+                .inner
+                .generation_end
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (self.inner.accounted_tx.subscribe(), end.clone())
+        };
         let inner = Arc::clone(&self.inner);
-        Box::pin(
-            BroadcastStream::new(self.inner.accounted_tx.subscribe()).filter_map(move |res| {
-                let inner = Arc::clone(&inner);
-                async move {
-                    match res {
-                        Ok(ev) => Some(ev),
-                        Err(BroadcastStreamRecvError::Lagged(missed)) => {
-                            Some(AccountedRawEvent::Lagged {
-                                // Read fresh rather than a value captured at
-                                // subscribe time, so a `Lagged` detected after
-                                // a `reconnect()` reports the generation
-                                // active *now*, not the one active when this
-                                // subscriber first subscribed.
-                                generation: inner.generation.load(Ordering::Relaxed),
-                                missed,
-                            })
-                        }
+        let live = BroadcastStream::new(receiver).filter_map(move |res| {
+            let inner = Arc::clone(&inner);
+            async move {
+                match res {
+                    Ok(ev) => Some(ev),
+                    Err(BroadcastStreamRecvError::Lagged(missed)) => {
+                        Some(AccountedRawEvent::Lagged {
+                            // Read fresh rather than a value captured at
+                            // subscribe time, so a `Lagged` detected after
+                            // a `reconnect()` reports the generation
+                            // active *now*, not the one active when this
+                            // subscriber first subscribed.
+                            generation: inner.generation.load(Ordering::Relaxed),
+                            missed,
+                        })
                     }
                 }
-            }),
-        )
+            }
+        });
+        Box::pin(futures::stream::iter(past_end).chain(live))
     }
 
     /// The current connection generation.
@@ -515,7 +540,9 @@ impl Connection {
 
     /// Trigger graceful shutdown of the underlying actor. Subscribers of
     /// [`Connection::subscribe_raw_accounted`] then receive
-    /// [`AccountedRawEvent::Shutdown`], unless the socket died first.
+    /// [`AccountedRawEvent::Shutdown`], unless the socket's death (announced
+    /// as `Disconnected`) or a concurrent [`Connection::reconnect`] (announced
+    /// as `Reconnected`) ended the current generation first.
     pub fn shutdown(&self) {
         self.inner
             .shutdown
@@ -600,15 +627,33 @@ impl Connection {
             + Unpin
             + 'static,
     {
-        // Bump the generation BEFORE cancelling the previous actor: once the
-        // actor learns of the cancellation (which orders the bump before it),
-        // it sees that its generation is no longer the current one, so it
-        // knows that a reconnect replaced it, and it announces neither a
-        // `Shutdown` nor a `Disconnected` — a reconnect is announced solely
-        // via `Reconnected` below. `fetch_add` returns the *previous* value,
-        // exactly what `AccountedRawEvent::Reconnected::previous` needs.
-        let previous_generation = self.inner.generation.fetch_add(1, Ordering::Relaxed);
-        let new_generation = previous_generation + 1;
+        // Start the new generation: bump the generation, and announce the
+        // transition on the accounted bus. Under `generation_end`'s lock,
+        // which an actor ends its generation under: if the previous actor
+        // already ended its generation, its end comes before `Reconnected`;
+        // if not, it finds its generation replaced and announces nothing — a
+        // reconnect is announced solely via `Reconnected`. Before the
+        // previous actor is cancelled, so that the cancellation can't make
+        // it end its generation as a `Shutdown` first. And before the new
+        // actor is spawned, so a subscriber never observes an event tagged
+        // with the new generation before `Reconnected`.
+        let new_generation = {
+            let mut end = self
+                .inner
+                .generation_end
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous = self.inner.generation.fetch_add(1, Ordering::Relaxed);
+            *end = None;
+            let _ = self
+                .inner
+                .accounted_tx
+                .send(AccountedRawEvent::Reconnected {
+                    previous,
+                    generation: previous + 1,
+                });
+            previous + 1
+        };
 
         // Cancel the previous actor — its `pending` (all stale by now) drains
         // and its loop exits.
@@ -619,19 +664,6 @@ impl Connection {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.cancel();
-        }
-
-        // Announce the transition on the accounted bus BEFORE spawning the
-        // new actor, so a subscriber never observes an event tagged with the
-        // new generation before `Reconnected`.
-        if self.inner.accounted_tx.receiver_count() > 0 {
-            let _ = self
-                .inner
-                .accounted_tx
-                .send(AccountedRawEvent::Reconnected {
-                    previous: previous_generation,
-                    generation: new_generation,
-                });
         }
 
         // Fresh command channel + shutdown token for the new actor; reuse the
@@ -893,6 +925,7 @@ where
         event_tx: event_tx.clone(),
         accounted_tx: accounted_tx.clone(),
         generation: AtomicU64::new(1),
+        generation_end: Mutex::new(None),
         shutdown: Mutex::new(shutdown.clone()),
         observer_timeout,
         call_timeout_ms: AtomicU64::new(DEFAULT_CALL_TIMEOUT.as_millis() as u64),
@@ -1275,6 +1308,7 @@ mod tests {
             event_tx,
             accounted_tx,
             generation: AtomicU64::new(1),
+            generation_end: Mutex::new(None),
             shutdown: Mutex::new(CancellationToken::new()),
             observer_timeout: DEFAULT_OBSERVER_TIMEOUT,
             call_timeout_ms: AtomicU64::new(DEFAULT_CALL_TIMEOUT.as_millis() as u64),
@@ -1899,6 +1933,54 @@ mod tests {
             matches!(ev, AccountedRawEvent::Shutdown { generation: 1 }),
             "{ev:?}"
         );
+
+        // A subscription that starts after the end still learns of it.
+        let mut late = conn.subscribe_raw_accounted();
+        let first = next_accounted(&mut late).await;
+        assert!(
+            matches!(first, AccountedRawEvent::Shutdown { generation: 1 }),
+            "{first:?}"
+        );
+    }
+
+    /// A subscription that starts after the socket died starts with the
+    /// `Disconnected`, and one that starts after a reconnect revived the
+    /// connection doesn't.
+    #[tokio::test]
+    async fn a_late_subscription_starts_with_the_end_until_a_reconnect() {
+        let (ws, inbound, _outbound) = duplex_pair();
+        let conn = spawn_actor(ws);
+        let mut early = conn.subscribe_raw_accounted();
+        drop(inbound);
+        let ended = next_accounted(&mut early).await;
+        assert!(
+            matches!(ended, AccountedRawEvent::Disconnected { generation: 1 }),
+            "{ended:?}"
+        );
+
+        let mut late = conn.subscribe_raw_accounted();
+        let first = next_accounted(&mut late).await;
+        assert!(
+            matches!(first, AccountedRawEvent::Disconnected { generation: 1 }),
+            "{first:?}"
+        );
+
+        let (ws, inbound, _outbound) = duplex_pair();
+        conn.reconnect(ws);
+        let mut after_reconnect = conn.subscribe_raw_accounted();
+        inbound
+            .send(Ok(Message::text(
+                json!({ "method": "Test.evt", "params": {} }).to_string(),
+            )))
+            .await
+            .unwrap();
+        let first = next_accounted(&mut after_reconnect).await;
+        assert!(
+            matches!(first, AccountedRawEvent::Event { generation: 2, .. }),
+            "{first:?}"
+        );
+
+        conn.shutdown();
     }
 
     /// The actor that a reconnect replaced announces nothing more: the
