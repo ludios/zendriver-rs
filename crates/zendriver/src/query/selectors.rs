@@ -616,21 +616,25 @@ async fn resolve_text_many(
 // TextRegex (serialized as JS `new RegExp(pattern, flags)`)
 // ---------------------------------------------------------------------
 //
-// JS path:
-//   `Array.from(ctx.querySelectorAll('*')).filter(el => new RegExp(pat, flags).test(el.innerText||el.textContent))`,
+// JS path, with `r = new RegExp(pat, flags)`:
+//   `Array.from(ctx.querySelectorAll('*')).filter(el => r.test(el.innerText||el.textContent))`,
 //   then narrowed to the innermost matching element (see
 //   `regex_narrowing_js`) — an ancestor whose only text-bearing
 //   descendant is the match otherwise has an identical `innerText` and
 //   also passes the filter, ranking first in document order.
 //
 // The regex is *re-parsed* on the JS side via `new RegExp`, so the
-// pattern must use JS-flavored regex syntax (which is essentially the
-// same as Rust's `regex` crate for the common subset). Flags are passed
-// verbatim — caller is responsible for valid JS flag chars (e.g. "i",
-// "im", "gi", etc.). Empty flags string is fine.
+// pattern must use JS regex syntax, which differs from Rust's `regex`
+// crate beyond the common subset (JS rejects `(?i)`, and reads `\z` as a
+// literal `z`). Flags are passed verbatim — caller is responsible for
+// valid JS flag chars (e.g. "i", "im", "gi", etc.). Empty flags string is
+// fine.
 //
 // We construct the RegExp *once outside* the filter callback so the
-// pattern is only compiled per query rather than per element.
+// pattern is only compiled per query rather than per element. A `g` or `y`
+// flag makes `test` start at, and then move, the RegExp's `lastIndex`, so
+// every test sets it to 0 first; otherwise a match in one element would
+// make the next element's test start partway through its text.
 
 /// JS fragment implementing the same "narrowest match" filter the
 /// substring builders use (see `build_text_substring_js_tab`), but with
@@ -647,7 +651,7 @@ fn regex_narrowing_js(matches_var: &str) -> String {
         "var narrowed={m}.filter(function(el){{\
             return !Array.from(el.querySelectorAll('*')).some(function(c){{\
                 var t=c.innerText||c.textContent||'';\
-                return r.test(t);\
+                r.lastIndex=0;return r.test(t);\
             }});\
         }})",
         m = matches_var,
@@ -674,7 +678,7 @@ fn build_text_regex_js_tab(pattern: &str, flags: &str, best_match: bool) -> Stri
             var r=new RegExp({p}, {f});\
             var m=Array.from(document.querySelectorAll('*')).filter(function(el){{\
                 var t=el.innerText||el.textContent||'';\
-                return r.test(t);\
+                r.lastIndex=0;return r.test(t);\
             }});\
             {narrowing}{sort};\
             return narrowed;\
@@ -703,7 +707,7 @@ fn build_text_regex_fn_body(pattern: &str, best_match: bool) -> String {
             var r=new RegExp(p,f);\
             var m=Array.from(this.querySelectorAll('*')).filter(function(el){{\
                 var t=el.innerText||el.textContent||'';\
-                return r.test(t);\
+                r.lastIndex=0;return r.test(t);\
             }});\
             {narrowing}{sort};\
             return narrowed;\
