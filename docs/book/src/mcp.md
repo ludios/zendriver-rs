@@ -142,8 +142,9 @@ present in the schema but only takes effect when the `geo` feature is enabled.
 
 - `proxy: string` — route the browser through an upstream proxy
   (`scheme://[user:pass@]host:port`); userinfo is auto-split into proxy-auth
-  credentials (requires the default `interception` feature to actually answer
-  the `Fetch.authRequired` challenge). Always present in the schema.
+  credentials, which every tab answers the proxy's `Fetch.authRequired`
+  challenge with (requires the default `interception` feature). Always
+  present in the schema.
 - `geo_auto: bool` — auto-derive `locale`/`languages` from the exit IP's
   country via a proxied probe to `ip-api.com` (mirrors `proxy` above), instead
   of naming a country explicitly via `geo_country`. Makes at most one outbound

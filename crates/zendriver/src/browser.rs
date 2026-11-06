@@ -681,9 +681,9 @@ pub struct BrowserBuilder {
     pub(crate) proxy: Option<crate::proxy::ParsedProxy>,
     /// Optional `(username, password)` to answer the proxy's auth
     /// challenges with (never a site's).
-    /// Only honored when the `interception` feature is enabled; when present
-    /// at launch, the main tab's interception answers `Fetch.authRequired`
-    /// with them. See cdpdriver/zendriver#208.
+    /// Only honored when the `interception` feature is enabled; when present,
+    /// the interception of every tab in the default context answers
+    /// `Fetch.authRequired` with them. See cdpdriver/zendriver#208.
     #[cfg(feature = "interception")]
     pub(crate) proxy_auth: Option<(String, String)>,
     /// Custom or auto-derived exit-IP -> country resolver. Set via
@@ -897,20 +897,22 @@ impl BrowserBuilder {
 
     /// Answer the proxy's auth challenges with `(username, password)`.
     ///
-    /// At launch, before `launch()` returns, the main tab's interception
-    /// sends `Fetch.enable { handleAuthRequests: true }`, and it answers a
-    /// proxy's `Fetch.authRequired` with `Fetch.continueWithAuth` carrying
-    /// these credentials, once for each combination of request, proxy and
-    /// auth scheme (if the proxy rejects them within a minute, the request
-    /// fails).
-    /// A site's own challenge (HTTP 401) never gets them. Combine with `.arg("--proxy-server=...")`
-    /// to drive Chrome through an authenticated upstream proxy without the
-    /// extension-based workarounds the upstream Python project requires.
+    /// Each tab in the default browser context — the main tab before
+    /// `launch()` (or `connect()`) returns, and each later tab before its
+    /// page runs — sends `Fetch.enable { handleAuthRequests: true }`, and
+    /// answers a proxy's `Fetch.authRequired` with `Fetch.continueWithAuth`
+    /// carrying these credentials, once for each combination of request,
+    /// proxy and auth scheme (if the proxy rejects them within a minute,
+    /// the request fails). A site's own challenge (HTTP 401) never gets
+    /// them. Combine with `.arg("--proxy-server=...")` to drive Chrome
+    /// through an authenticated upstream proxy without the extension-based
+    /// workarounds the upstream Python project requires.
     ///
-    /// Scope: applies to the main tab only — tabs opened later via
-    /// [`Browser::new_tab`] do **not** inherit auth handling. For those,
-    /// wire `tab.intercept().handle_proxy_auth(user, pass).start().await`
-    /// yourself.
+    /// Scope: every tab in the default context, including those opened
+    /// later via [`Browser::new_tab`] or by the page. A tab in an isolated
+    /// [`BrowserContext`](crate::BrowserContext) gets that context's own
+    /// credentials ([`crate::BrowserContextBuilder::proxy_auth`]) instead, if
+    /// it has any.
     ///
     /// See cdpdriver/zendriver#208.
     ///
@@ -1880,6 +1882,11 @@ pub(crate) struct BrowserInner {
     /// Removed on `BrowserContext` drop.
     #[cfg(feature = "interception")]
     pub(crate) context_proxy_auth: tokio::sync::Mutex<HashMap<String, (String, String)>>,
+    /// [`BrowserBuilder::proxy_auth`]'s `(user, password)`, for the proxy of
+    /// every tab in the default context. Applied by
+    /// [`BrowserInner::start_browser_intercept`].
+    #[cfg(feature = "interception")]
+    pub(crate) proxy_auth: Option<(String, String)>,
     /// Combined tracker/fingerprinter [`HostMatcher`] (bundled + custom),
     /// built once at launch. `None` when blocking is not configured. Applied
     /// to every page tab by [`BrowserInner::start_browser_intercept`].
@@ -1890,17 +1897,16 @@ pub(crate) struct BrowserInner {
 #[cfg(feature = "interception")]
 impl BrowserInner {
     /// Start `tab`'s layer of interception for the browser's own options:
-    /// tracker blocking, and `credentials` for a proxy that challenges.
-    /// Returns once Chrome has applied it. Does nothing when neither
-    /// applies.
-    ///
-    /// - `credentials`: the `(user, password)` for the proxy of `tab`'s
-    ///   browser context, if it has any.
-    pub(crate) async fn start_browser_intercept(
-        &self,
-        tab: &Tab,
-        credentials: Option<(String, String)>,
-    ) -> Result<(), ZendriverError> {
+    /// tracker blocking, and the credentials for the proxy of `tab`'s
+    /// browser context (an isolated context's own, from
+    /// [`crate::BrowserContextBuilder::proxy_auth`], else
+    /// [`BrowserBuilder::proxy_auth`]'s). Returns once Chrome has applied
+    /// it. Does nothing when neither applies.
+    pub(crate) async fn start_browser_intercept(&self, tab: &Tab) -> Result<(), ZendriverError> {
+        let mut credentials = self.proxy_auth.clone();
+        if let Some(context) = tab.inner.browser_context_id.as_deref() {
+            credentials = self.context_proxy_auth.lock().await.get(context).cloned();
+        }
         let mut builder = tab.intercept();
         let mut wanted = false;
         #[cfg(feature = "tracker-blocking")]
@@ -2112,6 +2118,8 @@ pub(crate) fn test_only_inner_with(
             context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher: None,
+            #[cfg(feature = "interception")]
+            proxy_auth: None,
         };
         customize(&mut inner);
         inner
@@ -2360,16 +2368,7 @@ impl TargetObserver for TabRegistrar {
                 // after this), so the page's first request is intercepted.
                 #[cfg(feature = "interception")]
                 {
-                    let mut credentials = None;
-                    if let Some(context) = session.target_info.browser_context_id.as_deref() {
-                        credentials = browser
-                            .context_proxy_auth
-                            .lock()
-                            .await
-                            .get(context)
-                            .cloned();
-                    }
-                    if let Err(e) = browser.start_browser_intercept(&tab, credentials).await {
+                    if let Err(e) = browser.start_browser_intercept(&tab).await {
                         warn!(
                             error = %e,
                             target_id = %session.target_info.target_id,
@@ -2864,6 +2863,11 @@ pub(crate) struct FinishConnect {
     /// on the main tab + future tabs.
     #[cfg(feature = "tracker-blocking")]
     pub(crate) tracker_matcher: Option<std::sync::Arc<crate::HostMatcher>>,
+    /// [`BrowserBuilder::proxy_auth`]'s credentials. Stored on
+    /// `BrowserInner` and given to the main tab + future tabs in the
+    /// default context.
+    #[cfg(feature = "interception")]
+    pub(crate) proxy_auth: Option<(String, String)>,
 }
 
 /// Run the post-connect CDP handshake and assemble [`BrowserInner`].
@@ -2968,6 +2972,8 @@ pub(crate) async fn finish_connect(
         owns_process,
         #[cfg(feature = "tracker-blocking")]
         tracker_matcher,
+        #[cfg(feature = "interception")]
+        proxy_auth,
     } = args;
 
     // Enable auto-attach with debugger-pause BEFORE attaching to the initial
@@ -3124,6 +3130,8 @@ pub(crate) async fn finish_connect(
             context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher,
+            #[cfg(feature = "interception")]
+            proxy_auth,
         }
     });
 
@@ -3135,6 +3143,12 @@ pub(crate) async fn finish_connect(
         .write()
         .await
         .insert(session_id, inner.main_tab.clone());
+
+    // The main tab's tracker blocking and proxy credentials, in force
+    // before the caller gets the browser. (The registrar starts them for
+    // every later tab.)
+    #[cfg(feature = "interception")]
+    inner.start_browser_intercept(&inner.main_tab).await?;
 
     Ok(inner)
 }
@@ -3797,6 +3811,8 @@ impl BrowserBuilder {
                 owns_process: true,
                 #[cfg(feature = "tracker-blocking")]
                 tracker_matcher,
+                #[cfg(feature = "interception")]
+                proxy_auth: self.proxy_auth.clone(),
             })
             .await
         })
@@ -3849,14 +3865,6 @@ impl BrowserBuilder {
                 )
                 .await?;
         }
-
-        // 14. The main tab's tracker blocking and proxy credentials, in force
-        // before the caller gets the browser. (The registrar does this for
-        // every later tab.)
-        #[cfg(feature = "interception")]
-        inner
-            .start_browser_intercept(&inner.main_tab, self.proxy_auth.clone())
-            .await?;
 
         Ok(Browser { inner })
     }
@@ -3976,6 +3984,8 @@ impl BrowserBuilder {
             owns_process: false,
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher: None,
+            #[cfg(feature = "interception")]
+            proxy_auth: self.proxy_auth.clone(),
         })
         .await?;
 
@@ -7473,6 +7483,8 @@ mod tests {
                 owns_process: false,
                 #[cfg(feature = "tracker-blocking")]
                 tracker_matcher: None,
+                #[cfg(feature = "interception")]
+                proxy_auth: None,
             })
             .await
         });
@@ -7561,6 +7573,8 @@ mod tests {
                 owns_process: false,
                 #[cfg(feature = "tracker-blocking")]
                 tracker_matcher: None,
+                #[cfg(feature = "interception")]
+                proxy_auth: None,
             })
             .await
         });
@@ -7615,6 +7629,8 @@ mod tests {
             owns_process: true,
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher: None,
+            #[cfg(feature = "interception")]
+            proxy_auth: None,
         });
         (mock, fut)
     }
@@ -7883,6 +7899,8 @@ mod tests {
             owns_process: true,
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher: None,
+            #[cfg(feature = "interception")]
+            proxy_auth: None,
         }));
 
         let id = mock.expect_cmd("Target.setAutoAttach").await;
@@ -8105,6 +8123,8 @@ mod tests {
             owns_process: false,
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher: None,
+            #[cfg(feature = "interception")]
+            proxy_auth: None,
         }));
         let id = mock.expect_cmd("Target.setAutoAttach").await;
         mock.reply(id, json!({})).await;
@@ -8156,6 +8176,8 @@ mod tests {
             owns_process: true,
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher: None,
+            #[cfg(feature = "interception")]
+            proxy_auth: None,
         }));
 
         let id = mock.expect_cmd("Target.setAutoAttach").await;
@@ -8303,6 +8325,8 @@ mod tests {
             owns_process: true,
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher: None,
+            #[cfg(feature = "interception")]
+            proxy_auth: None,
         }));
 
         let id = mock.expect_cmd("Target.setAutoAttach").await;
@@ -8355,6 +8379,8 @@ mod tests {
             owns_process: true,
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher: None,
+            #[cfg(feature = "interception")]
+            proxy_auth: None,
         }));
 
         let id = mock.expect_cmd("Target.setAutoAttach").await;
@@ -8418,6 +8444,8 @@ mod tests {
             owns_process: false,
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher: None,
+            #[cfg(feature = "interception")]
+            proxy_auth: None,
         }));
 
         let id = mock.expect_cmd("Target.setAutoAttach").await;
@@ -8483,6 +8511,8 @@ mod tests {
             owns_process: true,
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher: None,
+            #[cfg(feature = "interception")]
+            proxy_auth: None,
         }));
 
         let id = mock.expect_cmd("Target.setAutoAttach").await;

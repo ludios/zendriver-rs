@@ -83,3 +83,22 @@ async fn rejected_proxy_credentials_are_tried_once() {
     assert_ne!(eval(&tab, "document.title").await, "Plain");
     browser.close().await;
 }
+
+/// A tab opened after launch, in the default context, gets the credentials
+/// too.
+#[tokio::test]
+async fn a_later_tab_gets_the_proxy_credentials() {
+    let server = FixtureServer::start().await;
+    let builder = Browser::builder()
+        .proxy(server.proxy_url())
+        .proxy_auth(PROXY_USER, PROXY_PASSWORD);
+    let browser = launch_for_test(builder).await;
+    let tab = browser
+        .new_tab()
+        .await
+        .unwrap_or_else(|e| panic!("new_tab: {e}"));
+
+    load(&tab, &server.url(SITE_A, "/plain?title=Later")).await;
+    assert_eq!(eval(&tab, "document.title").await, "Later");
+    browser.close().await;
+}

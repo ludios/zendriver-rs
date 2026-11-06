@@ -3,12 +3,12 @@
 //! Equivalent to cdpdriver/zendriver#208 — but without the Chrome-extension
 //! workaround the Python project requires. We pass `--proxy-server` directly,
 //! then `BrowserBuilder::proxy_auth(user, pass)` (feature `interception`)
-//! has the main tab's interception answer the proxy's
-//! `Fetch.authRequired` challenges with the stored credentials via
-//! `Fetch.continueWithAuth` (never a site's own 401 challenge).
+//! has each tab's interception answer the proxy's `Fetch.authRequired`
+//! challenges with the stored credentials via `Fetch.continueWithAuth`
+//! (never a site's own 401 challenge).
 //!
-//! Scope: applies to the main tab only. For multi-tab apps, install per-tab
-//! via `tab.intercept().handle_proxy_auth(user, pass).start().await`.
+//! Scope: every tab in the default browser context, including tabs opened
+//! later. An isolated `BrowserContext` takes its own credentials.
 
 #[tokio::main]
 #[allow(clippy::result_large_err)]
