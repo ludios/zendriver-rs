@@ -4554,7 +4554,9 @@ impl Browser {
     /// Re-attaching to Chrome's targets yields **new `sessionId`s**. Every
     /// [`Tab`], `Frame`, and `Element` handle obtained before the reconnect
     /// caches a now-stale session id and **must not be reused** — calls on
-    /// them will fail. After `reconnect` returns, **re-acquire** handles:
+    /// them will fail. (A tab with its own socket has that socket closed,
+    /// along with its interception rules.) After `reconnect` returns,
+    /// **re-acquire** handles:
     ///
     /// - live page handles via [`Browser::tabs`] (the registry is rebuilt from
     ///   the re-attached targets);
@@ -4569,7 +4571,9 @@ impl Browser {
     /// This is the scoped v1. It does **not** replay per-feature domain arming
     /// (`Network.enable`, active `Fetch` interception rules, `DOMStorage.enable`,
     /// download behavior, …) that individual features turned on before the
-    /// drop — re-arm those yourself after reconnecting. Transparent
+    /// drop — re-arm those yourself after reconnecting. The browser's own
+    /// options (stealth, tracker blocking, proxy credentials) are applied to
+    /// every rebuilt tab. Transparent
     /// handle-preserving reconnect (session-id remap so existing `Tab`s keep
     /// working) is tracked as follow-up work.
     ///
@@ -4611,8 +4615,18 @@ impl Browser {
 
         // Drop the stale tab registry — every entry's session id is invalid
         // now. The re-armed auto-attach below re-populates it from the
-        // re-attached targets via the `TabRegistrar` observer.
-        self.inner.tabs.write().await.clear();
+        // re-attached targets via the `TabRegistrar` observer. A stale tab
+        // that has its own socket still reaches its target, so its trackers
+        // and interception would keep running beside the rebuilt tab's:
+        // close that socket.
+        let mut tabs = self.inner.tabs.write().await;
+        for tab in tabs.values().chain([&self.inner.main_tab]) {
+            if tab.session().is_root() {
+                tab.session().connection().shutdown();
+            }
+        }
+        tabs.clear();
+        drop(tabs);
 
         // Re-arm browser-scoped auto-attach. Chrome re-fires
         // `Target.attachedToTarget` for every existing target, which runs the
