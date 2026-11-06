@@ -191,7 +191,8 @@ impl StealthObserver {
     /// `languages` / `screen` are folded into `fingerprint` up front, and
     /// every consumer below — the
     /// `Emulation.set*Override` calls, the `Accept-Language` header, the
-    /// bootstrap script's geometry and `navigator.languages` patches — then
+    /// bootstrap script's geometry and `navigator.languages` patches, and
+    /// the launch switches of [`StealthObserver::headless_flags`] — then
     /// reads that one merged value. An explicitly-set persona field wins over
     /// the fingerprint's; `None` inherits the fingerprint's.
     #[must_use]

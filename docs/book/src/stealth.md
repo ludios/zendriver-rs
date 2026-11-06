@@ -93,7 +93,8 @@ in the page:
   that you pass with `BrowserBuilder::arg` wins. A headed launch gets
   none of these switches, since Chrome then reports the real display and
   window.
-  `--screen-info` needs Chrome 133 or later. Chrome takes the screen in
+  Headless Chrome takes `--screen-info` from version 135 on Linux, 136
+  on Windows and 138 on macOS. Chrome takes the screen in
   physical pixels, so a configured screen's `device_pixel_ratio` must be
   a multiple of 0.25 from 1 (as Windows' scaling steps and macOS's 2x
   are), and its sizes (`width`, `height`, and the work area's width and
@@ -122,7 +123,7 @@ let browser = Browser::builder()
 ```
 
 `native()` plus Navigator-prototype JS patches injected via
-`Page.addScriptToEvaluateOnNewDocument`. Restores or overrides:
+`Page.addScriptToEvaluateOnNewDocument`, except that its screen comes from `Emulation.setDeviceMetricsOverride` and a JS geometry patch instead of launch switches. Restores or overrides:
 
 - `navigator.webdriver` (deletes it so `'webdriver' in navigator` is
   `false`).

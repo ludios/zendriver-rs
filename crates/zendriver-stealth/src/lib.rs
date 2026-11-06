@@ -12,7 +12,8 @@
 //!   headless Chrome) + UA scrub + CDP `Emulation` overrides, with no JS
 //!   bootstrap; the default.
 //! - [`StealthProfile::spoofed`] — `native` plus a Navigator-prototype JS
-//!   bootstrap script that passes the [sannysoft][sannysoft] battery.
+//!   bootstrap script that passes the [sannysoft][sannysoft] battery, except
+//!   that its screen comes from CDP `Emulation` and the bootstrap.
 //!
 //! Most users go through `zendriver`'s `BrowserBuilder::stealth(...)`:
 //!

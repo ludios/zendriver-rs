@@ -57,7 +57,8 @@ clone that wraps that sender. The actor task:
 4. For events: fans them out via a `tokio::sync::broadcast` so every
    subscriber gets a copy without blocking the actor loop.
 5. For `Target.attachedToTarget`: invokes each registered
-   [`TargetObserver`] (stealth installs JS bootstrap here) **before**
+   [`TargetObserver`] (stealth applies its overrides, and any JS
+   bootstrap, here) **before**
    releasing the debugger pause, so observers run during the gap.
 
 [`TargetObserver`]: https://docs.rs/zendriver/latest/zendriver/trait.TargetObserver.html
@@ -85,8 +86,9 @@ care". zendriver-rs has two layers:
 - **Synchronous observers** — `TargetObserver` runs on
   `Target.attachedToTarget` **before** the new target's debugger pause
   is released. Stealth depends on this: the auto-attach observer
-  dispatches `Page.addScriptToEvaluateOnNewDocument` while the page is
-  still paused, so the bootstrap script lands before any page script.
+  dispatches its overrides (and, under `spoofed()`,
+  `Page.addScriptToEvaluateOnNewDocument`) while the page is still
+  paused, so they land before any page script.
   No race; no need for the script to detect its own arrival timing.
 
 Auto-attach is filtered to `page` and `iframe` targets. Worker

@@ -157,7 +157,8 @@ There's no built-in detector. The pragmatic test:
   there's no patched function for a `Function.prototype.toString` check
   to catch. Passes most consumer sites.
 - **`StealthProfile::spoofed()`** — `native()` plus Navigator-prototype
-  JS patches injected via `Page.addScriptToEvaluateOnNewDocument`.
+  JS patches injected via `Page.addScriptToEvaluateOnNewDocument`, except
+  that its screen comes from `Emulation.setDeviceMetricsOverride` and a JS geometry patch instead of launch switches.
   Restores `navigator.webdriver` to undefined, fixes `navigator.plugins`
   / `chrome` runtime / WebGL vendor, etc. Required to pass `sannysoft`
   and other active detectors. Pays a small per-navigation cost (script

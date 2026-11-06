@@ -163,7 +163,7 @@ pub struct ScreenSpec {
 
 impl ScreenSpec {
     /// A screen of `width x height` at `device_pixel_ratio`, with every inset
-    /// left to the patch's own derivation.
+    /// left to its default (see the fields).
     ///
     /// Use the `with_*` setters to replay a MEASURED device instead. They are
     /// separate because the derived defaults are a plausible fiction and a

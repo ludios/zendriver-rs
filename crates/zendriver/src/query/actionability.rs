@@ -203,9 +203,8 @@ pub(crate) async fn check_visible(el: &Element, within: Within) -> Result<bool> 
                 // the box it must be compared against is the LAYOUT viewport. Two
                 // things about reading that box are load-bearing:
                 //
-                // 1. It must never come from `window.inner*`. Every profile except
-                //    `StealthProfile::off()` — including `native()`, which
-                //    `Browser::builder()` installs by default — runs
+                // 1. It must never come from `window.inner*`.
+                //    `StealthProfile::spoofed()` runs
                 //    `zendriver-stealth`'s `patches/screen.js`, which rewrites
                 //    `window.inner*` to the persona's screen size minus a chrome
                 //    inset, while `scroll_into_view` moves the element with
@@ -502,8 +501,8 @@ mod tests {
     ///
     /// Two separate defects are pinned here, both of which shipped:
     ///
-    /// - Reading `window.inner*` at all. Every profile except
-    ///   `StealthProfile::off()` rewrites those, so they must not appear —
+    /// - Reading `window.inner*` at all. `StealthProfile::spoofed()`
+    ///   rewrites those, so they must not appear —
     ///   not even as a trailing fallback. The predecessor of this test
     ///   asserted only that `documentElement` came *first*, which a
     ///   `documentElement.clientWidth || window.innerWidth` expression

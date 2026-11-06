@@ -1533,7 +1533,8 @@ impl BrowserBuilder {
     /// Set the base fingerprint [`Persona`]: it drives the spoofed-mode
     /// surface patches (canvas/WebGL/audio/fonts/clientRects/WebRTC/hardware)
     /// and, for every stealth profile except `off`, the emulation overrides —
-    /// `timezone`, `locale` / `languages`, `screen` and `geolocation`.
+    /// `timezone`, `locale` / `languages` and `geolocation` — and the screen
+    /// (see [`StealthProfile::screen`]).
     ///
     /// When unset, [`Persona::system`] (host-probed) is used. Combine with
     /// [`BrowserBuilder::persona_overlay`] for field-wise tweaks and
@@ -1979,7 +1980,8 @@ impl BrowserBuilder {
 
     /// The argv that `launch` passes to Chrome (before its CI-only
     /// additions): [`build_flags`](Self::build_flags), then `profile_flags`
-    /// (the stealth profile's own flags, empty without a profile), then the
+    /// (the stealth profile's own flags plus, for a headless launch, its
+    /// screen switches; empty without a profile), then the
     /// Blink settings of a mouse for a headless launch on Linux.
     ///
     /// Headless Chrome on Linux has no input devices, so its pages would see
@@ -3840,7 +3842,9 @@ impl BrowserBuilder {
     /// 1. Resolves a [`zendriver_stealth::Fingerprint`] from the resolved
     ///    Chrome executable.
     /// 2. Prepends the profile's [`StealthObserver`] to the observer chain.
-    /// 3. Appends the profile's stealth flags to the launch argv.
+    /// 3. Appends the profile's stealth flags to the launch argv, and, for a
+    ///    headless launch, its screen switches (see
+    ///    [`StealthProfile::native`]).
     /// 4. Sends `Target.setAutoAttach { waitForDebuggerOnStart: true }` at
     ///    browser scope so the actor can route pauses through observers
     ///    before any page script runs.
@@ -3849,8 +3853,9 @@ impl BrowserBuilder {
     ///
     /// Returns [`ZendriverError::Browser`] when Chrome can't be discovered
     /// or spawned, [`ZendriverError::Stealth`] when fingerprint resolution
-    /// fails, [`ZendriverError::Transport`] when the WebSocket attach times
-    /// out.
+    /// fails or the configured screen is one that headless Chrome can't take
+    /// (see [`StealthObserver::headless_flags`]),
+    /// [`ZendriverError::Transport`] when the WebSocket attach times out.
     ///
     /// # Examples
     ///
@@ -6311,7 +6316,8 @@ mod tests {
         );
     }
 
-    /// The argv that `launch` passes to Chrome for `builder`.
+    /// The argv that `launch` passes to Chrome for `builder`, without the
+    /// screen switches (see `headless_stealth_flags_of`).
     fn launch_flags_of(builder: &BrowserBuilder) -> Vec<String> {
         let profile_flags = builder
             .stealth

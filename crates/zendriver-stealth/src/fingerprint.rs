@@ -180,11 +180,11 @@ pub struct Fingerprint {
     /// back further to `["en-US", "en"]` when that is unset too (the locale
     /// override is then simply not sent).
     pub languages: Option<Vec<String>>,
-    /// Screen / device-metrics override resolved from
+    /// The screen (see [`ScreenSpec`](crate::ScreenSpec)) resolved from
     /// [`StealthProfile::screen`](crate::StealthProfile::screen), or from a
     /// [`Persona`](crate::Persona)'s own `screen`, which wins. `None` by
     /// default (`auto_detect` never probes a screen size) — the observer's
-    /// fixed 1920x1080 default is untouched until this is explicitly set.
+    /// default of 1920x1080 applies until this is explicitly set.
     pub screen: Option<crate::persona::specs::ScreenSpec>,
 }
 
@@ -231,9 +231,11 @@ impl Fingerprint {
     /// fingerprint.
     ///
     /// Four axes exist on both types — `timezone`, `locale`, `languages`,
-    /// `screen` — and three separate consumers read them: the CDP
-    /// `Emulation.set*Override` calls, the `Accept-Language` header, and the
-    /// JS patches. Merging once, at the single point where a persona and a
+    /// `screen` — and four separate consumers read them: the CDP
+    /// `Emulation.set*Override` calls, the `Accept-Language` header, the JS
+    /// patches, and (for the screen) the launch switches of
+    /// [`StealthObserver::headless_flags`](crate::StealthObserver::headless_flags).
+    /// Merging once, at the single point where a persona and a
     /// fingerprint meet
     /// ([`StealthObserver::with_persona`](crate::StealthObserver::with_persona)),
     /// is what keeps those consumers from disagreeing: each reads the merged
