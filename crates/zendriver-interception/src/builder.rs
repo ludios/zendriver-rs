@@ -80,6 +80,12 @@ pub struct InterceptBuilder {
     /// `handleAuthRequests: true` and a proxy's `Fetch.authRequired` is
     /// answered with these credentials. See cdpdriver/zendriver#208.
     proxy_auth: Option<(String, String)>,
+    /// The pattern that pauses requests for `proxy_auth`, whose challenges
+    /// Chrome surfaces only for paused requests: every request's, or only
+    /// documents' ([`handle_proxy_auth_scoped_to_document`]).
+    ///
+    /// [`handle_proxy_auth_scoped_to_document`]: Self::handle_proxy_auth_scoped_to_document
+    auth_pattern: RequestPattern,
 }
 
 impl InterceptBuilder {
@@ -106,6 +112,10 @@ impl InterceptBuilder {
             patterns: Vec::new(),
             rules: Vec::new(),
             proxy_auth: None,
+            auth_pattern: RequestPattern {
+                url_pattern: Some("*".into()),
+                ..RequestPattern::default()
+            },
         }
     }
 
@@ -141,30 +151,28 @@ impl InterceptBuilder {
     /// Answer a proxy's auth challenges with the given credentials, for
     /// `Document`-type requests only.
     ///
-    /// Equivalent to [`handle_proxy_auth`](Self::handle_proxy_auth) plus
-    /// `.pattern("*").resource(ResourceType::Document)`, packaged as its own
-    /// preset so a proxy-auth-only caller doesn't have to discover — by
-    /// reading [`start`](Self::start)'s source — that leaving patterns unset
-    /// pauses *every* request on the page, not just the one carrying the auth
-    /// challenge.
+    /// Like [`handle_proxy_auth`](Self::handle_proxy_auth), but for the
+    /// credentials the layer pauses only document requests (`*` of
+    /// `ResourceType::Document`) rather than every request: Chrome surfaces
+    /// a proxy's challenge only for a request it paused. The rules' own
+    /// patterns are unchanged.
     ///
-    /// Narrowing to `Document` means only the main-frame navigation pauses and
-    /// round-trips through the multiplexer; other requests (XHR,
-    /// subresources, and any parallel/pipelined connection that also needs
-    /// credentials) are not paused and will not have their auth challenge
-    /// answered by this builder. Use plain
-    /// [`handle_proxy_auth`](Self::handle_proxy_auth)
-    /// (which falls back to a match-all pattern in [`start`](Self::start)) if
-    /// you need every connection's 407 covered.
+    /// Narrowing to `Document` means only the navigations of the page and
+    /// its frames pause and round-trip through the multiplexer for the
+    /// credentials; other requests (XHR, subresources, and any
+    /// parallel/pipelined connection that also needs credentials) are not
+    /// paused for them, and their auth challenges are not answered unless
+    /// another pattern pauses them. Use plain
+    /// [`handle_proxy_auth`](Self::handle_proxy_auth) if you need every
+    /// connection's 407 covered.
     #[must_use]
     pub fn handle_proxy_auth_scoped_to_document(
-        self,
+        mut self,
         user: impl Into<String>,
         pass: impl Into<String>,
     ) -> Self {
+        self.auth_pattern.resource_type = Some(ResourceType::Document);
         self.handle_proxy_auth(user, pass)
-            .pattern("*")
-            .resource(ResourceType::Document)
     }
 
     /// Push a new pattern entry with the given URL pattern string.
@@ -374,7 +382,9 @@ impl InterceptBuilder {
     ///
     /// Without explicit patterns, the layer's come from what it does (see
     /// [`start`](Self::start)): each rule's, a match-all one for a stream,
-    /// and a match-all one at the `Request` stage for proxy credentials.
+    /// and `auth_pattern` (at the `Request` stage) for proxy credentials.
+    /// With explicit patterns, only the Document-scoped `auth_pattern` is
+    /// added to them.
     /// Chrome (~M132+) rejects `Fetch.enable { patterns: [],
     /// handleAuthRequests: true }` with CDP error -32602 "Can't specify
     /// empty patterns with handleAuth set", and only surfaces the
@@ -395,14 +405,17 @@ impl InterceptBuilder {
             url_pattern: Some("*".into()),
             ..RequestPattern::default()
         };
+        let documents_only = self.auth_pattern.resource_type.is_some();
         if self.patterns.is_empty() {
             match &responder {
                 Responder::Rules(rules) => self.patterns.extend(rules.iter().map(Rule::pattern)),
                 Responder::Stream(_) => self.patterns.push(match_all()),
             }
             if self.proxy_auth.is_some() {
-                self.patterns.push(match_all());
+                self.patterns.push(self.auth_pattern);
             }
+        } else if documents_only {
+            self.patterns.push(self.auth_pattern);
         }
         let filters = self
             .patterns
@@ -515,11 +528,11 @@ mod tests {
         conn.shutdown();
     }
 
-    /// The Document-scoped preset sends exactly one pattern, narrowed to
-    /// the `Document` navigation (the difference from plain
-    /// `handle_proxy_auth`), and keeps a rule registered before it.
+    /// The Document-scoped preset pauses only documents for the
+    /// credentials (the difference from plain `handle_proxy_auth`), and
+    /// leaves the rules' own patterns as they are.
     #[tokio::test]
-    async fn start_auth_scoped_to_document_sends_single_document_pattern() {
+    async fn start_auth_scoped_to_document_adds_a_document_pattern() {
         let (mut mock, conn, interceptor) = mock_interceptor();
         let builder = InterceptBuilder::new(&interceptor)
             .block("*/ads/*")
@@ -530,7 +543,10 @@ mod tests {
         assert_eq!(params["handleAuthRequests"], true);
         assert_eq!(
             params["patterns"],
-            json!([{ "urlPattern": "*", "resourceType": "Document" }])
+            json!([
+                { "urlPattern": "*/ads/*" },
+                { "urlPattern": "*", "resourceType": "Document" },
+            ])
         );
         conn.shutdown();
     }
