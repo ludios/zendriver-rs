@@ -1693,7 +1693,7 @@ mod tests {
     #[tokio::test]
     async fn a_stream_decides_what_it_fits_and_its_drop_fails_the_unread() {
         let (mut mock, conn, interceptor) = mock_interceptor();
-        let rules = vec![rule("*", Action::Block(AbortReason::Failed))];
+        let rules = vec![rule("*", Action::Block(AbortReason::BlockedByClient))];
         let (_rules, _) = applied(&mut mock, interceptor.insert(rules, Position::Last)).await;
         let when = Match::url("*/s/*").unwrap();
         let (mut stream, _) =
@@ -1707,6 +1707,13 @@ mod tests {
         )
         .await;
         pause(&mock, "R2", "https://x.test/s/2", json!({})).await;
+        // Pauses are dispatched in order, so once the rule has answered R3,
+        // R2 is in the stream.
+        pause(&mock, "R3", "https://x.test/other", json!({})).await;
+        assert_eq!(
+            answered(&mut mock, "Fetch.failRequest").await,
+            json!({ "requestId": "R3", "errorReason": "BlockedByClient" })
+        );
         let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
             .unwrap()
@@ -1716,14 +1723,14 @@ mod tests {
         assert_eq!(first.pause, PauseKind::Request);
         drop(first);
         drop(stream);
-        let sent = sent_until_quiet(&mut mock).await;
-        for id in ["R1", "R2"] {
-            let failed = (
-                "Fetch.failRequest".to_string(),
-                json!({ "requestId": id, "errorReason": "Failed" }),
-            );
-            assert!(sent.contains(&failed), "{id} not failed: {sent:?}");
-        }
+        let mut sent = sent_until_quiet(&mut mock).await;
+        sent.retain(|(method, _)| method != "Fetch.enable");
+        sent.sort_by_key(|(_, params)| params["requestId"].to_string());
+        let failed = |id: &str| {
+            let params = json!({ "requestId": id, "errorReason": "Failed" });
+            ("Fetch.failRequest".to_string(), params)
+        };
+        assert_eq!(sent, vec![failed("R1"), failed("R2")]);
         conn.shutdown();
     }
 

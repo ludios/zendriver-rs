@@ -6812,6 +6812,25 @@ mod tests {
             "a Fetch.enable after the resume: {methods:?}"
         );
 
+        // The credentials alone ask for the same patterns: the entry itself
+        // shows that tracker blocking is on, and it blocks a tracker.
+        let tab = inner.tabs.read().await.get("S2").cloned().unwrap();
+        let snapshot = tab.interceptor().snapshot(false).await.unwrap();
+        assert_eq!(snapshot.entries[0].label.as_deref(), Some(TRACKER_LABEL));
+        assert_eq!(tab.tracker_blocking(), Some(snapshot.entries[0].id));
+        assert!(snapshot.proxy_auth.is_some());
+        let tracker = json!({
+            "requestId": "R1",
+            "request": { "url": "https://cdn.evil.example/t.js", "method": "GET", "headers": {} },
+        });
+        mock.emit_event_for_session("Fetch.requestPaused", tracker, "S2")
+            .await;
+        mock.expect_cmd("Fetch.failRequest").await;
+        assert_eq!(
+            mock.last_sent()["params"],
+            json!({ "requestId": "R1", "errorReason": "BlockedByClient" })
+        );
+
         conn.shutdown();
     }
 

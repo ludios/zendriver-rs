@@ -205,25 +205,44 @@ mod tests {
     use crate::interceptor::testing::{applied, mock_interceptor};
 
     /// Every method adds one rule, and `start` asks Chrome for each rule's
-    /// pattern, at its pause.
+    /// pattern, at its pause, in call order.
     #[tokio::test]
     async fn each_method_adds_one_rule_with_its_own_pattern() {
         let (mut mock, conn, interceptor) = mock_interceptor();
         let hosts = Arc::new(HostMatcher::new(["evil.test".to_string()]));
+        let at_error = Match::url("*/error/*")
+            .unwrap()
+            .at(PauseKind::ResponseError);
         let builder = InterceptBuilder::new(&interceptor)
+            .allow("*/allow/*")
+            .unwrap()
             .block("*/ads/*")
+            .unwrap()
+            .redirect("*/old/*", "https://b.test/new")
+            .unwrap()
+            .respond("*/mock/*", 204, Vec::new(), Vec::new())
+            .unwrap()
+            .modify_request("*/req/*", |_| RequestOverrides::default())
             .unwrap()
             .modify_response("*/api/*", |_| ResponseOverrides::default())
             .unwrap()
-            .block_hosts(hosts);
-        assert_eq!(builder.rules_count(), 3);
+            .block_hosts(hosts)
+            .rule(Rule::new(at_error, Action::Continue).unwrap());
+        assert_eq!(builder.rules_count(), 8);
         let (_handle, enable) = applied(&mut mock, builder.start(Position::Last)).await;
+        let request = |glob: &str| json!({ "urlPattern": glob, "requestStage": "Request" });
+        let response = |glob: &str| json!({ "urlPattern": glob, "requestStage": "Response" });
         assert_eq!(
             enable["patterns"],
             json!([
-                { "urlPattern": "*/ads/*", "requestStage": "Request" },
-                { "urlPattern": "*/api/*", "requestStage": "Response" },
-                { "urlPattern": "*", "requestStage": "Request" },
+                request("*/allow/*"),
+                request("*/ads/*"),
+                request("*/old/*"),
+                request("*/mock/*"),
+                request("*/req/*"),
+                response("*/api/*"),
+                request("*"),
+                response("*/error/*"),
             ])
         );
         conn.shutdown();
