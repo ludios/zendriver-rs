@@ -1314,13 +1314,9 @@ impl BrowserBuilder {
     /// Chrome still inherits the rest of this process's environment, and
     /// this process's own environment is not changed. If several calls set
     /// the same `key`, the last call wins. [`BrowserBuilder::connect`]
-    /// ignores this, because it starts no process.
-    ///
-    /// Before the launch, the stealth profile may run `chrome --version`
-    /// (to learn Chrome's version) without these variables. So if Chrome
-    /// can't run at all without one of them (such as `LD_LIBRARY_PATH`), set
-    /// it in this process's environment instead; otherwise the stealth
-    /// profile falls back to a fixed version that may not match Chrome's.
+    /// ignores this, because it starts no process. The `chrome --version`
+    /// that the stealth profile may run first (to learn Chrome's version)
+    /// gets these variables too.
     ///
     /// Use it for what Chrome reads only from its environment, such as the
     /// Wayland compositor's socket (`WAYLAND_DISPLAY`) or the time zone
@@ -3744,7 +3740,7 @@ impl BrowserBuilder {
                     Some(backend) => profile.clone().gpu_backend(backend),
                     None => profile.clone(),
                 };
-                let fp = profile.resolve_fingerprint(&exe)?;
+                let fp = profile.resolve_fingerprint(&exe, &self.env)?;
                 let obs: Arc<dyn TargetObserver> = Arc::new(StealthObserver::with_persona(
                     profile.clone(),
                     fp,
@@ -4068,7 +4064,7 @@ impl BrowserBuilder {
         let stealth_obs: Option<Arc<dyn TargetObserver>> = if let Some(ref profile) = self.stealth {
             // No executable to resolve a fingerprint from on the connect path;
             // fall back to the profile's default fingerprint.
-            let fp = profile.resolve_fingerprint(Path::new(""))?;
+            let fp = profile.resolve_fingerprint(Path::new(""), &[])?;
             Some(Arc::new(StealthObserver::with_persona(
                 profile.clone(),
                 fp,

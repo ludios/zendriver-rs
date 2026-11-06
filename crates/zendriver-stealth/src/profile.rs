@@ -1,6 +1,7 @@
 //! Profile types: ProfileKind enum, Platform enum, PerFieldOverride struct,
 //! plus the StealthProfile builder.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::error::StealthError;
@@ -448,6 +449,11 @@ impl StealthProfile {
     /// baked-in default, so the resolver never errors solely on Chrome being
     /// unavailable.
     ///
+    /// `chrome_env` holds the environment variables that Chrome will be
+    /// launched with, on top of the inherited environment; the Unix probe
+    /// runs Chrome with them too, so that a Chrome which needs one of them
+    /// (such as `LD_LIBRARY_PATH`) to run at all still gets its version read.
+    ///
     /// # Errors
     /// Returns [`StealthError::ChromeVersionDetect`] when the Chrome probe
     /// fails *and* no override is provided, and [`StealthError::SystemInfo`]
@@ -455,10 +461,14 @@ impl StealthProfile {
     // `StealthError` is large because `PatchFailed` wraps `CallError` (~152B).
     // Boxing it would cross the Task 5 file scope; bypass per-fn instead.
     #[allow(clippy::result_large_err)]
-    pub fn resolve_fingerprint(&self, chrome_exe: &Path) -> Result<Fingerprint, StealthError> {
+    pub fn resolve_fingerprint(
+        &self,
+        chrome_exe: &Path,
+        chrome_env: &[(OsString, OsString)],
+    ) -> Result<Fingerprint, StealthError> {
         let mut fp = match &self.fingerprint_override {
             Some(fp) => fp.clone(),
-            None => Fingerprint::auto_detect(chrome_exe)?,
+            None => Fingerprint::auto_detect(chrome_exe, chrome_env)?,
         };
         // The Accept-Encoding the *real* binary advertises, captured before the
         // claimed-major override below (used only to warn on an uncorrectable skew).
@@ -805,7 +815,7 @@ mod profile_tests {
             .platform(Platform::MacIntel);
         // Pass a path that doesn't exist; if it tried to probe, it'd fail.
         let resolved = p
-            .resolve_fingerprint(std::path::Path::new("/nonexistent"))
+            .resolve_fingerprint(std::path::Path::new("/nonexistent"), &[])
             .unwrap();
         assert_eq!(resolved.platform, Platform::MacIntel); // per-field override applied
     }
@@ -828,7 +838,7 @@ mod profile_tests {
         };
         let profile = profile.fingerprint(fp);
         let resolved = profile
-            .resolve_fingerprint(std::path::Path::new("/nonexistent-chrome"))
+            .resolve_fingerprint(std::path::Path::new("/nonexistent-chrome"), &[])
             .expect("resolve ok");
         assert_eq!(resolved.languages.unwrap(), vec!["fr-FR", "fr"]);
     }
@@ -856,7 +866,7 @@ mod profile_tests {
             .fingerprint(bare_fp())
             .user_agent_metadata(custom.clone());
         let resolved = profile
-            .resolve_fingerprint(std::path::Path::new("/nonexistent"))
+            .resolve_fingerprint(std::path::Path::new("/nonexistent"), &[])
             .unwrap();
         // Equals the SUPPLIED value exactly, not the recompose()-derived one
         // (which would be `realistic(Win32, 120, ...)` from `bare_fp()`).
@@ -867,7 +877,7 @@ mod profile_tests {
     fn absent_ua_metadata_override_keeps_recompose_derived_behavior() {
         let profile = StealthProfile::native().fingerprint(bare_fp());
         let resolved = profile
-            .resolve_fingerprint(std::path::Path::new("/nonexistent"))
+            .resolve_fingerprint(std::path::Path::new("/nonexistent"), &[])
             .unwrap();
         // No override → today's behavior: recompose()-derived from platform
         // + chrome_major, i.e. matches `UserAgentMetadata::realistic` for the
@@ -885,7 +895,7 @@ mod profile_tests {
             .fingerprint(bare_fp())
             .screen(screen);
         let resolved = profile
-            .resolve_fingerprint(std::path::Path::new("/nonexistent"))
+            .resolve_fingerprint(std::path::Path::new("/nonexistent"), &[])
             .unwrap();
         assert_eq!(resolved.screen, Some(screen));
     }
@@ -894,7 +904,7 @@ mod profile_tests {
     fn absent_screen_override_leaves_fingerprint_screen_none() {
         let profile = StealthProfile::native().fingerprint(bare_fp());
         let resolved = profile
-            .resolve_fingerprint(std::path::Path::new("/nonexistent"))
+            .resolve_fingerprint(std::path::Path::new("/nonexistent"), &[])
             .unwrap();
         // No override → today's behavior: no screen field influence at all.
         assert_eq!(resolved.screen, None);
