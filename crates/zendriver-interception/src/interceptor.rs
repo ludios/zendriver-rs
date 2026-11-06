@@ -26,9 +26,17 @@
 //! 5. Every pause walks the list anew: deciding a Request pause says
 //!    nothing about the Response pause, and each 3xx hop is a new request
 //!    to Chrome.
-//! 6. A stream entry owns every pause it decides: the consumer answers each
-//!    through its [`PausedRequest`].
-//! 7. A proxy's challenge gets the session's credentials once; a repeated
+//! 6. A request sent to a new URL (an [`Action::RewriteUrl`], or a
+//!    `ModifyRequest` or a stream's answer that returns a URL) isn't paused
+//!    again at the Request stage. It pauses at the Response stage exactly
+//!    when some `ResponseHeaders` / `ResponseError` entry fits the new URL
+//!    (sent as `interceptResponse`).
+//! 7. A stream entry owns every pause it decides: the consumer answers each
+//!    through its [`PausedRequest`], which hands the answer to the
+//!    multiplexer to send. While a stream holds a pause, `Fetch` stays on
+//!    (with no patterns, if no entry or credentials are left), since
+//!    `Fetch.disable` would release it.
+//! 8. A proxy's challenge gets the session's credentials once; a repeated
 //!    challenge is cancelled; a server's challenge always gets Chrome's
 //!    default.
 //!
@@ -369,10 +377,14 @@ impl Interceptor {
 
     /// The multiplexer's command queue, spawning the multiplexer first if
     /// it isn't running.
-    fn commands(&self) -> &mpsc::UnboundedSender<Command> {
+    pub(crate) fn commands(&self) -> &mpsc::UnboundedSender<Command> {
         self.inner.commands.get_or_init(|| {
             let (commands, received) = mpsc::unbounded_channel();
-            tokio::spawn(run(self.inner.session.clone(), received));
+            tokio::spawn(run(
+                self.inner.session.clone(),
+                received,
+                commands.downgrade(),
+            ));
             commands
         })
     }
@@ -499,7 +511,7 @@ impl Stream for InterceptStream {
 }
 
 /// An entry of the list.
-struct Slot {
+pub(crate) struct Slot {
     id: RuleId,
     label: Option<String>,
     when: Match,
@@ -546,17 +558,31 @@ impl Slot {
 }
 
 /// What decides the requests an entry fits.
-enum Responder {
+pub(crate) enum Responder {
     Rule(Action),
     /// The stream from `subscribe()`.
     Stream(mpsc::UnboundedSender<PausedRequest>),
 }
 
-/// The reply to a change.
-type Reply = oneshot::Sender<Result<(), InterceptionError>>;
+/// The reply to a change or an answer.
+pub(crate) type Reply = oneshot::Sender<Result<(), InterceptionError>>;
 
-/// What an `Interceptor` or a handle asks of the multiplexer.
-enum Command {
+/// A stream consumer's answer to a paused request, from its
+/// [`PausedRequest`].
+pub(crate) struct Answer {
+    pub(crate) request_id: String,
+    /// The request's resource type, to decide its Response pause after a
+    /// new URL.
+    pub(crate) resource_type: ResourceType,
+    pub(crate) method: &'static str,
+    pub(crate) params: Value,
+    /// Where Chrome's reply goes, if anyone waits for it.
+    pub(crate) done: Option<Reply>,
+}
+
+/// What an `Interceptor`, a handle or a paused request asks of the
+/// multiplexer.
+pub(crate) enum Command {
     /// Insert the entries at the position.
     Insert(Vec<Slot>, Position, Reply),
     /// Move the entry to the position.
@@ -572,6 +598,10 @@ enum Command {
     SetProxyAuth(Option<ProxyAuth>, Reply),
     /// Describe the entries, with the hosts of host sets or not.
     Snapshot(bool, oneshot::Sender<Snapshot>),
+    /// Send a stream consumer's answer.
+    Answer(Answer),
+    /// Chrome has replied to the answer for this request.
+    Answered(String),
 }
 
 /// A session's `Fetch` events, with its connection's reports of lost
@@ -760,21 +790,33 @@ fn send(session: &SessionHandle, method: &'static str, params: Value) {
 }
 
 /// Release the paused request `request_id` with `method` and `params`,
-/// without waiting (the multiplexer goes on to the next event). If Chrome
-/// refuses them, the request is continued unchanged instead: one left
-/// paused would stall its page for good.
+/// without waiting (the multiplexer goes on to the next event); see
+/// [`answer_now`].
 fn release(session: &SessionHandle, request_id: String, method: &'static str, params: Value) {
     let session = session.clone();
     tokio::spawn(async move {
-        let Err(e) = session.call(method, params).await else {
-            return;
-        };
-        warn!(error = %e, method, "interception: Chrome refused a paused request's release; continuing it unchanged");
-        let unchanged = continue_params(&request_id, RequestOverrides::default());
-        if let Err(e) = session.call("Fetch.continueRequest", unchanged).await {
-            debug!(error = %e, "interception: continuing the request failed too");
-        }
+        let _ = answer_now(&session, &request_id, method, params).await;
     });
+}
+
+/// Release the paused request `request_id` with `method` and `params`, and
+/// return Chrome's reply. If Chrome refuses them, the request is continued
+/// unchanged instead: one left paused would stall its page for good.
+async fn answer_now(
+    session: &SessionHandle,
+    request_id: &str,
+    method: &'static str,
+    params: Value,
+) -> Result<(), InterceptionError> {
+    let Err(e) = session.call(method, params).await else {
+        return Ok(());
+    };
+    warn!(error = %e, method, "interception: Chrome refused a paused request's release; continuing it unchanged");
+    let unchanged = continue_params(request_id, RequestOverrides::default());
+    if let Err(e) = session.call("Fetch.continueRequest", unchanged).await {
+        debug!(error = %e, "interception: continuing the request failed too");
+    }
+    Err(e.into())
 }
 
 /// The `Fetch.RequestPattern` that pauses requests for `auth`: every
@@ -787,13 +829,16 @@ fn auth_pattern(auth: &ProxyAuth) -> Value {
     pattern
 }
 
-/// Make `session`'s `Fetch` configuration match `slots` and `auth`.
+/// Make `session`'s `Fetch` configuration match `slots` and `auth`; with
+/// `held_open`, keep `Fetch` on even with neither (a stream holds a pause,
+/// which `Fetch.disable` would release).
 async fn configure(
     session: &SessionHandle,
     slots: &[Slot],
     auth: Option<&ProxyAuth>,
+    held_open: bool,
 ) -> Result<(), InterceptionError> {
-    if slots.is_empty() && auth.is_none() {
+    if slots.is_empty() && auth.is_none() && !held_open {
         session.call("Fetch.disable", json!({})).await?;
         return Ok(());
     }
@@ -823,6 +868,12 @@ struct Mux {
     /// or credentials.
     events: Option<FetchEvents>,
     answered: Answered,
+    /// The requests handed to streams and not answered yet.
+    held: HashSet<String>,
+    /// A sender of the multiplexer's own queue, for paused requests'
+    /// answers and their completions. Weak, so the multiplexer ends once
+    /// nothing else can send it commands.
+    commands: mpsc::WeakUnboundedSender<Command>,
 }
 
 impl Mux {
@@ -873,7 +924,62 @@ impl Mux {
                 };
                 let _ = done.send(snapshot);
             }
+            Command::Answer(answer) => self.answer(answer),
+            Command::Answered(request_id) => {
+                let released = self.held.remove(&request_id);
+                if released && self.held.is_empty() && self.is_idle() {
+                    if let Err(e) = self.apply().await {
+                        debug!(error = %e, "interception: Fetch.disable after the last held pause failed");
+                    }
+                }
+            }
         }
+    }
+
+    /// Send a stream consumer's `answer` (with `interceptResponse` set if it
+    /// sends the request to a new URL: rule 6 of the module docs), and tell
+    /// the multiplexer once Chrome has replied.
+    fn answer(&self, answer: Answer) {
+        let Answer {
+            request_id,
+            resource_type,
+            method,
+            params,
+            done,
+        } = answer;
+        let params = self.with_intercept_response(params, resource_type);
+        let session = self.session.clone();
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let sent = answer_now(&session, &request_id, method, params).await;
+            if let Some(done) = done {
+                let _ = done.send(sent);
+            }
+            if let Some(commands) = commands.upgrade() {
+                let _ = commands.send(Command::Answered(request_id));
+            }
+        });
+    }
+
+    /// `params` of a `Fetch.continueRequest` that sends the request to a
+    /// new URL, with `interceptResponse` saying whether some response entry
+    /// fits the new URL (Chrome decided the Response pause from the old
+    /// one); other `params` unchanged.
+    fn with_intercept_response(&self, mut params: Value, resource_type: ResourceType) -> Value {
+        let Some(url) = params.get("url").and_then(Value::as_str) else {
+            return params;
+        };
+        let kinds = [PauseKind::ResponseHeaders, PauseKind::ResponseError];
+        let fits = self.slots.iter().any(|s| {
+            !s.is_dropped_stream() && kinds.iter().any(|k| s.when.fits(url, resource_type, *k))
+        });
+        params["interceptResponse"] = Value::Bool(fits);
+        params
+    }
+
+    /// Whether there are no entries and no credentials.
+    fn is_idle(&self) -> bool {
+        self.slots.is_empty() && self.proxy_auth.is_none()
     }
 
     /// The index of entry `id`, if it's in the list.
@@ -934,14 +1040,21 @@ impl Mux {
         if self.events.is_none() && (!self.slots.is_empty() || self.proxy_auth.is_some()) {
             self.events = Some(fetch_events(&self.session));
         }
-        let applied = configure(&self.session, &self.slots, self.proxy_auth.as_ref()).await;
+        let held_open = !self.held.is_empty();
+        let applied = configure(
+            &self.session,
+            &self.slots,
+            self.proxy_auth.as_ref(),
+            held_open,
+        )
+        .await;
         self.unsubscribe_if_idle();
         applied
     }
 
     /// Drop the event subscription if there are no entries or credentials.
     fn unsubscribe_if_idle(&mut self) {
-        if self.slots.is_empty() && self.proxy_auth.is_none() {
+        if self.is_idle() {
             self.events = None;
         }
     }
@@ -967,7 +1080,9 @@ impl Mux {
         if let Err(e) = self.session.call("Fetch.disable", json!({})).await {
             warn!(error = %e, "interception: Fetch.disable failed");
         }
-        let applied = configure(&self.session, &self.slots, self.proxy_auth.as_ref()).await;
+        // `Fetch.disable` released what the streams held.
+        self.held.clear();
+        let applied = configure(&self.session, &self.slots, self.proxy_auth.as_ref(), false).await;
         if let Err(e) = applied {
             warn!(error = %e, "interception: Fetch.enable failed; the entries are inert");
         }
@@ -980,11 +1095,12 @@ impl Mux {
         self.slots.clear();
         self.proxy_auth = None;
         self.events = None;
+        self.held.clear();
     }
 
     /// Hand the `Fetch.requestPaused` event `params` to the first entry that
     /// fits it (see the module docs).
-    fn dispatch(&self, params: &Value) {
+    fn dispatch(&mut self, params: &Value) {
         let ev = match RequestPausedEvent::deserialize(params) {
             Ok(ev) => ev,
             Err(e) => {
@@ -1017,19 +1133,27 @@ impl Mux {
         };
         match &decider.responder {
             Responder::Stream(requests) => {
+                // The upgrade can't fail: an `Interceptor` or handle that
+                // sent the stream's entry is alive while its stream is.
+                let Some(answers) = self.commands.upgrade() else {
+                    return;
+                };
                 let paused = PausedRequest::new(
                     ev.request_id.clone(),
                     pause,
                     build_request_info(&ev),
                     build_response_info(&ev),
                     self.session.clone(),
+                    answers,
                 );
                 // If the stream was dropped since, the request comes back,
-                // and its drop continues it.
+                // and its drop answers it.
                 let _ = requests.send(paused);
+                self.held.insert(ev.request_id);
             }
             Responder::Rule(action) => {
                 let (method, params) = command(action, &ev);
+                let params = self.with_intercept_response(params, resource_type);
                 release(&self.session, ev.request_id, method, params);
             }
         }
@@ -1061,13 +1185,19 @@ impl Mux {
 }
 
 /// Run `session`'s multiplexer until every sender of `commands` is gone.
-async fn run(session: SessionHandle, mut commands: mpsc::UnboundedReceiver<Command>) {
+async fn run(
+    session: SessionHandle,
+    mut commands: mpsc::UnboundedReceiver<Command>,
+    own: mpsc::WeakUnboundedSender<Command>,
+) {
     let mut mux = Mux {
         session,
         slots: Vec::new(),
         proxy_auth: None,
         events: None,
         answered: Answered::default(),
+        held: HashSet::new(),
+        commands: own,
     };
     loop {
         tokio::select! {
@@ -1465,6 +1595,92 @@ mod tests {
             );
             assert!(sent.contains(&continued), "{id} not continued: {sent:?}");
         }
+        conn.shutdown();
+    }
+
+    /// A request sent to a new URL pauses at the Response stage exactly when
+    /// a response entry fits the new URL, whether a rule or a stream sent it.
+    #[tokio::test]
+    async fn a_new_url_pauses_at_the_response_stage_when_an_entry_fits_it() {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let api_responses = Match::url("*/api/*")
+            .unwrap()
+            .at(PauseKind::ResponseHeaders);
+        let rules = vec![
+            rule(
+                "*/to-api",
+                Action::RewriteUrl("https://b.test/api/1".into()),
+            ),
+            rule(
+                "*/to-page",
+                Action::RewriteUrl("https://b.test/page".into()),
+            ),
+            Rule::new(api_responses, Action::Continue).unwrap(),
+        ];
+        let (_rules, _) = applied(&mut mock, interceptor.insert(rules, Position::Last)).await;
+        let when = Match::url("*/to-stream").unwrap();
+        let (mut stream, _) = applied(&mut mock, interceptor.subscribe(when, Position::Last)).await;
+
+        for (id, url, intercept_response) in [
+            ("R1", "https://a.test/to-api", true),
+            ("R2", "https://a.test/to-page", false),
+        ] {
+            pause(&mock, id, url, json!({})).await;
+            let continued = answered(&mut mock, "Fetch.continueRequest").await;
+            assert_eq!(continued["requestId"], id);
+            assert_eq!(continued["interceptResponse"], intercept_response, "{url}");
+        }
+
+        pause(&mock, "R3", "https://a.test/to-stream", json!({})).await;
+        let paused = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let to_api = RequestOverrides {
+            url: Some("https://b.test/api/2".into()),
+            ..RequestOverrides::default()
+        };
+        let (sent, continued) = futures::join!(
+            paused.modify_and_continue(to_api),
+            answered(&mut mock, "Fetch.continueRequest")
+        );
+        sent.unwrap();
+        assert_eq!(
+            continued,
+            json!({ "requestId": "R3", "url": "https://b.test/api/2", "interceptResponse": true })
+        );
+        conn.shutdown();
+    }
+
+    /// While a stream holds a pause, removing the last entry leaves `Fetch`
+    /// on with no patterns (`Fetch.disable` would release the pause), and
+    /// the answer to the pause turns it off.
+    #[tokio::test]
+    async fn fetch_stays_on_while_a_stream_holds_a_pause() {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let when = Match::url("*").unwrap();
+        let (mut stream, _) = applied(&mut mock, interceptor.subscribe(when, Position::Last)).await;
+        pause(&mock, "R1", "https://x.test/", json!({})).await;
+        let held = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+
+        drop(stream);
+        let enabled = (
+            "Fetch.enable".to_string(),
+            json!({ "patterns": [], "handleAuthRequests": false }),
+        );
+        assert_eq!(sent_until_quiet(&mut mock).await, vec![enabled]);
+
+        let (sent, continued) = futures::join!(
+            held.continue_(),
+            answered(&mut mock, "Fetch.continueRequest")
+        );
+        sent.unwrap();
+        assert_eq!(continued, json!({ "requestId": "R1" }));
+        let disabled = ("Fetch.disable".to_string(), json!({}));
+        assert_eq!(sent_until_quiet(&mut mock).await, vec![disabled]);
         conn.shutdown();
     }
 

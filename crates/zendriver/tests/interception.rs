@@ -148,6 +148,55 @@ async fn rules_pause_at_their_own_stage() {
     browser.close().await;
 }
 
+/// A request sent to a new URL, by a rule or by a stream's answer, pauses
+/// at the Response stage for a response rule that fits the new URL, though
+/// none fits the old one.
+#[tokio::test]
+async fn a_new_url_gets_the_response_rule_that_fits_it() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/plain")).await;
+
+    let new_url = server.url(SITE_A, "/plain?new");
+    let _rules = tab
+        .intercept()
+        .redirect("*/plain?by-rule", new_url.clone())
+        .unwrap()
+        .modify_response("*/plain?new", |_| ResponseOverrides {
+            status: Some(203),
+            ..ResponseOverrides::default()
+        })
+        .unwrap()
+        .start(Position::Last)
+        .await
+        .unwrap();
+    let modified = "203 [Non-Authoritative Information] text/html; charset=utf-8";
+    assert_eq!(fetch_response(&tab, "/plain?by-rule").await, modified);
+
+    let by_stream = Match::url("*/plain?by-stream").unwrap();
+    let mut stream = tab
+        .interceptor()
+        .subscribe(by_stream, Position::First)
+        .await
+        .unwrap();
+    let fetched = tokio::spawn({
+        let tab = tab.clone();
+        async move { fetch_response(&tab, "/plain?by-stream").await }
+    });
+    let paused = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("the stream got no request")
+        .unwrap();
+    let to_new = RequestOverrides {
+        url: Some(new_url),
+        ..RequestOverrides::default()
+    };
+    paused.modify_and_continue(to_new).await.unwrap();
+    assert_eq!(fetched.await.unwrap(), modified);
+    browser.close().await;
+}
+
 /// A paused request is released whatever goes wrong with it: a rule's
 /// closure that panics, a response that Chrome refuses (a header name with
 /// a space), or a stream's request dropped unreleased. Each request still

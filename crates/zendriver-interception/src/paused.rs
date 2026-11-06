@@ -15,18 +15,23 @@
 //! [`continue_response`]: PausedRequest::continue_response
 //! [`body`]: PausedRequest::body
 //!
-//! Internally `PausedRequest` carries a [`SessionHandle`] (not a full `Tab`)
-//! so the type lives in this crate without a reverse dependency on
-//! `zendriver`. The multiplexer constructs each instance from its session
-//! and the decoded event payload.
+//! A `PausedRequest` hands its answer to its session's interception task
+//! (the multiplexer), which sends it to Chrome and sees it through: a caller
+//! that stops waiting can't make the request be answered twice, and a
+//! request continued to a new URL pauses at the Response stage exactly when
+//! an entry fits the new URL. It also carries a [`SessionHandle`] (not a
+//! full `Tab`), for [`body`], so the type lives in this crate without a
+//! reverse dependency on `zendriver`.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Value, json};
+use tokio::sync::{mpsc, oneshot};
 use zendriver_transport::SessionHandle;
 
 use crate::error::InterceptionError;
 use crate::fetch;
+use crate::interceptor::{Answer, Command};
 use crate::types::{
     AbortReason, PauseKind, RequestInfo, RequestOverrides, ResponseInfo, ResponseOverrides,
 };
@@ -42,12 +47,13 @@ use crate::types::{
 /// `Response` stage to inspect the upstream body before deciding which
 /// terminal action to take.
 ///
-/// If a `PausedRequest` is dropped without a terminal action that Chrome
-/// accepted (e.g. the consuming task panicked, a `select!` arm cancelled
-/// mid-handler, or Chrome refused the action's parameters), [`Drop`]
-/// dispatches a best-effort `Fetch.continueRequest` in a detached task so
-/// Chrome doesn't hold the request open indefinitely. See
-/// cdpdriver/zendriver#126 for the freeze pattern this prevents.
+/// If a `PausedRequest` is dropped without a terminal action (e.g. the
+/// consuming task panicked, or a `select!` arm was cancelled before the
+/// action was called), [`Drop`] has the multiplexer send a
+/// `Fetch.continueRequest`, so Chrome doesn't hold the request open
+/// indefinitely. A terminal action that Chrome refuses is followed by the
+/// same `Fetch.continueRequest`. See cdpdriver/zendriver#126 for the
+/// freeze pattern this prevents.
 
 #[derive(Debug)]
 pub struct PausedRequest {
@@ -62,12 +68,14 @@ pub struct PausedRequest {
     /// `Response` stage. `None` at the `Request` stage.
     pub response: Option<ResponseInfo>,
     session: SessionHandle,
+    /// The multiplexer's queue, which every answer goes through.
+    answers: mpsc::UnboundedSender<Command>,
     /// Flipped to `true` by every terminal action (`continue_`, `abort`,
-    /// `respond`, `modify_and_continue`, `continue_response`) as it sends
-    /// its CDP call, and back to `false` if Chrome refuses it.
-    /// [`Drop`] inspects this to decide whether to fire a fallback
-    /// `Fetch.continueRequest` — set means "already released, don't
-    /// double-fire"; clear means "not released, release Chrome".
+    /// `respond`, `modify_and_continue`, `continue_response`) as it hands
+    /// its answer to the multiplexer, which sees it through from then on.
+    /// [`Drop`] inspects this to decide whether to answer for the request
+    /// itself — set means "already answered, don't double-fire"; clear
+    /// means "not answered, release Chrome".
     released: bool,
 }
 
@@ -81,6 +89,7 @@ impl PausedRequest {
         request: RequestInfo,
         response: Option<ResponseInfo>,
         session: SessionHandle,
+        answers: mpsc::UnboundedSender<Command>,
     ) -> Self {
         Self {
             request_id: request_id.into(),
@@ -88,6 +97,7 @@ impl PausedRequest {
             request,
             response,
             session,
+            answers,
             released: false,
         }
     }
@@ -226,23 +236,39 @@ impl PausedRequest {
         self.release("Fetch.continueResponse", params).await
     }
 
-    /// Send `method` with `params`, which release this request.
+    /// Hand the multiplexer `method` with `params`, which release this
+    /// request, and wait for Chrome's reply.
     ///
-    /// It counts as released (so [`Drop`] sends nothing) while the call is
-    /// in flight: a caller that stops waiting must not also continue it,
-    /// which could release the request's next pause (its Response stage
-    /// has the same id). If Chrome refuses the call, it doesn't count, and
-    /// the drop at the end of this call continues the request.
+    /// From then on the multiplexer sees the answer through, so it counts
+    /// as released (and [`Drop`] sends nothing): a caller that stops
+    /// waiting doesn't leave it half done, nor answered twice.
+    ///
+    /// # Errors
+    ///
+    /// [`InterceptionError::Call`] if Chrome refused the answer (the
+    /// multiplexer then deals with the request as it does with a rule's
+    /// refused answer), and [`InterceptionError::SubscriptionClosed`] if
+    /// the multiplexer is gone.
     async fn release(
         mut self,
         method: &'static str,
         params: Value,
     ) -> Result<(), InterceptionError> {
         self.released = true;
-        let sent = self.session.call(method, params).await;
-        self.released = sent.is_ok();
-        sent?;
-        Ok(())
+        let (done, reply) = oneshot::channel();
+        let answer = Command::Answer(Answer {
+            request_id: self.request_id.clone(),
+            resource_type: self.request.resource_type,
+            method,
+            params,
+            done: Some(done),
+        });
+        if self.answers.send(answer).is_err() {
+            return Err(InterceptionError::SubscriptionClosed);
+        }
+        reply
+            .await
+            .map_err(|_| InterceptionError::SubscriptionClosed)?
     }
 
     /// Fetch the upstream response body. Only useful at the `Response`
@@ -282,28 +308,24 @@ impl PausedRequest {
 /// Safety net for cdpdriver/zendriver#126: a paused request that gets dropped
 /// without a terminal action (panicked handler, cancelled `select!` arm,
 /// stream consumer exited early) would otherwise leave Chrome waiting on
-/// `requestId` forever and freeze the whole client. Spawning a detached
-/// `Fetch.continueRequest` releases the pause best-effort; failures are
-/// logged at `debug!` because the session may already be torn down (e.g. tab
-/// closed mid-pause), which is the same condition that produced the original
-/// freeze and not an actionable error.
+/// `requestId` forever and freeze the whole client. The drop hands the
+/// multiplexer a plain `Fetch.continueRequest` for it instead.
 impl Drop for PausedRequest {
     fn drop(&mut self) {
         if self.released {
             return;
         }
-        let session = self.session.clone();
         let request_id = std::mem::take(&mut self.request_id);
-        tokio::spawn(async move {
-            let params = fetch::continue_params(&request_id, RequestOverrides::default());
-            if let Err(e) = session.call("Fetch.continueRequest", params).await {
-                tracing::debug!(
-                    error = %e,
-                    request_id = %request_id,
-                    "PausedRequest::drop: best-effort Fetch.continueRequest failed (session likely closed)"
-                );
-            }
+        let params = fetch::continue_params(&request_id, RequestOverrides::default());
+        let answer = Command::Answer(Answer {
+            request_id,
+            resource_type: self.request.resource_type,
+            method: "Fetch.continueRequest",
+            params,
+            done: None,
         });
+        // A multiplexer that is gone took the session's pauses with it.
+        let _ = self.answers.send(answer);
     }
 }
 
@@ -311,6 +333,7 @@ impl Drop for PausedRequest {
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::interceptor::Interceptor;
     use crate::types::ResourceType;
     use zendriver_transport::SessionHandle;
     use zendriver_transport::testing::MockConnection;
@@ -325,6 +348,19 @@ mod tests {
         }
     }
 
+    /// A paused request of `session`, answered through a multiplexer of its
+    /// own.
+    fn paused(
+        request_id: &str,
+        pause: PauseKind,
+        request: RequestInfo,
+        response: Option<ResponseInfo>,
+        session: SessionHandle,
+    ) -> PausedRequest {
+        let answers = Interceptor::new(session.clone()).commands().clone();
+        PausedRequest::new(request_id, pause, request, response, session, answers)
+    }
+
     fn make_response_info() -> ResponseInfo {
         ResponseInfo {
             status: 200,
@@ -337,7 +373,7 @@ mod tests {
     async fn continue_dispatches_fetch_continue_request() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new("REQ-1", PauseKind::Request, make_request_info(), None, sess);
+        let req = paused("REQ-1", PauseKind::Request, make_request_info(), None, sess);
 
         let fut = tokio::spawn(async move { req.continue_().await });
 
@@ -362,7 +398,7 @@ mod tests {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         {
-            let req = PausedRequest::new(
+            let req = paused(
                 "REQ-DROP",
                 PauseKind::Request,
                 make_request_info(),
@@ -386,7 +422,7 @@ mod tests {
     async fn a_refused_release_is_continued_on_drop() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new(
+        let req = paused(
             "REQ-REFUSED",
             PauseKind::Request,
             make_request_info(),
@@ -396,10 +432,10 @@ mod tests {
         let abort = tokio::spawn(req.abort(AbortReason::Failed));
         let id = mock.expect_cmd("Fetch.failRequest").await;
         mock.reply_err(id, -32602, "Invalid InterceptionId.").await;
-        assert!(abort.await.unwrap().is_err());
         let id = mock.expect_cmd("Fetch.continueRequest").await;
         assert_eq!(mock.last_sent()["params"]["requestId"], "REQ-REFUSED");
         mock.reply(id, serde_json::json!({})).await;
+        assert!(abort.await.unwrap().is_err());
         conn.shutdown();
     }
 
@@ -409,7 +445,7 @@ mod tests {
     async fn an_action_cancelled_in_flight_is_not_followed_by_a_continue() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new(
+        let req = paused(
             "REQ-CANCELLED",
             PauseKind::Request,
             make_request_info(),
@@ -435,7 +471,7 @@ mod tests {
         // round-trips.
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new(
+        let req = paused(
             "REQ-ONCE",
             PauseKind::Request,
             make_request_info(),
@@ -465,7 +501,7 @@ mod tests {
     async fn respond_dispatches_fetch_fulfill_with_base64_body() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new("REQ-2", PauseKind::Request, make_request_info(), None, sess);
+        let req = paused("REQ-2", PauseKind::Request, make_request_info(), None, sess);
 
         let body = b"hello world".to_vec();
         let expected_b64 = BASE64.encode(&body);
@@ -497,7 +533,7 @@ mod tests {
     async fn continue_response_dispatches_fetch_continue_response() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new(
+        let req = paused(
             "REQ-CR",
             PauseKind::ResponseHeaders,
             make_request_info(),
@@ -539,7 +575,7 @@ mod tests {
         // and dispatch nothing.
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new(
+        let req = paused(
             "REQ-WS",
             PauseKind::Request,
             make_request_info(),
@@ -575,7 +611,7 @@ mod tests {
         // path would send two CDP round-trips.
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let req = PausedRequest::new(
+        let req = paused(
             "REQ-CR-ONCE",
             PauseKind::ResponseHeaders,
             make_request_info(),

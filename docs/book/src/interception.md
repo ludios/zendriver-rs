@@ -39,9 +39,15 @@ request walks it. In full (from [`zendriver::interception`]):
    later entry runs. A pause no entry fits is continued unchanged.
 5. Every pause walks the list anew: deciding a Request pause says nothing
    about the Response pause, and each 3xx hop is a new request to Chrome.
-6. A stream entry owns every pause it decides: the consumer answers each
-   through its `PausedRequest`.
-7. A proxy's challenge gets the tab's credentials once; a repeated
+6. A request sent to a new URL (a `RewriteUrl`, or a `ModifyRequest` or a
+   stream's answer that returns a URL) isn't paused again at the Request
+   stage. It pauses at the Response stage exactly when some
+   `ResponseHeaders` / `ResponseError` entry fits the new URL.
+7. A stream entry owns every pause it decides: the consumer answers each
+   through its `PausedRequest`, which hands the answer to the tab's
+   interception to send. While a stream holds a pause, `Fetch` stays
+   enabled, since disabling it would continue the pause.
+8. A proxy's challenge gets the tab's credentials once; a repeated
    challenge is cancelled; a server's challenge always gets Chrome's
    default.
 
@@ -118,7 +124,7 @@ let _rules = tab
 [`start`] returns an [`InterceptHandle`]. The handle keeps its rules in the
 list — when you drop it, they are removed, and the tab's other entries
 keep their order (`Fetch.disable` is sent once no entry and no credentials
-are left). Await [`stop`] instead of dropping it to wait until Chrome has
+are left, and no stream holds a pause). Await [`stop`] instead of dropping it to wait until Chrome has
 applied the change. **Bind the handle to a variable; letting it drop
 immediately silently removes its rules.** Use `let _intercept = ...` (note
 the leading underscore: a plain `_` is no binding at all, so the handle

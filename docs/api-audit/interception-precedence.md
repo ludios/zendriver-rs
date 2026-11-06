@@ -82,7 +82,7 @@ impl Tab {
 9. A proxy's challenge gets the tab's `ProxyAuth` once; a repeated challenge is cancelled; a server's challenge always gets Chrome's default.
 10. A pause whose deciding entry does not answer it fails the request (`Fetch.failRequest`, reason `Failed`), logged with the entry's id: a closure that panicked, an answer Chrome refused, a `PausedRequest` dropped unanswered, a stream dropped with pauses unread. No other entry is tried.
 
-Keep `Fetch` enabled with `patterns: []` after the last entry goes (disabling would release the pauses a stream holds).
+Keep `Fetch` enabled with `patterns: []` after the last entry goes while a stream still holds a pause (disabling would release it), and disable it once the last held pause is answered.
 
 ## MCP
 
