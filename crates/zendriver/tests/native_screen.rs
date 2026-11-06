@@ -2,9 +2,13 @@
 //! the `native` stealth profile (the default). Instead of patching the page,
 //! it launches headless Chrome with a screen (`--screen-info`) and windows
 //! that fill its work area (see `StealthObserver::headless_flags`), so
-//! Chrome itself reports geometry that agrees.
+//! Chrome itself reports geometry that agrees, to the page in front of each
+//! window. A background tab's page sees other geometry, which a test below
+//! pins down.
 
 #![cfg(feature = "integration-tests")]
+
+use std::collections::HashSet;
 
 use serde_json::{Value, json};
 use zendriver::{Browser, BrowserBuilder, Persona, Tab};
@@ -80,40 +84,76 @@ async fn the_default_screen_is_1920x1080_with_a_taskbar() {
     }
 }
 
-/// Each window's tab still fills the work area once other windows have
-/// opened, which is why `Browser::new_tab` tells callers to give each page
-/// that they work in at the same time its own window.
+/// A window's page still fills the work area after other windows open,
+/// which is why `Browser::new_tab` says to give each page that is worked in
+/// at the same time as others a window of its own. Each page loads before
+/// the next window opens, and is measured again, without reloading, after
+/// the last one opens.
 #[tokio::test]
 async fn a_window_keeps_its_geometry_while_others_open() {
     let server = FixtureServer::start().await;
     let browser = launch_for_test(Browser::builder()).await;
     let mut tabs = vec![browser.main_tab()];
+    let mut seen = vec![geometry(&server, &tabs[0]).await];
     for _ in 0..2 {
-        tabs.push(browser.new_window().await.expect("new window"));
+        let tab = browser.new_window().await.expect("new window");
+        seen.push(geometry(&server, &tab).await);
+        tabs.push(tab);
     }
-    let mut seen = Vec::new();
     for tab in &tabs {
-        seen.push(geometry(&server, tab).await);
+        seen.push(eval(tab, GEOMETRY_JS).await);
     }
+    let targets: HashSet<String> = tabs.iter().map(|tab| tab.target_id().to_string()).collect();
     browser.close().await;
+    assert_eq!(targets.len(), 3, "three tabs: {targets:?}");
     for seen in seen {
         assert_fills_work_area(&seen, [1920, 1080], [1920, 1032], 1.0);
     }
 }
 
+/// Chrome gives a background tab's page its viewport as its window: the
+/// window that the page sees starts where the viewport starts, and is as
+/// tall as the viewport. Chrome without stealth does this too, headless or
+/// headed. `Browser::new_tab` says so, and this test fails if Chrome stops
+/// doing it. Once the tab is back in front, its page sees its whole window
+/// again. Measured only on Linux.
 #[tokio::test]
-#[ignore = "known bug: a background tab's page sees its viewport as its window \
-            (at (0, 87), with outerHeight equal to innerHeight), because focus \
-            emulation keeps the tab visible after Chrome detaches its view from \
-            the window"]
-async fn known_bug_a_background_tab_sees_its_viewport_as_its_window() {
+#[cfg(target_os = "linux")]
+async fn a_background_tab_sees_its_viewport_as_its_window() {
+    use std::time::Duration;
+    use zendriver_testkit::assert_eventually;
+
+    /// Wait until the page in `tab` sees `window` (as `[screenX, screenY,
+    /// outerWidth, outerHeight]`); panic, naming `what`, if it doesn't
+    /// within 5 seconds.
+    async fn assert_window_becomes(tab: &Tab, window: &Value, what: &str) {
+        assert_eventually(Duration::from_secs(5), what, || async move {
+            eval(tab, "[screenX, screenY, outerWidth, outerHeight]").await == *window
+        })
+        .await;
+    }
+
     let server = FixtureServer::start().await;
     let browser = launch_for_test(Browser::builder()).await;
-    let background = browser.main_tab();
-    browser.new_tab().await.expect("new tab");
-    let seen = geometry(&server, &background).await;
+    let tab = browser.main_tab();
+    let in_front = geometry(&server, &tab).await;
+    assert_fills_work_area(&in_front, [1920, 1080], [1920, 1032], 1.0);
+    let viewport_height = in_front["viewport"][1].as_u64().expect("a viewport height");
+    let other = browser.new_tab().await.expect("new tab");
+    assert_window_becomes(
+        &tab,
+        &json!([0, 1032 - viewport_height, 1920, viewport_height]),
+        "the background tab's page sees its viewport as its window",
+    )
+    .await;
+    other.close().await.expect("close the new tab");
+    assert_window_becomes(
+        &tab,
+        &json!([0, 0, 1920, 1032]),
+        "the page sees its whole window once its tab is back in front",
+    )
+    .await;
     browser.close().await;
-    assert_fills_work_area(&seen, [1920, 1080], [1920, 1032], 1.0);
 }
 
 /// A builder whose persona has the screen `screen` (the members of a
