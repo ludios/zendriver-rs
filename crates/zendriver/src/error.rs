@@ -35,19 +35,22 @@ pub enum ZendriverError {
     #[error("transport: {0}")]
     Transport(Box<zendriver_transport::TransportError>),
 
-    /// The connection to Chrome dropped unexpectedly — the WebSocket died
-    /// without a caller-requested [`Browser::close`](crate::Browser::close)
-    /// (Chrome crashed, the socket was severed, a Close frame arrived
-    /// out-of-band). A CDP call awaiting a reply when the drop happened
-    /// resolves to this, distinct from the clean-shutdown
-    /// [`ZendriverError::Transport`] surfaced after `close()`.
+    /// The connection to Chrome dropped — the WebSocket died without a
+    /// caller-requested shutdown of that connection (Chrome crashed or quit,
+    /// the socket was severed, a Close frame arrived out-of-band). A CDP call
+    /// awaiting a reply when the drop happened resolves to this, and so does
+    /// a later call on that connection. A connection that was shut down
+    /// instead gives the clean-shutdown [`ZendriverError::Transport`].
     ///
-    /// Recover with [`Browser::reconnect`](crate::Browser::reconnect) (which
-    /// re-dials the live Chrome process) — but note that existing
-    /// `Tab`/`Frame`/`Element` handles are invalidated by a reconnect and must
-    /// be re-acquired via
-    /// [`Browser::main_tab`](crate::Browser::main_tab) /
-    /// [`Browser::tabs`](crate::Browser::tabs).
+    /// [`Browser::close`](crate::Browser::close) makes Chrome quit, so a call
+    /// on a tab that has its own socket gets this during and after `close()`,
+    /// and then no reconnect can help. Otherwise, recover with
+    /// [`Browser::reconnect`](crate::Browser::reconnect) (which re-dials the
+    /// live Chrome process) — but note that existing `Tab`/`Frame`/`Element`
+    /// handles are invalidated by a reconnect and must be re-acquired via
+    /// [`Browser::tabs`](crate::Browser::tabs);
+    /// [`Browser::main_tab`](crate::Browser::main_tab) still returns the old
+    /// tab.
     #[error("connection to chrome lost unexpectedly")]
     Disconnected,
 
