@@ -70,6 +70,8 @@ pub struct PausedRequest {
     session: SessionHandle,
     /// The multiplexer's queue, which every answer goes through.
     answers: mpsc::UnboundedSender<Command>,
+    /// The multiplexer's token for this pause.
+    hold: u64,
     /// Flipped to `true` by every terminal action (`continue_`, `abort`,
     /// `respond`, `modify_and_continue`, `continue_response`) as it hands
     /// its answer to the multiplexer, which sees it through from then on.
@@ -90,6 +92,7 @@ impl PausedRequest {
         response: Option<ResponseInfo>,
         session: SessionHandle,
         answers: mpsc::UnboundedSender<Command>,
+        hold: u64,
     ) -> Self {
         Self {
             request_id: request_id.into(),
@@ -98,6 +101,7 @@ impl PausedRequest {
             response,
             session,
             answers,
+            hold,
             released: false,
         }
     }
@@ -257,8 +261,8 @@ impl PausedRequest {
         self.released = true;
         let (done, reply) = oneshot::channel();
         let answer = Command::Answer(Answer {
+            hold: self.hold,
             request_id: self.request_id.clone(),
-            resource_type: self.request.resource_type,
             method,
             params,
             done: Some(done),
@@ -315,9 +319,8 @@ impl Drop for PausedRequest {
         if self.released {
             return;
         }
-        let request_id = std::mem::take(&mut self.request_id);
         // A multiplexer that is gone took the session's pauses with it.
-        let _ = self.answers.send(Command::Dropped(request_id));
+        let _ = self.answers.send(Command::Dropped(self.hold));
     }
 }
 

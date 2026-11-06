@@ -33,7 +33,8 @@
 //!    (sent as `interceptResponse`).
 //! 7. A stream entry owns every pause it decides: the consumer answers each
 //!    through its [`PausedRequest`], which hands the answer to the
-//!    multiplexer to send. While a stream holds a pause, `Fetch` stays on
+//!    multiplexer to send. While a pause awaits its answer (a stream holds
+//!    it, or Chrome hasn't replied to its answer yet), `Fetch` stays on
 //!    (with no patterns, if no entry or credentials are left), since
 //!    `Fetch.disable` would release it.
 //! 8. A proxy's challenge gets the session's credentials once; a repeated
@@ -67,7 +68,7 @@ use serde::Deserialize as _;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};
-use zendriver_transport::{AccountedRawEvent, RawEvent, SessionHandle};
+use zendriver_transport::{AccountedRawEvent, CallError, RawEvent, SessionHandle};
 
 use crate::error::InterceptionError;
 use crate::fetch::{
@@ -575,14 +576,25 @@ pub(crate) type Reply = oneshot::Sender<Result<(), InterceptionError>>;
 /// A stream consumer's answer to a paused request, from its
 /// [`PausedRequest`].
 pub(crate) struct Answer {
+    /// The pause's token (see [`Hold`]).
+    pub(crate) hold: u64,
     pub(crate) request_id: String,
-    /// The request's resource type, to decide its Response pause after a
-    /// new URL.
-    pub(crate) resource_type: ResourceType,
     pub(crate) method: &'static str,
     pub(crate) params: Value,
     /// Where Chrome's reply goes, if anyone waits for it.
     pub(crate) done: Option<Reply>,
+}
+
+/// A pause decided and not answered yet: a stream holds it, or Chrome
+/// hasn't replied to its answer. Each has its own token, since a request
+/// keeps its `requestId` from its Request pause to its Response pause.
+struct Hold {
+    request_id: String,
+    /// The entry that decided it, or `None` if none did.
+    entry: Option<RuleId>,
+    /// The request's resource type, for the `interceptResponse` of an
+    /// answer that sends it to a new URL.
+    resource_type: ResourceType,
 }
 
 /// What an `Interceptor`, a handle or a paused request asks of the
@@ -605,10 +617,11 @@ pub(crate) enum Command {
     Snapshot(bool, oneshot::Sender<Snapshot>),
     /// Send a stream consumer's answer.
     Answer(Answer),
-    /// A stream's paused request (this one) was dropped unanswered.
-    Dropped(String),
-    /// Chrome has replied to the answer for this request.
-    Answered(String),
+    /// A stream's paused request, of this hold token, was dropped
+    /// unanswered.
+    Dropped(u64),
+    /// Chrome has replied to the answer of this hold token.
+    Answered(u64),
 }
 
 /// A session's `Fetch` events, with its connection's reports of lost
@@ -797,26 +810,12 @@ fn send(session: &SessionHandle, method: &'static str, params: Value) {
     });
 }
 
-/// Release the paused request `request_id` with `method` and `params`,
-/// without waiting (the multiplexer goes on to the next event); see
-/// [`answer_now`].
-fn release(
-    session: &SessionHandle,
-    request_id: String,
-    entry: Option<RuleId>,
-    method: &'static str,
-    params: Value,
-) {
-    let session = session.clone();
-    tokio::spawn(async move {
-        let _ = answer_now(&session, &request_id, entry, method, params).await;
-    });
-}
-
 /// Release the paused request `request_id` with `method` and `params`, the
 /// answer of entry `entry` (`None`: of no entry), and return Chrome's
-/// reply. If Chrome refuses them, the request is failed instead: one left
-/// paused would stall its page for good.
+/// reply. If Chrome refuses them, the request is failed instead (unless
+/// the refused answer failed it): one left paused would stall its page for
+/// good. After a timeout or a broken connection, Chrome may have taken the
+/// answer, so nothing more is sent.
 async fn answer_now(
     session: &SessionHandle,
     request_id: &str,
@@ -828,6 +827,10 @@ async fn answer_now(
         return Ok(());
     };
     let entry = entry.map(|e| e.0);
+    if !matches!(e, CallError::Rpc(..)) || method == "Fetch.failRequest" {
+        warn!(error = %e, method, entry, "interception: answering a paused request failed");
+        return Err(e.into());
+    }
     warn!(error = %e, method, entry, "interception: Chrome refused the answer to a paused request; failing the request");
     let failed = fail_params(request_id, AbortReason::Failed);
     if let Err(e) = session.call("Fetch.failRequest", failed).await {
@@ -885,9 +888,10 @@ struct Mux {
     /// or credentials.
     events: Option<FetchEvents>,
     answered: Answered,
-    /// The requests handed to streams and not answered yet, each with its
-    /// stream's entry.
-    held: HashMap<String, RuleId>,
+    /// The pauses decided and not answered yet, by token.
+    held: HashMap<u64, Hold>,
+    /// The last token given to a pause.
+    last_hold: u64,
     /// A sender of the multiplexer's own queue, for paused requests'
     /// answers and their completions. Weak, so the multiplexer ends once
     /// nothing else can send it commands.
@@ -942,19 +946,33 @@ impl Mux {
                 };
                 let _ = done.send(snapshot);
             }
-            Command::Answer(answer) => self.answer(answer),
-            Command::Dropped(request_id) => {
+            Command::Answer(Answer {
+                hold,
+                request_id,
+                method,
+                params,
+                done,
+            }) => self.send_answer(hold, request_id, method, params, done),
+            Command::Dropped(hold) => {
                 // Not held: `Fetch.disable` released it, or the session ended.
-                let Some(&entry) = self.held.get(&request_id) else {
+                let Some(Hold {
+                    request_id, entry, ..
+                }) = self.held.get(&hold)
+                else {
                     return;
                 };
-                warn!(%entry, "interception: a paused request of stream entry {entry} was dropped unanswered; failing it");
-                let params = fail_params(&request_id, AbortReason::Failed);
-                self.send_answer(request_id, "Fetch.failRequest", params, None);
+                let entry = entry.map(|e| e.0);
+                warn!(
+                    entry,
+                    "interception: a stream's paused request was dropped unanswered; failing it"
+                );
+                let params = fail_params(request_id, AbortReason::Failed);
+                let request_id = request_id.clone();
+                self.send_answer(hold, request_id, "Fetch.failRequest", params, None);
             }
-            Command::Answered(request_id) => {
-                let released = self.held.remove(&request_id).is_some();
-                if released && self.held.is_empty() && self.is_idle() {
+            Command::Answered(hold) => {
+                let released = self.held.remove(&hold).is_some();
+                if released && self.is_idle() {
                     if let Err(e) = self.apply().await {
                         debug!(error = %e, "interception: Fetch.disable after the last held pause failed");
                     }
@@ -963,33 +981,57 @@ impl Mux {
         }
     }
 
-    /// Send a stream consumer's `answer` (with `interceptResponse` set if it
-    /// sends the request to a new URL: rule 6 of the module docs), and tell
-    /// the multiplexer once Chrome has replied.
-    fn answer(&self, answer: Answer) {
-        let Answer {
-            request_id,
+    /// Record a pause of `request_id`, of `resource_type`, decided by
+    /// `entry` (`None`: by no entry), and return its token.
+    fn hold(
+        &mut self,
+        request_id: &str,
+        entry: Option<RuleId>,
+        resource_type: ResourceType,
+    ) -> u64 {
+        self.last_hold += 1;
+        let hold = Hold {
+            request_id: request_id.into(),
+            entry,
             resource_type,
-            method,
-            params,
-            done,
-        } = answer;
-        let params = self.with_intercept_response(params, resource_type);
-        self.send_answer(request_id, method, params, done);
+        };
+        self.held.insert(self.last_hold, hold);
+        self.last_hold
     }
 
-    /// Answer the held request `request_id` with `method` and `params`
-    /// ([`answer_now`]), reply to `done`, and tell the multiplexer once
-    /// Chrome has replied.
+    /// Answer the pause of token `hold`, of request `request_id`, with
+    /// `method` and `params` ([`answer_now`], with the `interceptResponse`
+    /// of rule 6 if it sends the request to a new URL); reply to `done`, and
+    /// tell the multiplexer once Chrome has replied.
+    ///
+    /// A pause no longer held was released by a `Fetch.disable` or the
+    /// session's end: the answer is sent as it is, for its caller to hear
+    /// Chrome refuse it.
     fn send_answer(
         &self,
+        hold: u64,
         request_id: String,
         method: &'static str,
         params: Value,
         done: Option<Reply>,
     ) {
-        let entry = self.held.get(&request_id).copied();
         let session = self.session.clone();
+        let Some(Hold {
+            entry,
+            resource_type,
+            ..
+        }) = self.held.get(&hold)
+        else {
+            tokio::spawn(async move {
+                let sent = session.call(method, params).await;
+                if let Some(done) = done {
+                    let _ = done.send(sent.map(|_| ()).map_err(Into::into));
+                }
+            });
+            return;
+        };
+        let entry = *entry;
+        let params = self.with_intercept_response(params, *resource_type);
         let commands = self.commands.clone();
         tokio::spawn(async move {
             let sent = answer_now(&session, &request_id, entry, method, params).await;
@@ -997,7 +1039,7 @@ impl Mux {
                 let _ = done.send(sent);
             }
             if let Some(commands) = commands.upgrade() {
-                let _ = commands.send(Command::Answered(request_id));
+                let _ = commands.send(Command::Answered(hold));
             }
         });
     }
@@ -1018,9 +1060,10 @@ impl Mux {
         params
     }
 
-    /// Whether there are no entries and no credentials.
+    /// Whether `Fetch` needn't be on: there are no entries, no credentials
+    /// and no held pauses (`Fetch.disable` would release them).
     fn is_idle(&self) -> bool {
-        self.slots.is_empty() && self.proxy_auth.is_none()
+        self.slots.is_empty() && self.proxy_auth.is_none() && self.held.is_empty()
     }
 
     /// The index of entry `id`, if it's in the list.
@@ -1073,12 +1116,13 @@ impl Mux {
         }
     }
 
-    /// Make Chrome's `Fetch` configuration match the entries and
-    /// credentials, subscribed to the events before enabling `Fetch` (so no
-    /// pause is missed) and unsubscribed once there's nothing to read them
-    /// for.
+    /// Make Chrome's `Fetch` configuration match the entries, credentials
+    /// and held pauses, subscribed to the events before enabling `Fetch` (so
+    /// no pause is missed), and unsubscribed once `Fetch.disable` succeeded.
+    /// A change Chrome refused leaves the subscription for the caller's
+    /// rollback to settle ([`unsubscribe_if_idle`](Self::unsubscribe_if_idle)).
     async fn apply(&mut self) -> Result<(), InterceptionError> {
-        if self.events.is_none() && (!self.slots.is_empty() || self.proxy_auth.is_some()) {
+        if self.events.is_none() && !self.is_idle() {
             self.events = Some(fetch_events(&self.session));
         }
         let held_open = !self.held.is_empty();
@@ -1089,11 +1133,13 @@ impl Mux {
             held_open,
         )
         .await;
-        self.unsubscribe_if_idle();
+        if applied.is_ok() {
+            self.unsubscribe_if_idle();
+        }
         applied
     }
 
-    /// Drop the event subscription if there are no entries or credentials.
+    /// Drop the event subscription if `Fetch` needn't be on.
     fn unsubscribe_if_idle(&mut self) {
         if self.is_idle() {
             self.events = None;
@@ -1121,12 +1167,13 @@ impl Mux {
         if let Err(e) = self.session.call("Fetch.disable", json!({})).await {
             warn!(error = %e, "interception: Fetch.disable failed");
         }
-        // `Fetch.disable` released what the streams held.
+        // `Fetch.disable` released every pause.
         self.held.clear();
         let applied = configure(&self.session, &self.slots, self.proxy_auth.as_ref(), false).await;
         if let Err(e) = applied {
             warn!(error = %e, "interception: Fetch.enable failed; the entries are inert");
         }
+        self.unsubscribe_if_idle();
     }
 
     /// The session is gone (its socket closed, or it detached): drop every
@@ -1150,14 +1197,9 @@ impl Mux {
                     return;
                 };
                 warn!(error = %e, "interception: continuing a Fetch.requestPaused event it can't read");
+                let hold = self.hold(id, None, ResourceType::Other);
                 let unchanged = continue_params(id, RequestOverrides::default());
-                release(
-                    &self.session,
-                    id.into(),
-                    None,
-                    "Fetch.continueRequest",
-                    unchanged,
-                );
+                self.send_answer(hold, id.into(), "Fetch.continueRequest", unchanged, None);
                 return;
             }
         };
@@ -1167,23 +1209,29 @@ impl Mux {
         let decider = self
             .slots
             .iter()
-            .find(|s| s.when.fits(url, resource_type, pause) && !s.is_dropped_stream());
+            .position(|s| s.when.fits(url, resource_type, pause) && !s.is_dropped_stream());
         let Some(decider) = decider else {
-            let params = continue_params(&ev.request_id, RequestOverrides::default());
-            release(
-                &self.session,
+            let hold = self.hold(&ev.request_id, None, resource_type);
+            let unchanged = continue_params(&ev.request_id, RequestOverrides::default());
+            self.send_answer(
+                hold,
                 ev.request_id,
-                None,
                 "Fetch.continueRequest",
-                params,
+                unchanged,
+                None,
             );
             return;
         };
-        match &decider.responder {
+        let entry = self.slots[decider].id;
+        let hold = self.hold(&ev.request_id, Some(entry), resource_type);
+        match &self.slots[decider].responder {
             Responder::Stream(requests) => {
-                // The upgrade can't fail: an `Interceptor` or handle that
-                // sent the stream's entry is alive while its stream is.
+                // An `Interceptor` or handle that inserted the stream's entry
+                // is alive while its stream is, unless the stream is being
+                // dropped right now.
                 let Some(answers) = self.commands.upgrade() else {
+                    let failed = fail_params(&ev.request_id, AbortReason::Failed);
+                    self.send_answer(hold, ev.request_id, "Fetch.failRequest", failed, None);
                     return;
                 };
                 let paused = PausedRequest::new(
@@ -1193,22 +1241,15 @@ impl Mux {
                     build_response_info(&ev),
                     self.session.clone(),
                     answers,
+                    hold,
                 );
-                self.held.insert(ev.request_id, decider.id);
                 // If the stream was dropped since, the request comes back,
                 // and its drop fails it.
                 let _ = requests.send(paused);
             }
             Responder::Rule(action) => {
-                let (method, params) = command(action, &ev, decider.id);
-                let params = self.with_intercept_response(params, resource_type);
-                release(
-                    &self.session,
-                    ev.request_id,
-                    Some(decider.id),
-                    method,
-                    params,
-                );
+                let (method, params) = command(action, &ev, entry);
+                self.send_answer(hold, ev.request_id, method, params, None);
             }
         }
     }
@@ -1251,6 +1292,7 @@ async fn run(
         events: None,
         answered: Answered::default(),
         held: HashMap::new(),
+        last_hold: 0,
         commands: own,
     };
     loop {
@@ -1712,7 +1754,8 @@ mod tests {
 
     /// While a stream holds a pause, removing the last entry leaves `Fetch`
     /// on with no patterns (`Fetch.disable` would release the pause), and
-    /// the answer to the pause turns it off.
+    /// pauses Chrome sent meanwhile are still answered; the answer to the
+    /// held pause turns `Fetch` off.
     #[tokio::test]
     async fn fetch_stays_on_while_a_stream_holds_a_pause() {
         let (mut mock, conn, interceptor) = mock_interceptor();
@@ -1730,6 +1773,11 @@ mod tests {
             json!({ "patterns": [], "handleAuthRequests": false }),
         );
         assert_eq!(sent_until_quiet(&mut mock).await, vec![enabled]);
+        pause(&mock, "R2", "https://x.test/", json!({})).await;
+        assert_eq!(
+            answered(&mut mock, "Fetch.continueRequest").await,
+            json!({ "requestId": "R2" })
+        );
 
         let (sent, continued) = futures::join!(
             held.continue_(),
@@ -1739,6 +1787,112 @@ mod tests {
         assert_eq!(continued, json!({ "requestId": "R1" }));
         let disabled = ("Fetch.disable".to_string(), json!({}));
         assert_eq!(sent_until_quiet(&mut mock).await, vec![disabled]);
+        conn.shutdown();
+    }
+
+    /// A request keeps its `requestId` from its Request pause to its
+    /// Response pause, so each pause is held on its own: Chrome's late reply
+    /// to the Request pause's answer leaves the Response pause held, and its
+    /// drop fails it.
+    #[tokio::test]
+    async fn each_pause_of_a_request_is_held_on_its_own() {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let at_request = Match::url("*").unwrap();
+        let (mut requests, _) =
+            applied(&mut mock, interceptor.subscribe(at_request, Position::Last)).await;
+        let at_response = Match::url("*").unwrap().at(PauseKind::ResponseHeaders);
+        let (mut responses, _) = applied(
+            &mut mock,
+            interceptor.subscribe(at_response, Position::Last),
+        )
+        .await;
+        async fn next(stream: &mut InterceptStream) -> PausedRequest {
+            let next = tokio::time::timeout(Duration::from_secs(2), stream.next());
+            next.await.unwrap().unwrap()
+        }
+
+        pause(&mock, "R1", "https://x.test/", json!({})).await;
+        let continued = tokio::spawn(next(&mut requests).await.continue_());
+        let id = mock.expect_cmd("Fetch.continueRequest").await;
+        let response = json!({ "responseStatusCode": 200, "responseHeaders": [] });
+        pause(&mock, "R1", "https://x.test/", response).await;
+        let at_response = next(&mut responses).await;
+        mock.reply(id, json!({})).await;
+        continued.await.unwrap().unwrap();
+
+        drop(at_response);
+        assert_eq!(
+            answered(&mut mock, "Fetch.failRequest").await,
+            json!({ "requestId": "R1", "errorReason": "Failed" })
+        );
+        conn.shutdown();
+    }
+
+    /// Removing a rule while Chrome hasn't replied to its answer leaves
+    /// `Fetch` on until Chrome has (`Fetch.disable` would release the
+    /// request unanswered).
+    #[tokio::test]
+    async fn fetch_stays_on_until_an_answer_is_in() {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let rules = vec![rule("*", Action::Block(AbortReason::Failed))];
+        let (handle, _) = applied(&mut mock, interceptor.insert(rules, Position::Last)).await;
+        pause(&mock, "R1", "https://x.test/", json!({})).await;
+        let id = mock.expect_cmd("Fetch.failRequest").await;
+
+        let (stopped, sent) = futures::join!(handle.stop(), sent_until_quiet(&mut mock));
+        stopped.unwrap();
+        let enabled = (
+            "Fetch.enable".to_string(),
+            json!({ "patterns": [], "handleAuthRequests": false }),
+        );
+        assert_eq!(sent, vec![enabled]);
+        mock.reply(id, json!({})).await;
+        let disabled = ("Fetch.disable".to_string(), json!({}));
+        assert_eq!(sent_until_quiet(&mut mock).await, vec![disabled]);
+        conn.shutdown();
+    }
+
+    /// A change Chrome refuses leaves the interception as it was, still
+    /// answering: here, the credentials stay, and so does the subscription
+    /// to the challenges they answer.
+    #[tokio::test]
+    async fn a_refused_change_leaves_the_credentials_answering() {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let auth = ProxyAuth {
+            user: "u".into(),
+            password: "p".into(),
+            pause: AuthPause::EveryRequest,
+        };
+        applied(&mut mock, interceptor.set_proxy_auth(Some(auth))).await;
+        let unset = tokio::spawn({
+            let interceptor = interceptor.clone();
+            async move { interceptor.set_proxy_auth(None).await }
+        });
+        let id = mock.expect_cmd("Fetch.disable").await;
+        mock.reply_err(id, -32000, "refused").await;
+        assert!(unset.await.unwrap().is_err());
+
+        let challenge = json!({
+            "requestId": "A1",
+            "authChallenge": { "source": "Proxy", "origin": "http://proxy.test", "scheme": "basic" },
+        });
+        mock.emit_event_for_session("Fetch.authRequired", challenge, "S1")
+            .await;
+        let answer = answered(&mut mock, "Fetch.continueWithAuth").await;
+        assert_eq!(answer["authChallengeResponse"]["username"], "u");
+        conn.shutdown();
+    }
+
+    /// A `failRequest` Chrome refuses isn't sent again.
+    #[tokio::test]
+    async fn a_refused_fail_is_not_sent_again() {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let rules = vec![rule("*", Action::Block(AbortReason::Failed))];
+        let (_handle, _) = applied(&mut mock, interceptor.insert(rules, Position::Last)).await;
+        pause(&mock, "R1", "https://x.test/", json!({})).await;
+        let id = mock.expect_cmd("Fetch.failRequest").await;
+        mock.reply_err(id, -32602, "Invalid InterceptionId.").await;
+        assert_eq!(sent_until_quiet(&mut mock).await, Vec::new());
         conn.shutdown();
     }
 
