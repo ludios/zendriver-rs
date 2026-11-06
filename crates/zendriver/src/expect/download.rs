@@ -134,6 +134,12 @@ struct Records {
     by_guid: HashMap<String, watch::Sender<Progress>>,
     /// The guids of the finished downloads in `by_guid`, oldest first.
     finished: VecDeque<String>,
+    /// How many times events may have been lost, or a finished download's
+    /// record forgotten: a download that no event mentioned yet may then
+    /// have had all its events before.
+    losses: u64,
+    /// Whether the follower stopped, so that no event will come.
+    ended: bool,
 }
 
 impl Records {
@@ -159,20 +165,50 @@ impl Records {
         }
     }
 
+    /// Subscribe to the progress of download `guid`, for an expectation
+    /// registered when [`Records::losses`] was `losses_then`. If no event
+    /// mentioned the download yet, and events may have been lost since
+    /// then (or the follower stopped), its events may all be gone, so the
+    /// download is [`DownloadProgressState::Unknown`].
+    fn claim(&mut self, guid: &str, losses_then: u64) -> watch::Receiver<Progress> {
+        if let Some(sender) = self.by_guid.get(guid) {
+            return sender.subscribe();
+        }
+        let progress = self.of(guid).subscribe();
+        if self.ended || self.losses != losses_then {
+            self.lose(guid);
+        }
+        progress
+    }
+
     /// Keep the record of download `guid`, which just finished, among the
     /// last [`FINISHED_KEPT`].
     fn finish(&mut self, guid: &str) {
         self.finished.push_back(guid.to_owned());
-        if self.finished.len() > FINISHED_KEPT
-            && let Some(oldest) = self.finished.pop_front()
-        {
-            self.by_guid.remove(&oldest);
+        if self.finished.len() > FINISHED_KEPT {
+            if let Some(oldest) = self.finished.pop_front() {
+                self.by_guid.remove(&oldest);
+                self.losses += 1;
+            }
         }
     }
 
+    /// End download `guid` as [`DownloadProgressState::Unknown`] if it is in
+    /// progress: some of its events may have been missed.
+    fn lose(&mut self, guid: &str) {
+        let sender = self.of(guid);
+        if sender.borrow().state.state != DownloadProgressState::InProgress {
+            return;
+        }
+        sender.send_modify(|progress| progress.state.state = DownloadProgressState::Unknown);
+        self.finish(guid);
+    }
+
     /// End every download in progress as [`DownloadProgressState::Unknown`]:
-    /// some of their events may have been missed.
+    /// some events may have been missed.
     fn lose_track(&mut self) {
+        self.losses += 1;
+        // Only finished records are forgotten, so none of these is.
         let in_progress: Vec<String> = self
             .by_guid
             .iter()
@@ -180,9 +216,7 @@ impl Records {
             .map(|(guid, _)| guid.clone())
             .collect();
         for guid in in_progress {
-            self.of(&guid)
-                .send_modify(|progress| progress.state.state = DownloadProgressState::Unknown);
-            self.finish(&guid);
+            self.lose(&guid);
         }
     }
 }
@@ -269,7 +303,9 @@ async fn follow(
             event = events.next() => event,
         };
         let Some(event) = event else {
-            lock(&records).lose_track();
+            let mut records = lock(&records);
+            records.lose_track();
+            records.ended = true;
             return;
         };
         match event {
@@ -279,7 +315,7 @@ async fn follow(
                 if event.session_id.is_some() || event.method != "Browser.downloadProgress" {
                     continue;
                 }
-                match serde_json::from_value::<DownloadProgressEvent>(event.params) {
+                match DownloadProgressEvent::deserialize(&event.params) {
                     Ok(ev) => {
                         let progress = Progress {
                             state: DownloadState {
@@ -291,11 +327,19 @@ async fn follow(
                         };
                         lock(&records).update(&ev.guid, progress);
                     }
-                    Err(error) => warn!(%error, "an unreadable Browser.downloadProgress"),
+                    Err(error) => {
+                        // Its download's end may be what was lost.
+                        warn!(%error, "an unreadable Browser.downloadProgress");
+                        if let Some(guid) = event.params["guid"].as_str() {
+                            lock(&records).lose(guid);
+                        }
+                    }
                 }
             }
             AccountedRawEvent::Shutdown { .. } => {
-                lock(&records).lose_track();
+                let mut records = lock(&records);
+                records.lose_track();
+                records.ended = true;
                 return;
             }
             // A lag, a reconnect, or the socket's death (after which a
@@ -316,12 +360,11 @@ pub struct MatchedDownload {
     guid: String,
     progress: watch::Receiver<Progress>,
     download_dir: PathBuf,
-    /// Whether Chrome names the file by its guid (in zendriver's staging
-    /// directory), rather than as it suggests.
-    named_by_guid: bool,
-    /// Keeps zendriver's staging directory, and so the file, until every
-    /// clone is dropped.
-    _staging: Option<Arc<TempDir>>,
+    /// zendriver's staging directory, kept (and so the file in it) until
+    /// every clone is dropped, if Chrome saves the download there, named by
+    /// its guid; `None` if it saves the download into a directory the caller
+    /// chose, as it suggests.
+    staging: Option<Arc<TempDir>>,
 }
 
 impl MatchedDownload {
@@ -393,7 +436,7 @@ impl MatchedDownload {
         progress
             .file_path
             .clone()
-            .or_else(|| self.named_by_guid.then(in_staging))
+            .or_else(|| self.staging.is_some().then(in_staging))
     }
 
     /// Wait for the download to end, however long it takes (wrap this in
@@ -424,12 +467,12 @@ impl MatchedDownload {
         let ended = progress
             .wait_for(|p| p.state.state != DownloadProgressState::InProgress)
             .await;
-        // The follower ends a download (as `Unknown`) before it drops the
-        // download's record, so a dropped record means a lost one.
-        let Ok(ended) = ended else {
-            return Err(ZendriverError::EventStreamIncomplete);
+        let ended = match ended {
+            Ok(ended) => ended.clone(),
+            // The follower ends a download (as `Unknown`) before it drops
+            // the download's record, so a dropped record means a lost one.
+            Err(_) => return Err(ZendriverError::EventStreamIncomplete),
         };
-        let ended = ended.clone();
         match ended.state.state {
             DownloadProgressState::Completed => self.completed_path(&ended).ok_or_else(|| {
                 ZendriverError::Navigation(format!(
@@ -451,6 +494,7 @@ impl MatchedDownload {
     ///
     /// `dest` is interpreted as a full filename — join a directory +
     /// [`Self::suggested_filename`] if you want to preserve Chrome's name.
+    /// If `dest` is the downloaded file itself, nothing is copied.
     ///
     /// # Errors
     ///
@@ -470,7 +514,15 @@ impl MatchedDownload {
     /// ```
     pub async fn save_to(&self, dest: impl AsRef<Path>) -> Result<()> {
         let src = self.wait().await?;
-        tokio::fs::copy(&src, dest.as_ref()).await?;
+        let dest = dest.as_ref();
+        // Copying the file onto itself would empty it.
+        let src_itself = tokio::fs::canonicalize(&src).await?;
+        let onto_itself = tokio::fs::canonicalize(dest)
+            .await
+            .is_ok_and(|dest| dest == src_itself);
+        if !onto_itself {
+            tokio::fs::copy(&src, dest).await?;
+        }
         Ok(())
     }
 }
@@ -608,6 +660,7 @@ pub(crate) async fn register(
         DownloadMode::Staging(_) => Some(downloads.staging()?),
         DownloadMode::Directory(_) => None,
     };
+    let losses_then = lock(&records).losses;
     let mut began =
         crate::expect::watch::<DownloadWillBeginEvent>(session, "Page.downloadWillBegin");
     let (mut tx, rx) = oneshot::channel();
@@ -621,15 +674,14 @@ pub(crate) async fn register(
             return;
         };
         let matched = began.map(|ev| {
-            let progress = lock(&records).of(&ev.guid).subscribe();
+            let progress = lock(&records).claim(&ev.guid, losses_then);
             MatchedDownload {
                 url: ev.url,
                 suggested_filename: ev.suggested_filename,
                 guid: ev.guid,
                 progress,
-                named_by_guid: staging.is_some(),
                 download_dir: mode.dir().to_owned(),
-                _staging: staging,
+                staging,
             }
         });
         let _ = tx.send(matched);
@@ -903,6 +955,94 @@ mod tests {
             "{ended:?}"
         );
         assert_eq!(dl.state().state, DownloadProgressState::Unknown);
+    }
+
+    /// A download that the tab reports after the follower may have lost
+    /// events (here, the browser's connection was replaced), and that no
+    /// event mentioned before, may have had all its events then: it is
+    /// `Unknown`, instead of waiting forever. The tab has its own socket,
+    /// whose events go on.
+    #[tokio::test]
+    async fn a_download_claimed_after_lost_events_is_unknown() {
+        let (mut browser_mock, browser_conn) = MockConnection::pair();
+        let (tab_mock, tab_conn) = MockConnection::pair();
+        let inner = crate::browser::test_only_inner_from_conn(browser_conn.clone());
+        let tab = Tab::new_for_test_in(
+            SessionHandle::new_root(tab_conn.clone()),
+            Arc::downgrade(&inner),
+            "T2",
+            None,
+        );
+        let (expectation, _) = expect_download(&mut browser_mock, &tab, true).await;
+
+        browser_mock.reconnect(&browser_conn);
+        // Let the follower see the reconnect before the claim.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let params = json!({
+            "frameId": "F0",
+            "guid": "G1",
+            "url": "https://example.com/report.pdf",
+            "suggestedFilename": "report.pdf",
+        });
+        tab_mock.emit_event("Page.downloadWillBegin", params).await;
+        let dl = tokio::time::timeout(PROMPTLY, expectation)
+            .await
+            .unwrap()
+            .unwrap();
+        let ended = tokio::time::timeout(PROMPTLY, dl.wait()).await.unwrap();
+        assert!(
+            matches!(ended, Err(ZendriverError::EventStreamIncomplete)),
+            "{ended:?}"
+        );
+        tab_conn.shutdown();
+        browser_conn.shutdown();
+    }
+
+    /// A progress event that can't be read may be the download's end: the
+    /// download ends as `Unknown`.
+    #[tokio::test]
+    async fn an_unreadable_progress_ends_its_download_as_unknown() {
+        let (mut mock, conn) = MockConnection::pair();
+        let inner = crate::browser::test_only_inner_from_conn(conn.clone());
+        let (expectation, _) = expect_download(&mut mock, &inner.main_tab, true).await;
+        begin(&mock, "G1").await;
+        let dl = tokio::time::timeout(PROMPTLY, expectation)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let params = json!({ "guid": "G1", "state": 7 });
+        mock.emit_event("Browser.downloadProgress", params).await;
+        let ended = tokio::time::timeout(PROMPTLY, dl.wait()).await.unwrap();
+        assert!(
+            matches!(ended, Err(ZendriverError::EventStreamIncomplete)),
+            "{ended:?}"
+        );
+        conn.shutdown();
+    }
+
+    /// Saving a download onto its own file copies nothing: copying it onto
+    /// itself would empty it.
+    #[tokio::test]
+    async fn save_to_onto_the_file_itself_keeps_it() {
+        let (mut mock, conn) = MockConnection::pair();
+        let inner = crate::browser::test_only_inner_from_conn(conn.clone());
+        let (expectation, _) = expect_download(&mut mock, &inner.main_tab, true).await;
+        begin(&mock, "G1").await;
+        let dl = tokio::time::timeout(PROMPTLY, expectation)
+            .await
+            .unwrap()
+            .unwrap();
+        let file = dl.download_dir().join("G1");
+        tokio::fs::write(&file, b"data").await.unwrap();
+        progress(&mock, "G1", "completed", json!({})).await;
+
+        tokio::time::timeout(PROMPTLY, dl.save_to(&file))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tokio::fs::read(&file).await.unwrap(), b"data");
+        conn.shutdown();
     }
 
     /// A genuine no-show still returns `ZendriverError::Timeout`.
