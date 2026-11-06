@@ -156,7 +156,7 @@ async fn frame_text_regex_finds_frame_element_not_main_doc() {
     // resolved node's `id` directly, in addition to frame scoping.
     let el = frame
         .find()
-        .text_regex(regex::Regex::new("unique-frame-text").unwrap())
+        .text_regex("unique-frame-text")
         .one()
         .await
         .expect("frame.find().text_regex() must find a match in the frame's own document");

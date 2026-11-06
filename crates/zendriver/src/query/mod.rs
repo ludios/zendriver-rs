@@ -635,17 +635,14 @@ impl<'scope> FindBuilder<'scope> {
         self
     }
 
-    /// Text regex match.
+    /// Text regex match: match elements whose text matches `pattern`.
     ///
-    /// The supplied [`regex::Regex`] is serialized to its pattern string and
-    /// re-parsed on the JS side as `new RegExp(pattern, "")`. Use
-    /// [`Self::text_regex_with_flags`] to pass explicit JS regex flags.
-    /// Only the pattern string reaches JS, so settings made through
-    /// `regex::RegexBuilder` (such as `case_insensitive(true)`) are lost.
-    /// JS also rejects Rust's inline-flag prefix: for a `Regex` built from
-    /// `"(?i)buy"`, `new RegExp` throws, so the query fails with
-    /// [`ZendriverError::JsException`].
-    /// For either, pass `"i"` to [`Self::text_regex_with_flags`] instead.
+    /// `pattern` is in JavaScript `RegExp` syntax, not Rust `regex` syntax,
+    /// because the page runs it as `new RegExp(pattern, "")`. So lookbehind
+    /// and backreferences work, but Rust's `(?i)` prefix makes `new RegExp`
+    /// throw, and the query fails with [`ZendriverError::JsException`].
+    /// To pass flags (such as `"i"` for case-insensitive matching), use
+    /// [`Self::text_regex_with_flags`].
     ///
     /// # Examples
     ///
@@ -653,18 +650,13 @@ impl<'scope> FindBuilder<'scope> {
     /// # async fn ex() -> zendriver::Result<()> {
     /// # let browser = zendriver::Browser::builder().launch().await?;
     /// # let tab = browser.main_tab();
-    /// let re = regex::Regex::new(r"^Buy now").unwrap();
-    /// let cta = tab.find().text_regex(re).one().await?;
+    /// let cta = tab.find().text_regex(r"^Buy now").one().await?;
     /// # let _ = cta;
     /// # Ok(()) }
     /// ```
     #[must_use]
-    pub fn text_regex(mut self, re: regex::Regex) -> Self {
-        self.selector = Some(SelectorKind::TextRegex {
-            pattern: re.as_str().to_string(),
-            flags: String::new(),
-        });
-        self
+    pub fn text_regex(self, pattern: impl Into<String>) -> Self {
+        self.text_regex_with_flags(pattern, "")
     }
 
     /// Text regex match with explicit JS-flavored flags.
@@ -1200,14 +1192,11 @@ impl<'scope> FindAllBuilder<'scope> {
         self
     }
 
-    /// Text regex match. See [`FindBuilder::text_regex`].
+    /// Text regex match, with a JavaScript `RegExp` pattern.
+    /// See [`FindBuilder::text_regex`].
     #[must_use]
-    pub fn text_regex(mut self, re: regex::Regex) -> Self {
-        self.selector = Some(SelectorKind::TextRegex {
-            pattern: re.as_str().to_string(),
-            flags: String::new(),
-        });
-        self
+    pub fn text_regex(self, pattern: impl Into<String>) -> Self {
+        self.text_regex_with_flags(pattern, "")
     }
 
     /// Text regex match with explicit JS-flavored flags.
@@ -2007,12 +1996,11 @@ mod tests {
     // --- selector kind chaining: last call wins -----------------------
 
     #[tokio::test]
-    async fn text_regex_wraps_regex_pattern_and_empty_flags() {
-        let re = regex::Regex::new("hello.*world").unwrap();
+    async fn text_regex_passes_pattern_with_empty_flags() {
         let (_mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         let tab = Tab::new_for_test(sess);
-        let fb = tab.find().text_regex(re);
+        let fb = tab.find().text_regex("hello.*world");
         let Some(SelectorKind::TextRegex { pattern, flags }) = fb.selector else {
             panic!("expected TextRegex selector kind");
         };

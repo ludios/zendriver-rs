@@ -3783,7 +3783,7 @@ pub fn zendriver::query::FindAllBuilder<'scope>::text_equals(self, &str) -> Self
 pub fn zendriver::query::FindAllBuilder<'scope>::text_equals_i(self, &str) -> Self
 pub fn zendriver::query::FindAllBuilder<'scope>::text_exact(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn zendriver::query::FindAllBuilder<'scope>::text_matches(self, &str) -> Self
-pub fn zendriver::query::FindAllBuilder<'scope>::text_regex(self, regex::regex::string::Regex) -> Self
+pub fn zendriver::query::FindAllBuilder<'scope>::text_regex(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn zendriver::query::FindAllBuilder<'scope>::text_regex_with_flags(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn zendriver::query::FindAllBuilder<'scope>::timeout(self, core::time::Duration) -> Self
 pub fn zendriver::query::FindAllBuilder<'scope>::visible_only(self, bool) -> Self
@@ -3851,7 +3851,7 @@ pub fn zendriver::query::FindBuilder<'scope>::text_equals(self, &str) -> Self
 pub fn zendriver::query::FindBuilder<'scope>::text_equals_i(self, &str) -> Self
 pub fn zendriver::query::FindBuilder<'scope>::text_exact(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn zendriver::query::FindBuilder<'scope>::text_matches(self, &str) -> Self
-pub fn zendriver::query::FindBuilder<'scope>::text_regex(self, regex::regex::string::Regex) -> Self
+pub fn zendriver::query::FindBuilder<'scope>::text_regex(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn zendriver::query::FindBuilder<'scope>::text_regex_with_flags(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn zendriver::query::FindBuilder<'scope>::timeout(self, core::time::Duration) -> Self
 pub fn zendriver::query::FindBuilder<'scope>::visible_only(self, bool) -> Self
@@ -7177,7 +7177,7 @@ pub fn zendriver::query::FindBuilder<'scope>::text_equals(self, &str) -> Self
 pub fn zendriver::query::FindBuilder<'scope>::text_equals_i(self, &str) -> Self
 pub fn zendriver::query::FindBuilder<'scope>::text_exact(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn zendriver::query::FindBuilder<'scope>::text_matches(self, &str) -> Self
-pub fn zendriver::query::FindBuilder<'scope>::text_regex(self, regex::regex::string::Regex) -> Self
+pub fn zendriver::query::FindBuilder<'scope>::text_regex(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn zendriver::query::FindBuilder<'scope>::text_regex_with_flags(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn zendriver::query::FindBuilder<'scope>::timeout(self, core::time::Duration) -> Self
 pub fn zendriver::query::FindBuilder<'scope>::visible_only(self, bool) -> Self

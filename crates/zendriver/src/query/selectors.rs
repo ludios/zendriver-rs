@@ -118,10 +118,8 @@ impl QueryScope<'_> {
 /// accidental dispatch surfaces immediately instead of returning an
 /// empty match set (which would silently pass tests).
 ///
-/// `TextRegex` stores pattern + flags as separate strings (rather than
-/// a `regex::Regex`) so the JS-side `new RegExp(pat, flags)` mirrors
-/// the user's intent exactly — `text_regex(re)` plumbs `re.as_str()`
-/// + empty flags, while `text_regex_with_flags` (T12) plumbs both.
+/// `TextRegex` holds the JavaScript source and flags that the page passes
+/// to `new RegExp(pattern, flags)`.
 #[derive(Debug, Clone)]
 pub(crate) enum SelectorKind {
     Css(String),

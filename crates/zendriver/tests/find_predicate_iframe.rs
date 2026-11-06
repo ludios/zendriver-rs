@@ -218,7 +218,7 @@ async fn text_regex_resolves_to_innermost_leaf_not_ancestor() {
 
     let el = tab
         .find()
-        .text_regex(regex::Regex::new("match-me").unwrap())
+        .text_regex("match-me")
         .one()
         .await
         .expect("text_regex(\"match-me\") must find a match");
