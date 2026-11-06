@@ -99,9 +99,48 @@ fn redact_userinfo(raw: &str) -> String {
     }
 }
 
+/// A proxy's credentials, whose `Debug` shows the user but not the
+/// password, so a [`crate::Browser`] printed with `{:?}` keeps the password
+/// out of logs.
+#[cfg(feature = "interception")]
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ProxyCredentials {
+    pub(crate) user: String,
+    pub(crate) password: String,
+}
+
+#[cfg(feature = "interception")]
+impl From<(String, String)> for ProxyCredentials {
+    /// From `(user, password)`.
+    fn from((user, password): (String, String)) -> Self {
+        Self { user, password }
+    }
+}
+
+#[cfg(feature = "interception")]
+impl std::fmt::Debug for ProxyCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyCredentials")
+            .field("user", &self.user)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "interception")]
+    #[test]
+    fn proxy_credentials_debug_hides_the_password() {
+        let creds = ProxyCredentials::from(("bob".to_string(), "s3cret".to_string()));
+        let printed = format!("{creds:?}");
+        assert!(
+            printed.contains("bob") && !printed.contains("s3cret"),
+            "{printed}"
+        );
+    }
 
     #[test]
     fn splits_userinfo_from_server() {

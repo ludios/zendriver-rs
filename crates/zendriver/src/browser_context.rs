@@ -126,7 +126,7 @@ impl BrowserContextBuilder {
                     .context_proxy_auth
                     .lock()
                     .await
-                    .insert(id.clone(), creds);
+                    .insert(id.clone(), creds.into());
             }
         }
         #[cfg(not(feature = "interception"))]
@@ -261,11 +261,10 @@ mod auth_cleanup_tests {
     async fn drop_unregisters_context_credentials() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        inner
-            .context_proxy_auth
-            .lock()
-            .await
-            .insert("CTX1".to_string(), ("bob".into(), "s3cret".into()));
+        inner.context_proxy_auth.lock().await.insert(
+            "CTX1".to_string(),
+            ("bob".to_string(), "s3cret".to_string()).into(),
+        );
 
         {
             let _ctx = BrowserContext {
@@ -354,7 +353,8 @@ mod builder_tests {
             .unwrap();
 
         let creds = inner.context_proxy_auth.lock().await.get("CTX1").cloned();
-        assert_eq!(creds, Some(("bob".into(), "s3cret".into())));
+        let expected = ("bob".to_string(), "s3cret".to_string()).into();
+        assert_eq!(creds, Some(expected));
         conn.shutdown();
     }
 
@@ -388,7 +388,8 @@ mod builder_tests {
             .unwrap();
 
         let creds = inner.context_proxy_auth.lock().await.get("CTX1").cloned();
-        assert_eq!(creds, Some(("alice".into(), "hunter2".into())));
+        let expected = ("alice".to_string(), "hunter2".to_string()).into();
+        assert_eq!(creds, Some(expected));
         conn.shutdown();
     }
 }

@@ -1881,12 +1881,13 @@ pub(crate) struct BrowserInner {
     /// to give the proxy credentials to each tab opened in that context.
     /// Removed on `BrowserContext` drop.
     #[cfg(feature = "interception")]
-    pub(crate) context_proxy_auth: tokio::sync::Mutex<HashMap<String, (String, String)>>,
-    /// [`BrowserBuilder::proxy_auth`]'s `(user, password)`, for the proxy of
-    /// every tab in the default context. Applied by
+    pub(crate) context_proxy_auth:
+        tokio::sync::Mutex<HashMap<String, crate::proxy::ProxyCredentials>>,
+    /// [`BrowserBuilder::proxy_auth`]'s credentials, for the proxy of every
+    /// tab in the default context. Applied by
     /// [`BrowserInner::start_browser_intercept`].
     #[cfg(feature = "interception")]
-    pub(crate) proxy_auth: Option<(String, String)>,
+    pub(crate) proxy_auth: Option<crate::proxy::ProxyCredentials>,
     /// Combined tracker/fingerprinter [`HostMatcher`] (bundled + custom),
     /// built once at launch. `None` when blocking is not configured. Applied
     /// to every page tab by [`BrowserInner::start_browser_intercept`].
@@ -1914,8 +1915,8 @@ impl BrowserInner {
             builder = builder.block_hosts(matcher);
             wanted = true;
         }
-        if let Some((user, pass)) = credentials {
-            builder = builder.handle_proxy_auth(user, pass);
+        if let Some(crate::proxy::ProxyCredentials { user, password }) = credentials {
+            builder = builder.handle_proxy_auth(user, password);
             wanted = true;
         }
         if wanted {
@@ -2867,7 +2868,7 @@ pub(crate) struct FinishConnect {
     /// `BrowserInner` and given to the main tab + future tabs in the
     /// default context.
     #[cfg(feature = "interception")]
-    pub(crate) proxy_auth: Option<(String, String)>,
+    pub(crate) proxy_auth: Option<crate::proxy::ProxyCredentials>,
 }
 
 /// Run the post-connect CDP handshake and assemble [`BrowserInner`].
@@ -3812,7 +3813,7 @@ impl BrowserBuilder {
                 #[cfg(feature = "tracker-blocking")]
                 tracker_matcher,
                 #[cfg(feature = "interception")]
-                proxy_auth: self.proxy_auth.clone(),
+                proxy_auth: self.proxy_auth.clone().map(Into::into),
             })
             .await
         })
@@ -3985,7 +3986,7 @@ impl BrowserBuilder {
             #[cfg(feature = "tracker-blocking")]
             tracker_matcher: None,
             #[cfg(feature = "interception")]
-            proxy_auth: self.proxy_auth.clone(),
+            proxy_auth: self.proxy_auth.clone().map(Into::into),
         })
         .await?;
 
@@ -6459,10 +6460,10 @@ mod tests {
 
         // Seed credentials for context CTX1.
         let inner = test_only_inner_with(conn.clone(), |inner| {
-            inner
-                .context_proxy_auth
-                .get_mut()
-                .insert("CTX1".into(), ("bob".into(), "s3cret".into()));
+            inner.context_proxy_auth.get_mut().insert(
+                "CTX1".into(),
+                ("bob".to_string(), "s3cret".to_string()).into(),
+            );
         });
         registrar.set_browser(Arc::downgrade(&inner));
 
@@ -6543,10 +6544,10 @@ mod tests {
 
         // Seed both a tracker matcher and proxy credentials for CTX1.
         let inner = test_only_inner_with(conn.clone(), |inner| {
-            inner
-                .context_proxy_auth
-                .get_mut()
-                .insert("CTX1".into(), ("bob".into(), "s3cret".into()));
+            inner.context_proxy_auth.get_mut().insert(
+                "CTX1".into(),
+                ("bob".to_string(), "s3cret".to_string()).into(),
+            );
             inner.tracker_matcher = Some(Arc::new(crate::HostMatcher::new([
                 "evil.example".to_string()
             ])));
