@@ -110,6 +110,38 @@ const INVARIANTS: &[(&str, &str)] = &[
         "#,
     ),
     (
+        // A page can replace these built-ins and watch for calls to its
+        // replacement. Real Chrome's `toString` calls none of them.
+        "to_string_calls_no_replaceable_builtin",
+        r#"
+        const apply = Reflect.apply;
+        const toString = Function.prototype.toString;
+        const targets = {
+          'WeakMap.prototype.get': [WeakMap.prototype, 'get'],
+          'Function.prototype.call': [Function.prototype, 'call'],
+          'Function.prototype.apply': [Function.prototype, 'apply'],
+          'Reflect.apply': [Reflect, 'apply'],
+        };
+        const originals = {};
+        const called = new Set();
+        for (const [name, [object, key]] of Object.entries(targets)) {
+          const original = object[key];
+          originals[name] = original;
+          object[key] = function (...args) {
+            called.add(name);
+            return apply(original, this, args);
+          };
+        }
+        try {
+          apply(toString, toString, []);
+          apply(toString, function f() {}, []);
+        } finally {
+          for (const [name, [object, key]] of Object.entries(targets)) object[key] = originals[name];
+        }
+        return called.size ? `toString called ${[...called].join(', ')}` : null;
+        "#,
+    ),
+    (
         "properties_live_on_prototypes",
         r#"
         const objects = {

@@ -14,17 +14,24 @@ const __zdFnToString = Function.prototype.toString;
 const __zdMarks = new WeakMap(); // fn -> native display string
 const __zdNativeStr = (name) => "function " + name + "() { [native code] }";
 
+// Captured now, before any page script runs, because the fake toString below
+// must call nothing that a page can replace later (such as
+// `WeakMap.prototype.get` or `Function.prototype.call`): the built-in calls
+// none of them, so a page whose replacement got called would know, and the
+// replacement would also get `__zdMarks` as its `this`.
+const __zdApply = Reflect.apply;
+const __zdMarkOf = WeakMap.prototype.get;
+
 // Written as a method, not a `function`, so that like the built-in it has no
-// own `prototype` property and isn't a constructor: pages check both (for
-// example, rebrowser's bot-detector checks for an own `prototype`).
+// own `prototype` property and isn't a constructor. Pages check for both; for
+// example, rebrowser's bot-detector checks for an own `prototype`.
 const __zdFakeToString = {
   toString() {
-    const s = __zdMarks.get(this);
-    return s !== undefined ? s : __zdFnToString.call(this);
+    const s = __zdApply(__zdMarkOf, __zdMarks, [this]);
+    return s !== undefined ? s : __zdApply(__zdFnToString, this, []);
   },
 }.toString;
 __zdMarks.set(__zdFakeToString, __zdNativeStr("toString"));
-__zdMarks.set(__zdFnToString, __zdNativeStr("toString"));
 Object.defineProperty(Function.prototype, "toString", {
   value: __zdFakeToString,
   writable: true,
