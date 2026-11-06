@@ -105,25 +105,30 @@ impl SessionHandle {
     }
 
     /// Subscribe to this session's events on the loss-accounted bus of
-    /// [`Connection::subscribe_raw_accounted`]: the events that
-    /// [`SessionHandle::subscribe`] would match, whatever their method, and
-    /// every marker of the connection (`Lagged`, `Reconnected`,
-    /// `Disconnected`, `Shutdown`).
+    /// [`Connection::subscribe_raw_accounted`]: the events that carry this
+    /// session's `sessionId` (for a root session, the events that carry
+    /// none), whatever their method, and every marker of the connection
+    /// (`Lagged`, `Reconnected`, `Disconnected`, `Shutdown`). Since the
+    /// other sessions' events are left out, a gap between two `sequence`
+    /// values doesn't mean a loss here; only a `Lagged` does, and its
+    /// `missed` counts the lost events of every session.
     ///
     /// A flat session's stream also ends when Chrome detaches the session
     /// (for example, because the session's target closed), since Chrome
     /// sends no event of the session after that: at the
     /// `Target.detachedFromTarget` naming the session, the stream yields
     /// [`AccountedRawEvent::Shutdown`], with that event's generation, and
-    /// then ends. A stream subscribed after the detach doesn't see the
-    /// detach, and so doesn't end until the connection does.
+    /// then ends. A stream that misses the detach (because it subscribed
+    /// after the detach, or lost the detach in a `Lagged` gap) never ends:
+    /// like the connection's stream, it reports the connection's end, and
+    /// then stays open.
     pub fn subscribe_accounted(
         &self,
     ) -> impl Stream<Item = AccountedRawEvent> + Send + Unpin + use<> {
         let events = self.inner.conn.subscribe_raw_accounted();
         let state = Some((events, self.inner.session_id.clone()));
         // The state is `None` after the detach, which ends the stream.
-        Box::pin(futures::stream::unfold(state, |state| async move {
+        let events = futures::stream::unfold(state, |state| async move {
             let (mut events, session_id) = state?;
             loop {
                 let ev = events.next().await?;
@@ -146,7 +151,9 @@ impl SessionHandle {
                 }
                 return Some((ev, Some((events, session_id))));
             }
-        }))
+        });
+        // An `Unfold` panics if polled after its end.
+        Box::pin(events.fuse())
     }
 }
 
@@ -254,11 +261,12 @@ mod tests {
             other => panic!("expected Shutdown, got {other:?}"),
         }
         assert!(next_within_a_second(&mut events).await.is_none());
+        assert!(next_within_a_second(&mut events).await.is_none());
     }
 
     /// A root session has no session id for a detach to name: a detach on
-    /// its socket is just one of its events, and the stream goes on until
-    /// the connection ends.
+    /// its socket is just one of its events, and the stream goes on, passing
+    /// on the connection's markers.
     #[tokio::test]
     async fn root_accounted_stream_does_not_end_at_a_detach() {
         let (mock, conn) = MockConnection::pair();
