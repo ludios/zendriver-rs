@@ -50,6 +50,9 @@ full-page reads.
   closed browser errors.
 - A page that loaded but shows little content is often **JS-gated** — give it a
   `browser_wait_for_load` / short `browser_wait_for_idle`, or check for a wall (next section).
+- **A click or Enter that navigates:** pass `wait_for_navigation: true` to `browser_click` /
+  `browser_press`, or call `browser_wait_for_url` with the destination. `browser_wait_for_load`
+  right after the action can return on the old page.
 
 ## Wall detection → hand off
 

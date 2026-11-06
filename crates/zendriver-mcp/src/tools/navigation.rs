@@ -1,7 +1,7 @@
 //! Navigation handlers — `browser_goto`, `_back`, `_forward`, `_reload`,
-//! `_wait_for_idle`.
+//! `_wait_for_idle`, `_wait_for_load`, `_wait_for_url`.
 //!
-//! All five tools share the [`crate::tools::common::current_tab`] helper
+//! All of them share the [`crate::tools::common::current_tab`] helper
 //! and (for the URL-changing variants) a [`NavOutput`] return type that
 //! reports the post-navigation `url` + `title` plus an optional rendered
 //! HTML snapshot.
@@ -13,7 +13,7 @@ use rmcp::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use zendriver::{IdleLossPolicy, IdleOptions, ReadyState, ReloadOptions};
+use zendriver::{IdleLossPolicy, IdleOptions, ReadyState, ReloadOptions, UrlMatcher};
 
 use crate::errors::{McpServerError, map_error};
 use crate::snapshot::html_trim;
@@ -289,6 +289,63 @@ pub async fn bypass_insecure_warning(
         .await
         .map_err(|e| map_error(McpServerError::from(e)))?;
     Ok(AckOutput { ok: true })
+}
+
+// ---------- browser_wait_for_url ------------------------------------------
+
+/// Input for `browser_wait_for_url`. Exactly one of `url_substr` /
+/// `url_regex` must be set.
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WaitForUrlInput {
+    /// Wait for a URL that contains this text (the fragment included).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_substr: Option<String>,
+    /// Wait for a URL that this regex matches (`regex` crate syntax; anchor
+    /// it with `^` and `$` for an exact URL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_regex: Option<String>,
+    /// Give up after this long. Default: 30000. A login done by hand may
+    /// need more.
+    #[serde(default = "default_url_wait_ms")]
+    pub timeout_ms: u64,
+    /// When `true`, include the trimmed page HTML in the response.
+    #[serde(default)]
+    pub return_snapshot: bool,
+}
+
+const fn default_url_wait_ms() -> u64 {
+    30_000
+}
+
+/// The [`UrlMatcher`] that `input` asks for.
+fn url_matcher(input: &WaitForUrlInput) -> Result<UrlMatcher, ErrorData> {
+    match (&input.url_substr, &input.url_regex) {
+        (Some(substr), None) => Ok(UrlMatcher::Substring(substr.clone())),
+        (None, Some(re)) => regex::Regex::new(re)
+            .map(UrlMatcher::Regex)
+            .map_err(|e| ErrorData::invalid_params(format!("invalid url_regex `{re}`: {e}"), None)),
+        _ => Err(ErrorData::invalid_params(
+            "set exactly one of url_substr / url_regex",
+            None,
+        )),
+    }
+}
+
+/// Wait until the tab is at a URL matching the input, and the page there
+/// has loaded; then report that page. The session's lock is released while
+/// waiting, which can take minutes.
+pub async fn wait_for_url(
+    state: Arc<Mutex<SessionState>>,
+    input: WaitForUrlInput,
+) -> Result<NavOutput, ErrorData> {
+    let matcher = url_matcher(&input)?;
+    let tab = current_tab(&*state.lock().await).await?;
+    tab.wait_for_url(matcher)
+        .timeout(Duration::from_millis(input.timeout_ms))
+        .await
+        .map_err(|e| map_error(McpServerError::from(e)))?;
+    nav_output(&tab, input.return_snapshot).await
 }
 
 // ---------- browser_wait_for_idle -----------------------------------------

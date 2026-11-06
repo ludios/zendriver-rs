@@ -11,7 +11,8 @@ Changelog](https://keepachangelog.com/en/1.1.0/). Adheres to [SEMVER.md].
   navigation that a click, a key press or the page's own script starts, or
   for the tab to be at a URL (skipping the pages on the way, such as a
   login's bounce through another site). Both resolve to a `Navigation`
-  with the URL reached.
+  with the URL reached. MCP: `browser_wait_for_url`, and
+  `wait_for_navigation` on `browser_click` / `browser_press`.
 - bs4-like combinable predicate finders on `find()`/`find_all()`: `tag`,
   `attr`, `attr_contains`, `attr_starts_with`, `attr_ends_with`, `has_attr`,
   `attr_regex`, `containing_text`, `text_equals`, `text_matches` (#55).

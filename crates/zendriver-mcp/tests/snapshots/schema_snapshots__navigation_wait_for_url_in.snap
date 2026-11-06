@@ -1,0 +1,30 @@
+---
+source: crates/zendriver-mcp/tests/schema_snapshots.rs
+expression: "schema_for! (tools::navigation::WaitForUrlInput)"
+---
+$schema: "https://json-schema.org/draft/2020-12/schema"
+title: WaitForUrlInput
+description: "Input for `browser_wait_for_url`. Exactly one of `url_substr` /\n`url_regex` must be set."
+type: object
+properties:
+  return_snapshot:
+    description: "When `true`, include the trimmed page HTML in the response."
+    type: boolean
+    default: false
+  timeout_ms:
+    description: "Give up after this long. Default: 30000. A login done by hand may\nneed more."
+    type: integer
+    format: uint64
+    default: 30000
+    minimum: 0
+  url_regex:
+    description: "Wait for a URL that this regex matches (`regex` crate syntax; anchor\nit with `^` and `$` for an exact URL)."
+    type:
+      - string
+      - "null"
+  url_substr:
+    description: Wait for a URL that contains this text (the fragment included).
+    type:
+      - string
+      - "null"
+additionalProperties: false

@@ -40,7 +40,7 @@ use rmcp::ErrorData;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use zendriver::{ClickOptions, Key, KeySequence, MouseButton, SpecialKey};
+use zendriver::{ClickOptions, Key, KeySequence, MouseButton, NavigationExpectation, SpecialKey};
 
 use crate::errors::{McpServerError, map_error};
 use crate::selectors::Selector;
@@ -205,9 +205,25 @@ pub struct ClickInput {
     /// a single call). Default: `1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub click_count: Option<u32>,
+    /// When `true`, wait for the navigation the click starts: the reply
+    /// comes once the new page has loaded (30 s limit), so a snapshot shows
+    /// that page. Fails if the click starts no navigation. Default: `false`.
+    #[serde(default)]
+    pub wait_for_navigation: bool,
     /// When `true`, include the trimmed page HTML in the response.
     #[serde(default)]
     pub return_snapshot: bool,
+}
+
+/// Wait for the navigation that an action started, if `armed` was set up
+/// before the action.
+async fn await_navigation(armed: Option<NavigationExpectation>) -> Result<(), ErrorData> {
+    if let Some(navigation) = armed {
+        navigation
+            .await
+            .map_err(|e| map_error(McpServerError::from(e)))?;
+    }
+    Ok(())
 }
 
 /// Click an element with realistic Bezier-path cursor approach + the full
@@ -228,9 +244,11 @@ pub async fn click(
         click_count: input.click_count.unwrap_or(1),
         ..Default::default()
     };
+    let navigation = input.wait_for_navigation.then(|| tab.expect_navigation());
     el.click_with(opts)
         .await
         .map_err(|e| map_error(McpServerError::from(e)))?;
+    await_navigation(navigation).await?;
     ok_with_snapshot(&tab, input.return_snapshot).await
 }
 
@@ -352,6 +370,12 @@ pub struct PressInput {
     /// `["ctrl"]` + `key: "a"` for select-all). Default none.
     #[serde(default)]
     pub modifiers: Vec<ModifierArg>,
+    /// When `true`, wait for the navigation the key press starts (Enter in
+    /// a form, say): the reply comes once the new page has loaded (30 s
+    /// limit), so a snapshot shows that page. Fails if the key press starts
+    /// no navigation. Default: `false`.
+    #[serde(default)]
+    pub wait_for_navigation: bool,
     /// When `true`, include the trimmed page HTML in the response.
     #[serde(default)]
     pub return_snapshot: bool,
@@ -370,6 +394,7 @@ pub async fn press(
     let s = state.lock().await;
     let tab = current_tab(&s).await?;
     let el = resolve(&tab, &input.selector).await?;
+    let navigation = input.wait_for_navigation.then(|| tab.expect_navigation());
     if mods.is_empty() {
         el.press(key)
             .await
@@ -379,6 +404,7 @@ pub async fn press(
             .await
             .map_err(|e| map_error(McpServerError::from(e)))?;
     }
+    await_navigation(navigation).await?;
     ok_with_snapshot(&tab, input.return_snapshot).await
 }
 
@@ -691,6 +717,7 @@ mod tests {
                 selector: css("button"),
                 button: None,
                 click_count: None,
+                wait_for_navigation: false,
                 return_snapshot: false,
             },
         )
@@ -754,6 +781,7 @@ mod tests {
                 selector: css("input"),
                 key: "Enter".into(),
                 modifiers: Vec::new(),
+                wait_for_navigation: false,
                 return_snapshot: false,
             },
         )

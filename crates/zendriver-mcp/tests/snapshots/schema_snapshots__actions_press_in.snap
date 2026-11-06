@@ -76,6 +76,10 @@ properties:
   visible_only:
     type: boolean
     default: true
+  wait_for_navigation:
+    description: "When `true`, wait for the navigation the key press starts (Enter in\na form, say): the reply comes once the new page has loaded (30 s\nlimit), so a snapshot shows that page. Fails if the key press starts\nno navigation. Default: `false`."
+    type: boolean
+    default: false
   xpath:
     type:
       - string

@@ -70,6 +70,14 @@ If the event stream loses events (a lagging subscriber, or a reconnect),
 navigation may have happened unseen; `wait_for_url` reads the URL again and
 keeps waiting.
 
+## In the MCP server
+
+`browser_wait_for_url` is `wait_for_url` with `url_substr` or `url_regex`,
+`timeout_ms`, and `return_snapshot`. `browser_click` and `browser_press`
+take `wait_for_navigation: true`, which arms `expect_navigation` before the
+action, so the reply (and its snapshot) describes the page the action led
+to.
+
 [`wait_for_load`]: https://docs.rs/zendriver/latest/zendriver/struct.Tab.html#method.wait_for_load
 [`expect_navigation`]: https://docs.rs/zendriver/latest/zendriver/struct.Tab.html#method.expect_navigation
 [`wait_for_url`]: https://docs.rs/zendriver/latest/zendriver/struct.Tab.html#method.wait_for_url

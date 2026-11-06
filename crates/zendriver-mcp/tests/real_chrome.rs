@@ -326,3 +326,75 @@ async fn cookies_get_by_url_and_delete() {
         "browser_cookies_delete left {left}"
     );
 }
+
+/// `browser_click` with `wait_for_navigation` replies once the page the
+/// click leads to has loaded, so the reply describes that page.
+#[tokio::test]
+async fn click_with_wait_for_navigation_reports_the_page_it_leads_to() {
+    let fixtures = FixtureServer::start().await;
+    let mut server = McpServer::start(Transport::Stdio).await;
+    // `fresh=1`: each load of the page asks for the slow resource anew.
+    let slow = fixtures.url("127.0.0.1", "/slow-load?fresh=1");
+    let start = fixtures.url("127.0.0.1", "/plain?link=/slow-load%3Ffresh%3D1");
+    open_at(&mut server, json!({}), &start).await;
+    let since = fixtures.requests_to("/slow-resource").len();
+    server
+        .call(
+            "browser_click",
+            json!({ "css": "#link", "wait_for_navigation": true, "timeout_ms": FIND_WITHIN_MS }),
+        )
+        .await;
+    let returned = Instant::now();
+    let answered = fixtures
+        .last_responded_at_after("/slow-resource", since)
+        .expect("browser_click returned before the page's slow resource was answered");
+    assert_not_before(returned, answered, "browser_click: the slow resource");
+    let state = server
+        .call(
+            "browser_evaluate",
+            json!({ "expression": "location.href + ' ' + document.readyState" }),
+        )
+        .await;
+    assert_eq!(state["value"], format!("{slow} complete"));
+}
+
+/// `browser_wait_for_url` after a click: it skips the `/hop` page on the way
+/// and reports the page at the URL.
+#[tokio::test]
+async fn wait_for_url_reports_the_page_at_the_url() {
+    let fixtures = FixtureServer::start().await;
+    let mut server = McpServer::start(Transport::Stdio).await;
+    let start = fixtures.url(
+        "127.0.0.1",
+        "/plain?link=/hop%3Fto%3D/plain%3Ftitle%3DFinal",
+    );
+    open_at(&mut server, json!({}), &start).await;
+    server
+        .call(
+            "browser_click",
+            json!({ "css": "#link", "timeout_ms": FIND_WITHIN_MS }),
+        )
+        .await;
+    let reached = server
+        .call(
+            "browser_wait_for_url",
+            json!({ "url_substr": "title=Final" }),
+        )
+        .await;
+    let url = fixtures.url("127.0.0.1", "/plain?title=Final");
+    assert_eq!(
+        (reached["url"].as_str(), reached["title"].as_str()),
+        (Some(url.as_str()), Some("Final")),
+        "browser_wait_for_url reported {reached}"
+    );
+    assert_eq!(
+        fixtures.requests_to("/hop").len(),
+        1,
+        "the hop page was visited"
+    );
+    let err = server
+        .try_call("browser_wait_for_url", json!({}))
+        .await
+        .expect_err("neither url_substr nor url_regex");
+    assert!(err.contains("exactly one"), "{err}");
+}

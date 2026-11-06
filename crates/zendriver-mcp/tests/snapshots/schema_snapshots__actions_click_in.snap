@@ -79,6 +79,10 @@ properties:
   visible_only:
     type: boolean
     default: true
+  wait_for_navigation:
+    description: "When `true`, wait for the navigation the click starts: the reply\ncomes once the new page has loaded (30 s limit), so a snapshot shows\nthat page. Fails if the click starts no navigation. Default: `false`."
+    type: boolean
+    default: false
   xpath:
     type:
       - string

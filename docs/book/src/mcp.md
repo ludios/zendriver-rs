@@ -1,7 +1,7 @@
 # MCP server (`zendriver-mcp`)
 
 `zendriver-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io/)
-server that exposes zendriver-rs through 72 MCP tools (73 with the
+server that exposes zendriver-rs through 73 MCP tools (74 with the
 optional `fingerprints` feature), so any
 MCP-compatible client (Claude Desktop, Claude Code, custom agents) can
 drive a real, stealth-by-default Chrome browser.
@@ -66,13 +66,13 @@ OPTIONS:
 
 ## Tool surface
 
-72 tools across these categories (73 with the optional `fingerprints`
+73 tools across these categories (74 with the optional `fingerprints`
 feature):
 
 | Category               | Tools                                                                                                                       | Count |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------- | ----: |
 | Lifecycle              | `browser_open / _close / _status`                                                                                           |     3 |
-| Navigation             | `browser_goto / _back / _forward / _reload / _wait_for_idle / _wait_for_load / _bypass_insecure_warning`                    |     7 |
+| Navigation             | `browser_goto / _back / _forward / _reload / _wait_for_idle / _wait_for_load / _wait_for_url / _bypass_insecure_warning`    |     8 |
 | Scroll / Window        | `browser_scroll / _get_window / _set_window`                                                                                |     3 |
 | Tabs                   | `browser_tab_list / _new / _switch / _close / _activate`                                                                    |     5 |
 | Find                   | `browser_find / _find_all`                                                                                                  |     2 |
