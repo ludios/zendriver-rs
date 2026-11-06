@@ -96,13 +96,7 @@ impl Element {
                 .await?;
 
             // Surface page-script exceptions before we deserialize.
-            if let Some(details) = result.get("exceptionDetails") {
-                let msg = details
-                    .get("exception")
-                    .and_then(|e| e.get("description"))
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
+            if let Some(e) = ZendriverError::js_exception_in(&result) {
                 // Release the handle even on JS exception — best effort.
                 let _ = self
                     .inner
@@ -112,7 +106,7 @@ impl Element {
                         json!({ "objectId": isolated_object_id }),
                     )
                     .await;
-                return Err(ZendriverError::JsException(msg));
+                return Err(e);
             }
 
             let value = result

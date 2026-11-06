@@ -248,14 +248,8 @@ impl Element {
                 }),
             )
             .await?;
-        if let Some(details) = res.get("exceptionDetails") {
-            let msg = details
-                .get("exception")
-                .and_then(|e| e.get("description"))
-                .and_then(|d| d.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            return Err(ZendriverError::JsException(msg));
+        if let Some(e) = ZendriverError::js_exception_in(&res) {
+            return Err(e);
         }
         Ok(res["result"].clone())
     }
