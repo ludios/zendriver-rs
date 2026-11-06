@@ -295,14 +295,27 @@ async fn downloads() -> Html<String> {
     )
 }
 
+/// A `Content-Disposition` naming an attachment `filename`. A name that
+/// can't go into the header (a `"`, a `\`, or a control character) is a bug
+/// in the test, so it panics the handler.
+fn attachment_disposition(filename: &str) -> HeaderValue {
+    assert!(
+        !filename.contains(['"', '\\']),
+        "attachment name {filename:?} needs quoting"
+    );
+    HeaderValue::from_str(&format!(r#"attachment; filename="{filename}""#))
+        .unwrap_or_else(|e| panic!("attachment name {filename:?} can't be a header: {e}"))
+}
+
 /// An attachment response named `filename`.
 fn attachment(filename: &str, content_type: &'static str, body: &'static str) -> Response {
-    let disposition = HeaderValue::from_str(&format!(r#"attachment; filename="{filename}""#))
-        .expect("valid Content-Disposition");
     (
         [
             (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),
-            (header::CONTENT_DISPOSITION, disposition),
+            (
+                header::CONTENT_DISPOSITION,
+                attachment_disposition(filename),
+            ),
         ],
         body,
     )
@@ -362,9 +375,7 @@ async fn trickle(params: Params) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
     if let Some(name) = params.get("attachment") {
-        let disposition = HeaderValue::from_str(&format!(r#"attachment; filename="{name}""#))
-            .expect("valid Content-Disposition");
-        headers.insert(header::CONTENT_DISPOSITION, disposition);
+        headers.insert(header::CONTENT_DISPOSITION, attachment_disposition(name));
     }
     (headers, Body::from_stream(stream)).into_response()
 }
@@ -564,7 +575,7 @@ fn canned_routes() -> Router {
 /// | `/download` | `report.csv` attachment, body [`DOWNLOAD_BODY`] |
 /// | `/download-tiny` | `tiny.txt` attachment of one byte |
 /// | `/basic-auth` | `401` with a `Basic` challenge unless given [`BASIC_AUTH_USER`]:[`BASIC_AUTH_PASSWORD`] |
-/// | `/trickle?chunks=N&chunk_bytes=K&interval_ms=M&attachment=F` | [`trickle_body`]`(N, K)`, one chunk every `M` ms (defaults 8, 1024, 100); `interval_ms=0` makes it a plain large body; `attachment=F` sends it as an attachment named `F`, so a navigation to it is a download that lasts about `N` × `M` ms |
+/// | `/trickle?chunks=N&chunk_bytes=K&interval_ms=M&attachment=F` | [`trickle_body`]`(N, K)`, one chunk every `M` ms (defaults 8, 1024, 100); `interval_ms=0` makes it a plain large body; `attachment=F` sends it as an attachment named `F`, so a navigation to it starts a download (where Chrome's download behavior allows one) that lasts about (`N` − 1) × `M` ms |
 /// | `/svg-sprite` | `<use>` of an inline symbol (`href` and `xlink:href`) and of `/sprite.svg` |
 /// | `/below-fold` | `#below` button 3000 px down; clicking sets `window.belowClicked`. Before it: a `display: none` `#hidden` with the same class `below`; `#off-page` at `left: -9999px`; `#faint`, slotted under a shadow wrapper at opacity 0.1 in a host at 0.05 (0.5% in all); `#faint-slot`, under a slot at opacity 0.005, which a slot's `display: contents` makes moot. After it, `#skipped` inside a `content-visibility: auto` section; clicking it sets `window.skippedClicked` |
 /// | `/padded-button` | `#padded` button with large, asymmetric padding and border; clicks push `[clientX, clientY]` onto `window.clicks` |
