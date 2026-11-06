@@ -159,11 +159,9 @@ pub async fn add_rule(
     // Each match-arm builds its own InterceptBuilder. The action method
     // (`block` / `redirect` / `respond` / `modify_request`) takes the URL
     // pattern as its first arg and registers it as the rule's matcher;
-    // `InterceptBuilder::start` uses a match-all `"*"` CDP
-    // `Fetch.RequestPattern` when none is added via `.pattern()`, so we
-    // don't need to add one ourselves. (Conflating the two would just
-    // register the same string twice as conceptually different things —
-    // the CDP server-side filter and the rule's per-request matcher.)
+    // `InterceptBuilder::start` derives the CDP `Fetch.RequestPattern` from
+    // the rule (its URL pattern, at the stage it acts at) when none is
+    // added via `.pattern()`, so we don't add one ourselves.
     let (builder, action_kind): (zendriver::InterceptBuilder, &'static str) = match input.action {
         InterceptAction::Block => {
             let b = tab

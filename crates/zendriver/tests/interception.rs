@@ -113,3 +113,34 @@ async fn a_rule_and_the_proxy_credentials_compose() {
     assert_eq!(eval(&tab, "document.title").await, "Plain");
     browser.close().await;
 }
+
+/// A response rule needs no pattern of its own: the layer pauses at the
+/// stage each rule acts at, so `modify_response` alone changes the
+/// response, and a block rule after it still blocks.
+#[tokio::test]
+async fn rules_pause_at_their_own_stage() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/plain")).await;
+
+    let _rules = tab
+        .intercept()
+        .modify_response("*/plain?*", |_| ResponseOverrides {
+            status: Some(203),
+            ..ResponseOverrides::default()
+        })
+        .unwrap()
+        .block("*/plain?blocked")
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
+    assert_eq!(
+        fetch_response(&tab, "/plain?modified").await,
+        "203 [Non-Authoritative Information] text/html; charset=utf-8"
+    );
+    let blocked = "fetch('/plain?blocked').then(() => 'loaded', () => 'blocked')";
+    assert_eq!(eval(&tab, blocked).await, "blocked");
+    browser.close().await;
+}

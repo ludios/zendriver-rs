@@ -4,7 +4,8 @@
 //! [`BlockHosts`]) with one of six actions ([`Block`], [`Redirect`],
 //! [`Respond`], [`Modify`], [`ModifyResponse`], [`BlockHosts`]). The multiplexer
 //! walks a layer's rule list in registration order on each `Fetch.requestPaused`
-//! event; the first rule that matches the request URL wins.
+//! event; the first rule that matches the request URL and acts at the stage
+//! Chrome paused it at wins.
 //!
 //! [`Block`]: Rule::Block
 //! [`Redirect`]: Rule::Redirect
@@ -17,8 +18,9 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::builder::RequestPattern;
 use crate::host_matcher::HostMatcher;
-use crate::types::{RequestInfo, RequestOverrides, ResponseInfo, ResponseOverrides};
+use crate::types::{RequestInfo, RequestOverrides, RequestStage, ResponseInfo, ResponseOverrides};
 use crate::url_pattern::UrlPattern;
 
 /// A single interception rule.
@@ -73,9 +75,9 @@ pub enum Rule {
     /// Rewrite an upstream response's status/headers per a user closure, then
     /// continue with `Fetch.continueResponse` (keeping Chrome's body). Only
     /// fires at the `Response` stage — the closure receives the live
-    /// [`ResponseInfo`] and returns the [`ResponseOverrides`] to apply. A rule
-    /// of this kind that matches at the `Request` stage is a no-op (there is
-    /// no response yet).
+    /// [`ResponseInfo`] and returns the [`ResponseOverrides`] to apply. At the
+    /// `Request` stage it is skipped (there is no response yet), so a later
+    /// rule can take the request.
     ModifyResponse {
         /// URL pattern matched against the incoming request URL.
         pattern: UrlPattern,
@@ -116,6 +118,41 @@ impl Rule {
             Self::BlockHosts { matcher } => {
                 crate::host_matcher::host_of(url).is_some_and(|h| matcher.is_blocked(h))
             }
+        }
+    }
+
+    /// Whether this rule can release a request paused at `stage`: the
+    /// request rewrites (`Redirect`, `Modify`) only before the request is
+    /// sent, `ModifyResponse` only once there is a response, and the others
+    /// at either stage.
+    pub(crate) fn acts_at(&self, stage: RequestStage) -> bool {
+        match self {
+            Self::Redirect { .. } | Self::Modify { .. } => stage == RequestStage::Request,
+            Self::ModifyResponse { .. } => stage == RequestStage::Response,
+            Self::Block { .. } | Self::Respond { .. } | Self::BlockHosts { .. } => true,
+        }
+    }
+
+    /// The pattern for Chrome to pause the requests this rule acts on: its
+    /// URL pattern (every URL for `BlockHosts`), at the `Response` stage
+    /// for `ModifyResponse` and at the `Request` stage for the others.
+    pub(crate) fn pattern(&self) -> RequestPattern {
+        let url = match self {
+            Self::Block { pattern }
+            | Self::Respond { pattern, .. }
+            | Self::Modify { pattern, .. }
+            | Self::ModifyResponse { pattern, .. } => pattern.pattern_str(),
+            Self::Redirect { from, .. } => from.pattern_str(),
+            Self::BlockHosts { .. } => "*",
+        };
+        let mut request_stage = None;
+        if matches!(self, Self::ModifyResponse { .. }) {
+            request_stage = Some(RequestStage::Response);
+        }
+        RequestPattern {
+            url_pattern: Some(url.into()),
+            resource_type: None,
+            request_stage,
         }
     }
 }

@@ -18,8 +18,8 @@
 //! Each paused request goes to the layers newest first. A layer considers it
 //! only if one of its own patterns matches the request's URL, resource type
 //! and stage. A stream layer takes every request it considers; a rule layer
-//! takes one if one of its rules matches the URL, and otherwise leaves it to
-//! the next layer. A request that no layer takes is continued unchanged. A
+//! takes one if one of its rules matches the URL and acts at that stage, and
+//! otherwise leaves it to the next layer. A request that no layer takes is continued unchanged. A
 //! proxy's challenge gets the credentials of the newest layer that has
 //! some.
 //!
@@ -238,7 +238,8 @@ impl Layer {
 
 /// What takes the requests a layer considers.
 pub(crate) enum Responder {
-    /// The first of the rules that matches the request's URL.
+    /// The first of the rules that matches the request's URL and acts at
+    /// its stage.
     Rules(Vec<Rule>),
     /// The stream from `subscribe()`.
     Stream(mpsc::UnboundedSender<PausedRequest>),
@@ -415,7 +416,7 @@ fn release(rule: &Rule, ev: &RequestPausedEvent) -> (&'static str, Value) {
             }
         }
         Rule::ModifyResponse { modify, .. } => {
-            // At the Request stage there is no response to modify yet.
+            // A failed response has no status or headers to modify.
             let Some(info) = build_response_info(ev) else {
                 return unchanged();
             };
@@ -577,7 +578,9 @@ impl Mux {
                     return;
                 }
                 Responder::Rules(rules) => {
-                    let Some(rule) = rules.iter().find(|r| r.matches(&ev.request.url)) else {
+                    let url = &ev.request.url;
+                    let Some(rule) = rules.iter().find(|r| r.acts_at(stage) && r.matches(url))
+                    else {
                         continue;
                     };
                     let (method, params) = release(rule, &ev);
@@ -724,7 +727,7 @@ mod tests {
             .unwrap();
         let (handle, enable) = applied(&mut mock, builder.start()).await;
         assert_eq!(enable["handleAuthRequests"], false);
-        assert_eq!(enable["patterns"], json!([{ "urlPattern": "*" }]));
+        assert_eq!(enable["patterns"], json!([{ "urlPattern": "*/blocked/*" }]));
 
         pause(&mock, "R1", "https://a.test/blocked/x.png", json!({})).await;
         let failed = answered(&mut mock, "Fetch.failRequest").await;
@@ -780,7 +783,11 @@ mod tests {
         assert_eq!(
             enable,
             json!({
-                "patterns": [{ "urlPattern": "*" }, { "urlPattern": "*/b/*" }],
+                "patterns": [
+                    { "urlPattern": "*/a/*" },
+                    { "urlPattern": "*" },
+                    { "urlPattern": "*/b/*" },
+                ],
                 "handleAuthRequests": true,
             })
         );
@@ -805,7 +812,7 @@ mod tests {
         drop(newer);
         assert_eq!(
             answered(&mut mock, "Fetch.enable").await["patterns"],
-            json!([{ "urlPattern": "*" }])
+            json!([{ "urlPattern": "*/a/*" }, { "urlPattern": "*" }])
         );
         pause(&mock, "R4", "https://x.test/b/1", json!({})).await;
         assert_eq!(
@@ -860,6 +867,45 @@ mod tests {
             ),
             "{sent:?}"
         );
+        conn.shutdown();
+    }
+
+    /// A rule that can't act at the stage a request is paused at leaves it
+    /// to the next rule: `modify_request` is skipped once there is a
+    /// response, and `modify_response` before.
+    #[tokio::test]
+    async fn rules_act_only_at_their_stage() {
+        let (mut mock, conn, interceptor) = mock_interceptor();
+        let builder = InterceptBuilder::new(&interceptor)
+            .modify_request("*/req/*", |_| RequestOverrides::default())
+            .unwrap()
+            .modify_response("*", |_| ResponseOverrides {
+                status: Some(203),
+                ..ResponseOverrides::default()
+            })
+            .unwrap()
+            .block("*/ads/*")
+            .unwrap();
+        let (_handle, enable) = applied(&mut mock, builder.start()).await;
+        assert_eq!(
+            enable["patterns"],
+            json!([
+                { "urlPattern": "*/req/*" },
+                { "urlPattern": "*", "requestStage": "Response" },
+                { "urlPattern": "*/ads/*" },
+            ])
+        );
+
+        pause(&mock, "R1", "https://x.test/ads/1", json!({})).await;
+        assert_eq!(
+            answered(&mut mock, "Fetch.failRequest").await["requestId"],
+            "R1"
+        );
+        let response = json!({ "responseStatusCode": 200 });
+        pause(&mock, "R2", "https://x.test/req/1", response).await;
+        let continued = answered(&mut mock, "Fetch.continueResponse").await;
+        assert_eq!(continued["requestId"], "R2");
+        assert_eq!(continued["responseCode"], 203);
         conn.shutdown();
     }
 

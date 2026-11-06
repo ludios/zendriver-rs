@@ -19,6 +19,23 @@ use zendriver_testkit::{FixtureServer, assert_eventually};
 /// Bound on waiting for a page to load.
 const LOAD_WITHIN: Duration = Duration::from_secs(10);
 
+/// Load `url` in the current tab, waiting for its `load` event by polling
+/// the page. A poll that fails, as one can while the page swaps documents,
+/// is tried again.
+async fn load(server: &McpServer, url: &str) {
+    server.call("browser_goto", json!({ "url": url })).await;
+    assert_eventually(LOAD_WITHIN, &format!("{url} finishes loading"), || async {
+        let state = server
+            .try_call(
+                "browser_evaluate",
+                json!({ "expression": "location.href + ' ' + document.readyState" }),
+            )
+            .await;
+        state.is_ok_and(|s| s["value"] == format!("{url} complete"))
+    })
+    .await;
+}
+
 /// What the page's `fetch` of `/a.txt`, of `/b.txt`, and of a page on the
 /// tracker host `tracker` (a `host:port`) get, joined by `|`: a status and
 /// body, or for the tracker, whether it was blocked.
@@ -57,18 +74,7 @@ async fn removing_one_rule_leaves_the_others_and_tracker_blocking_working() {
     server
         .open(json!({ "tracker_blocklist": { "source": "domains", "domains": ["localhost"] } }))
         .await;
-    let url = fixtures.url("127.0.0.1", "/plain");
-    server.call("browser_goto", json!({ "url": url })).await;
-    assert_eventually(LOAD_WITHIN, &format!("{url} finishes loading"), || async {
-        let state = server
-            .try_call(
-                "browser_evaluate",
-                json!({ "expression": "location.href + ' ' + document.readyState" }),
-            )
-            .await;
-        state.is_ok_and(|s| s["value"] == format!("{url} complete"))
-    })
-    .await;
+    load(&server, &fixtures.url("127.0.0.1", "/plain")).await;
 
     let a = server
         .call("browser_intercept_add_rule", respond("*/a.txt", "A"))
@@ -91,4 +97,26 @@ async fn removing_one_rule_leaves_the_others_and_tracker_blocking_working() {
         fetched(&server, &tracker).await,
         "404 |200 B|tracker blocked"
     );
+}
+
+/// A `modify_response` rule changes the response it matches.
+#[tokio::test]
+async fn a_modify_response_rule_changes_the_status() {
+    let fixtures = FixtureServer::start().await;
+    let mut server = McpServer::start(Transport::Stdio).await;
+    server.open(json!({})).await;
+    load(&server, &fixtures.url("127.0.0.1", "/plain")).await;
+
+    let rule = json!({
+        "pattern": "*/plain?modified",
+        "action": { "kind": "modify_response", "status": 203 },
+    });
+    server.call("browser_intercept_add_rule", rule).await;
+    let status = server
+        .call(
+            "browser_evaluate",
+            json!({ "expression": "fetch('/plain?modified').then(r => r.status)" }),
+        )
+        .await;
+    assert_eq!(status["value"], 203);
 }

@@ -30,7 +30,7 @@ intercepted.
 
 ## Rule-based API
 
-The four rule methods chain on the builder and dispatch the matching
+The rule methods chain on the builder and dispatch the matching
 terminal action automatically when the URL pattern fires. Patterns use
 CDP wildcard syntax (`*` matches any characters; `?` matches any single
 character).
@@ -41,11 +41,13 @@ character).
 | [`redirect`] | `Fetch.continueRequest` with new URL | Move an endpoint without page changes |
 | [`respond`] | `Fetch.fulfillRequest` with synthetic body | Mock an API for tests |
 | [`modify_request`] | `Fetch.continueRequest` with overrides | Inject headers, change method/body |
+| [`modify_response`] | `Fetch.continueResponse` with overrides, once the response is in | Change a response's status or headers |
 
 [`block`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html#method.block
 [`redirect`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html#method.redirect
 [`respond`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html#method.respond
 [`modify_request`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html#method.modify_request
+[`modify_response`]: https://docs.rs/zendriver/latest/zendriver/struct.InterceptBuilder.html#method.modify_response
 
 ### Blocking ads
 
@@ -216,8 +218,12 @@ character only ever lands in text the parser discards.
 
 ## Pattern + stage filters
 
-By default the builder pauses on every request at the `Request` stage.
-Restrict it with builder modifiers:
+By default a rule layer pauses only what its rules act on: each rule's URL
+pattern, at the stage the rule acts at (`Response` for `modify_response`,
+`Request` for the others); `block_hosts` and proxy credentials pause every
+request at the `Request` stage. A `subscribe()` stream pauses every request
+at the `Request` stage. Choose the patterns yourself with builder
+modifiers:
 
 ```rust,ignore
 use zendriver::ResourceType;
@@ -233,9 +239,12 @@ let _h = tab.intercept()
 
 Each call to `pattern()` opens a new `Fetch.RequestPattern`; chained
 `resource` / `at_request` / `at_response` modifiers mutate that most-recent
-pattern. Without a `pattern()`, the builder uses one matching all URLs at
-the `Request` stage. The patterns are also the requests the layer
-considers (see [Several layers on one tab](#several-layers-on-one-tab)).
+pattern. The patterns are also the requests the layer considers (see
+[Several layers on one tab](#several-layers-on-one-tab)). Within a layer,
+the first rule that matches the URL and can act at the stage wins: a
+`modify_response` rule is skipped before there is a response, and
+`redirect` / `modify_request` after, so a later rule can take the
+request.
 
 ## Gotchas
 

@@ -285,8 +285,9 @@ impl InterceptBuilder {
     /// Register a [`Rule::ModifyResponse`] driven by a user closure.
     ///
     /// The closure rewrites an upstream response's status/headers (keeping
-    /// Chrome's body) and only fires at the `Response` stage — pair this with
-    /// [`at_response`](Self::at_response) so Chrome actually pauses there.
+    /// Chrome's body) and only fires at the `Response` stage. Without
+    /// explicit [`pattern`](Self::pattern)s, the layer pauses there for it;
+    /// with them, give one [`at_response`](Self::at_response).
     /// Header overrides are *replacement*, not merge (CDP semantics): return
     /// every header you want forwarded.
     ///
@@ -317,10 +318,13 @@ impl InterceptBuilder {
     /// precedence: each paused request goes to the newest layer that has a
     /// pattern and a rule for it.
     ///
-    /// If no [`pattern`](Self::pattern) entries were added, a single
-    /// match-all (`"*"`) pattern is used so Chrome actually pauses requests
-    /// — without it, `Fetch.enable` would attach to nothing and the rule
-    /// list would never fire.
+    /// If no [`pattern`](Self::pattern) entries were added, the patterns
+    /// come from the rules: each rule's URL pattern, at the stage it acts
+    /// at (`Response` for [`modify_response`](Self::modify_response),
+    /// `Request` for the others), and `"*"` at the `Request` stage for
+    /// [`block_hosts`](Self::block_hosts) and for
+    /// [`handle_proxy_auth`](Self::handle_proxy_auth). Chrome then pauses
+    /// only the requests some rule acts on.
     ///
     /// # Errors
     ///
@@ -337,8 +341,8 @@ impl InterceptBuilder {
     /// [`InterceptStream`], and return once Chrome pauses them.
     ///
     /// The layer uses the declared patterns (a single match-all `"*"`
-    /// pattern when none were added), and takes every request they pause
-    /// at that stage, before any older layer sees it. Release each
+    /// pattern at the `Request` stage when none were added), and takes
+    /// every request they pause, before any older layer sees it. Release each
     /// [`PausedRequest`](crate::PausedRequest) with one of its terminal
     /// methods (`continue_` / `abort` / `respond` / `modify_and_continue` /
     /// `continue_response`): Chrome holds the request until then.
@@ -368,17 +372,13 @@ impl InterceptBuilder {
 
     /// The layer this builder describes, its rules taken by `responder`.
     ///
-    /// A layer with rules, credentials, or a stream and no pattern gets a
-    /// match-all one. That covers two needs:
-    ///
-    /// 1. Rules need Chrome to actually pause requests — without a pattern
-    ///    `Fetch.enable` attaches to nothing and every rule is a silent
-    ///    no-op.
-    /// 2. `handleAuthRequests: true` (the proxy-auth path): Chrome (~M132+)
-    ///    REJECTS `Fetch.enable { patterns: [], handleAuthRequests: true }`
-    ///    with CDP error -32602 "Can't specify empty patterns with
-    ///    handleAuth set", and only surfaces the challenges of requests
-    ///    that a Request-stage pattern paused.
+    /// Without explicit patterns, the layer's come from what it does (see
+    /// [`start`](Self::start)): each rule's, a match-all one for a stream,
+    /// and a match-all one at the `Request` stage for proxy credentials.
+    /// Chrome (~M132+) rejects `Fetch.enable { patterns: [],
+    /// handleAuthRequests: true }` with CDP error -32602 "Can't specify
+    /// empty patterns with handleAuth set", and only surfaces the
+    /// challenges of requests that a Request-stage pattern paused.
     ///
     /// On the auth-only path this pauses (and immediately continues) every
     /// request. If that per-request CDP round-trip regresses a
@@ -391,15 +391,18 @@ impl InterceptBuilder {
         responder: impl FnOnce(Vec<Rule>) -> Responder,
     ) -> Result<Layer, InterceptionError> {
         let responder = responder(self.rules);
-        let pauses_something = match &responder {
-            Responder::Rules(rules) => !rules.is_empty() || self.proxy_auth.is_some(),
-            Responder::Stream(_) => true,
+        let match_all = || RequestPattern {
+            url_pattern: Some("*".into()),
+            ..RequestPattern::default()
         };
-        if self.patterns.is_empty() && pauses_something {
-            self.patterns.push(RequestPattern {
-                url_pattern: Some("*".into()),
-                ..RequestPattern::default()
-            });
+        if self.patterns.is_empty() {
+            match &responder {
+                Responder::Rules(rules) => self.patterns.extend(rules.iter().map(Rule::pattern)),
+                Responder::Stream(_) => self.patterns.push(match_all()),
+            }
+            if self.proxy_auth.is_some() {
+                self.patterns.push(match_all());
+            }
         }
         let filters = self
             .patterns
@@ -470,18 +473,28 @@ mod tests {
         conn.shutdown();
     }
 
-    /// `start()` uses a match-all `"*"` pattern when the caller did not add
-    /// any via [`pattern`](InterceptBuilder::pattern) — otherwise
-    /// `Fetch.enable` would arrive with an empty patterns array and Chrome
-    /// would silently pause nothing.
+    /// Without explicit [`pattern`](InterceptBuilder::pattern)s, `start()`
+    /// pauses what the rules act on: each rule's URL pattern at its stage,
+    /// and every URL for `block_hosts`.
     #[tokio::test]
-    async fn start_defaults_to_match_all_pattern_when_none_registered() {
+    async fn start_derives_the_patterns_from_the_rules() {
         let (mut mock, conn, interceptor) = mock_interceptor();
+        let hosts = Arc::new(HostMatcher::new(["evil.test".to_string()]));
         let builder = InterceptBuilder::new(&interceptor)
             .block("*/blocked/*")
-            .unwrap();
+            .unwrap()
+            .modify_response("*/api/*", |_| crate::ResponseOverrides::default())
+            .unwrap()
+            .block_hosts(hosts);
         let params = enable_params(&mut mock, builder).await;
-        assert_eq!(params["patterns"], json!([{ "urlPattern": "*" }]));
+        assert_eq!(
+            params["patterns"],
+            json!([
+                { "urlPattern": "*/blocked/*" },
+                { "urlPattern": "*/api/*", "requestStage": "Response" },
+                { "urlPattern": "*" },
+            ])
+        );
         conn.shutdown();
     }
 
