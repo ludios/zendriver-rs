@@ -24,16 +24,87 @@ use zendriver_testkit::{
 /// every small id.
 const IFRAMES: usize = 12;
 
-/// A fixture server that also serves `/many-frames`: a page titled
-/// `Many frames`, with an `#heading`, and [`IFRAMES`] iframes of the canned
-/// `/frame-child`.
+/// A page script that wraps the DOM methods and getters that element
+/// queries and actions use, so that each call of one from this page's main
+/// world appends the method's name to `window.calls`. Calls from an
+/// isolated world use that world's own, unwrapped, prototypes.
+const HOOKS_JS: &str = r#"<script>
+  window.calls = [];
+  const methods = [
+    [Document.prototype, ['querySelector', 'querySelectorAll', 'evaluate', 'elementFromPoint',
+                          'elementsFromPoint']],
+    [Element.prototype, ['querySelector', 'querySelectorAll', 'getBoundingClientRect',
+                         'getClientRects', 'scrollIntoView', 'scrollIntoViewIfNeeded', 'matches',
+                         'closest', 'getAttribute', 'checkVisibility']],
+    [HTMLElement.prototype, ['focus', 'blur', 'click']],
+    [EventTarget.prototype, ['dispatchEvent']],
+    [window, ['getComputedStyle']],
+  ];
+  for (const [target, names] of methods) {
+    for (const name of names) {
+      const original = target[name];
+      target[name] = function (...args) {
+        window.calls.push(name);
+        return original.apply(this, args);
+      };
+    }
+  }
+  const getters = [
+    [Node.prototype, ['textContent', 'parentElement']],
+    [HTMLElement.prototype, ['innerText']],
+    [Element.prototype, ['innerHTML', 'outerHTML', 'children']],
+    [HTMLInputElement.prototype, ['value']],
+  ];
+  for (const [proto, names] of getters) {
+    for (const name of names) {
+      const d = Object.getOwnPropertyDescriptor(proto, name);
+      Object.defineProperty(proto, name, {
+        ...d,
+        get() {
+          window.calls.push(name);
+          return d.get.call(this);
+        },
+      });
+    }
+  }
+</script>"#;
+
+/// A fixture server that also serves:
+///
+/// - `/many-frames`: a page titled `Many frames`, with an `#heading`, and
+///   [`IFRAMES`] iframes of the canned `/frame-child`.
+/// - `/hooked`: a page with [`HOOKS_JS`], an `<input id="field">` that the
+///   page gives the expando `pageProp = "page"`, a `#button` that sets
+///   `window.clicked`, and an iframe of `/hooked-child`.
+/// - `/hooked-child`: a page with [`HOOKS_JS`], a `#child-button` that sets
+///   `window.clicked`, and the global `childGlobal = "child"`.
 async fn server() -> FixtureServer {
     let iframes = r#"<iframe src="/frame-child"></iframe>"#.repeat(IFRAMES);
-    let page = format!(
+    let many_frames = format!(
         r#"<!doctype html><title>Many frames</title><h1 id="heading">Many frames</h1>{iframes}"#
     );
-    let routes = Router::new().route("/many-frames", get(|| async { Html(page) }));
+    let hooked = format!(
+        r#"<!doctype html><title>Hooked</title>{HOOKS_JS}
+<input id="field">
+<button id="button" onclick="window.clicked = true">Press me</button>
+<iframe src="/hooked-child"></iframe>
+<script>document.getElementById('field').pageProp = 'page';</script>"#
+    );
+    let hooked_child = format!(
+        r#"<!doctype html><title>Hooked child</title>{HOOKS_JS}
+<button id="child-button" onclick="window.clicked = true">Child button</button>
+<script>window.childGlobal = 'child';</script>"#
+    );
+    let routes = Router::new()
+        .route("/many-frames", get(|| async { Html(many_frames) }))
+        .route("/hooked", get(|| async { Html(hooked) }))
+        .route("/hooked-child", get(|| async { Html(hooked_child) }));
     FixtureServer::start_with(routes).await
+}
+
+/// Take what [`HOOKS_JS`] recorded in `tab`'s main frame, leaving it empty.
+async fn take_calls(tab: &Tab) -> Vec<String> {
+    tab.evaluate_main("window.calls.splice(0)").await.unwrap()
 }
 
 /// The id of the execution context of zendriver's isolated world in the
@@ -78,7 +149,8 @@ async fn evaluate_reads_the_new_page_after_a_cross_site_navigation() {
     let frame = tab.main_frame().await.unwrap();
 
     load(&tab, &server.url(SITE_A, "/plain")).await;
-    let heading = tab.find().css("#heading").one().await.unwrap();
+    let old_heading = tab.find().css("#heading").one().await.unwrap();
+    let heading = old_heading.clone();
     let tab_title: String = tab.evaluate("document.title").await.unwrap();
     let frame_title: String = frame.evaluate("document.title").await.unwrap();
     let element_title: String = heading.evaluate("document.title").await.unwrap();
@@ -108,6 +180,14 @@ async fn evaluate_reads_the_new_page_after_a_cross_site_navigation() {
     assert_eq!(tab_title, "Many frames", "Tab::evaluate");
     assert_eq!(frame_title, "Many frames", "Frame::evaluate");
     assert_eq!(element_title, "Many frames", "Element::evaluate");
+    // An element kept from the previous page re-runs its query.
+    let text: String = old_heading.evaluate("el.textContent").await.unwrap();
+    assert_eq!(text, "Many frames", "Element::evaluate on a kept element");
+    let text: String = old_heading.evaluate_main("el.textContent").await.unwrap();
+    assert_eq!(
+        text, "Many frames",
+        "Element::evaluate_main on a kept element"
+    );
 
     browser.close().await;
 }
@@ -163,5 +243,104 @@ async fn evaluate_main_runs_in_the_main_world_of_a_same_process_iframe() {
     assert_eq!(read, "the iframe!");
     let html = frame.content().await.unwrap();
     assert!(html.contains("child-button"), "{html}");
+    browser.close().await;
+}
+
+/// Element queries and actions on a tab must not run in the page's main
+/// world, where page scripts can watch them (and falsify their answers)
+/// through wrapped DOM methods and getters, while still having the effects
+/// that the page sees.
+#[tokio::test]
+async fn element_queries_and_actions_are_invisible_to_page_hooks() {
+    let server = server().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/hooked")).await;
+
+    // The hooks must be live, or this test guards nothing.
+    let _: Value = tab
+        .evaluate_main("document.querySelectorAll('input')")
+        .await
+        .unwrap();
+    assert_eq!(take_calls(&tab).await, ["querySelectorAll"]);
+
+    let field = tab.find().css("#field").one().await.unwrap();
+    let button = tab.find().xpath("//button").one().await.unwrap();
+    tab.find().text("Press me").one().await.unwrap();
+    tab.find().tag("button").one().await.unwrap();
+    let body = button.parent().await.unwrap().unwrap();
+    body.find().css("input").one().await.unwrap();
+    assert!(field.is_visible().await.unwrap());
+    assert!(field.bounding_box().await.unwrap().is_some());
+    assert_eq!(field.attr("id").await.unwrap().as_deref(), Some("field"));
+    assert!(field.outer_html().await.unwrap().contains("field"));
+    assert_eq!(button.inner_text().await.unwrap(), "Press me");
+    button.click().await.unwrap();
+    field.set_value("first").await.unwrap();
+    field.clear().await.unwrap();
+    field.type_text("hi").await.unwrap();
+    let page_prop: Option<String> = field.evaluate("el.pageProp").await.unwrap();
+    assert_eq!(
+        page_prop, None,
+        "Element::evaluate must not see page expandos"
+    );
+    let value: String = field.evaluate("el.value").await.unwrap();
+    assert_eq!(value, "hi");
+
+    assert_eq!(take_calls(&tab).await, Vec::<String>::new());
+    let clicked: bool = tab.evaluate_main("window.clicked === true").await.unwrap();
+    assert!(clicked, "the click must reach the page");
+
+    let page_prop: Option<String> = field.evaluate_main("el.pageProp").await.unwrap();
+    assert_eq!(page_prop.as_deref(), Some("page"), "Element::evaluate_main");
+
+    browser.close().await;
+}
+
+/// An element in an iframe has its frame's worlds: `Element::evaluate`
+/// sees the iframe's own `document`, and `Element::evaluate_main` runs in
+/// the iframe's main world.
+#[tokio::test]
+async fn an_iframe_element_evaluates_in_its_own_frames_worlds() {
+    let server = server().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/hooked")).await;
+
+    let button = tab
+        .find()
+        .css("#child-button")
+        .include_frames()
+        .one()
+        .await
+        .unwrap();
+    let own_document: bool = button
+        .evaluate("el.ownerDocument === document")
+        .await
+        .unwrap();
+    assert!(
+        own_document,
+        "Element::evaluate must see the iframe's document"
+    );
+    let isolated_global: Option<String> = button.evaluate("window.childGlobal").await.unwrap();
+    assert_eq!(
+        isolated_global, None,
+        "Element::evaluate must not see page globals"
+    );
+    let main_global: Option<String> = button.evaluate_main("window.childGlobal").await.unwrap();
+    assert_eq!(
+        main_global.as_deref(),
+        Some("child"),
+        "Element::evaluate_main"
+    );
+
+    button.click().await.unwrap();
+    let (clicked, calls): (bool, Vec<String>) = button
+        .evaluate_main("[window.clicked === true, window.calls.splice(0)]")
+        .await
+        .unwrap();
+    assert!(clicked, "the click must reach the iframe's page");
+    assert_eq!(calls, Vec::<String>::new(), "page hooks in the iframe");
+
     browser.close().await;
 }

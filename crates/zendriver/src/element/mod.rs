@@ -274,12 +274,15 @@ impl Element {
         self.call_on(function, Value::Array(full_args)).await
     }
 
-    /// Evaluate a JS expression in the main world with `el` bound to this
-    /// element handle.
+    /// Evaluate a JS expression in the main world of the element's frame,
+    /// with `el` (and `this`) bound to this element.
     ///
-    /// Uses `Runtime.callFunctionOn` against the element's remote object,
-    /// which lives in whatever world it was created in (main world if found
-    /// via `document.querySelector`).
+    /// Page globals, and whatever page scripts have put on the element
+    /// (a framework's state, a custom element's JS-defined properties), ARE
+    /// visible; so is this call to page scripts that watch for one. Gets a
+    /// main-world handle with `DOM.resolveNode`, which, given no execution
+    /// context, wraps the node in the main world of the node's own frame;
+    /// then calls the function on it and releases it.
     ///
     /// For stealth-safe isolated-world evaluation, see [`Element::evaluate`].
     ///
@@ -301,9 +304,53 @@ impl Element {
     /// ```
     pub async fn evaluate_main<T: DeserializeOwned>(&self, js: impl AsRef<str>) -> Result<T> {
         let function = format!("function(el){{ return ({}) }}", js.as_ref());
-        let result = self.call_on_main(&function, json!([])).await?;
-        let value = result.get("value").cloned().unwrap_or(Value::Null);
-        serde_json::from_value(value).map_err(ZendriverError::Serde)
+        let function = function.as_str();
+        self.with_refresh(|| async move {
+            let backend_node_id = self.backend_node_id_cloned().await?;
+            let resolved = self
+                .inner
+                .tab
+                .call(
+                    "DOM.resolveNode",
+                    json!({ "backendNodeId": backend_node_id }),
+                )
+                .await?;
+            // No object: the node is no longer in a live document.
+            let Some(object_id) = resolved["object"]["objectId"].as_str() else {
+                return Err(ZendriverError::ElementStale);
+            };
+            let result = self
+                .inner
+                .tab
+                .call(
+                    "Runtime.callFunctionOn",
+                    json!({
+                        "objectId": object_id,
+                        "functionDeclaration": function,
+                        "arguments": [{ "objectId": object_id }],
+                        "returnByValue": true,
+                        "awaitPromise": true,
+                    }),
+                )
+                .await;
+            // Best effort: a handle left behind only holds memory until its
+            // document goes away.
+            let _ = self
+                .inner
+                .tab
+                .call("Runtime.releaseObject", json!({ "objectId": object_id }))
+                .await;
+            let result = result?;
+            if let Some(e) = ZendriverError::js_exception_in(&result) {
+                return Err(e);
+            }
+            let value = result["result"]
+                .get("value")
+                .cloned()
+                .unwrap_or(Value::Null);
+            serde_json::from_value(value).map_err(ZendriverError::Serde)
+        })
+        .await
     }
 }
 
@@ -375,6 +422,53 @@ mod tests {
 
         let res = fut.await.unwrap().unwrap();
         assert_eq!(res["value"], "v");
+        conn.shutdown();
+    }
+
+    /// `evaluate_main` re-resolves the node with no execution context (so
+    /// into its frame's main world), calls the function on that handle, and
+    /// releases it; it never calls on the element's own handle, which is in
+    /// the isolated world.
+    #[tokio::test]
+    async fn evaluate_main_calls_the_function_on_a_main_world_handle() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let tab = Tab::new_for_test(sess);
+        let el = Element::from_jsret(tab, 7, "R_ISO".to_string());
+
+        let fut = tokio::spawn({
+            let e = el.clone();
+            async move { e.evaluate_main::<String>("el.tagName").await }
+        });
+
+        let id_resolve = expect(&mut mock, "DOM.resolveNode").await;
+        let sent = mock.last_sent();
+        assert_eq!(sent["params"]["backendNodeId"], 7);
+        assert!(
+            sent["params"].get("executionContextId").is_none(),
+            "no context, so that Chrome picks the main world of the node's frame",
+        );
+        mock.reply(
+            id_resolve,
+            json!({ "object": { "objectId": "R_MAIN", "type": "object", "subtype": "node" } }),
+        )
+        .await;
+
+        let id_call = expect(&mut mock, "Runtime.callFunctionOn").await;
+        let sent = mock.last_sent();
+        assert_eq!(sent["params"]["objectId"], "R_MAIN");
+        assert_eq!(sent["params"]["arguments"][0]["objectId"], "R_MAIN");
+        mock.reply(
+            id_call,
+            json!({ "result": { "type": "string", "value": "DIV" } }),
+        )
+        .await;
+
+        let id_release = expect(&mut mock, "Runtime.releaseObject").await;
+        assert_eq!(mock.last_sent()["params"]["objectId"], "R_MAIN");
+        mock.reply(id_release, json!({})).await;
+
+        assert_eq!(fut.await.unwrap().unwrap(), "DIV");
         conn.shutdown();
     }
 

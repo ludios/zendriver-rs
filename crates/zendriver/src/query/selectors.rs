@@ -74,22 +74,25 @@ impl QueryScope<'_> {
         }
     }
 
-    /// Execution-context id that `Runtime.evaluate` should target for
-    /// this scope, or `None` to let CDP pick the session's default
-    /// (which is the main-frame main-world for a Tab/Element scope).
+    /// Execution-context id that a document-wide query's `Runtime.evaluate`
+    /// targets: zendriver's isolated world in the current document of the
+    /// tab's main frame (Tab scope) or of the frame (Frame scope).
     ///
-    /// Frame scope must NOT use the session default — for a same-origin
-    /// iframe, the session is the parent tab's session and CDP's
-    /// "default context" is the *parent* document. A
-    /// `document.querySelectorAll(...)` evaluated without a contextId
-    /// would walk the parent DOM, not the iframe's, and find nothing
-    /// for selectors targeting iframe-only content. Returning the
-    /// frame's isolated-world contextId pins the eval to the iframe's
-    /// document.
+    /// The isolated world has its own globals and prototypes, so a page that
+    /// wraps `querySelectorAll`, `getBoundingClientRect` or the like neither
+    /// sees the query nor can falsify it. The element handles that the
+    /// query returns live in that world too, so everything later run on
+    /// them (actionability checks, `focus`, the value setter, ...) stays
+    /// there. A Frame scope also could not use the session's default
+    /// context: for a same-origin iframe, that is the parent's document.
+    ///
+    /// `None` for an Element scope, whose queries call functions on the
+    /// element's own handle instead, which is already in that world.
     pub(crate) async fn execution_context_id(&self) -> Result<Option<i64>> {
         match self {
-            QueryScope::Tab(_) | QueryScope::Element(_) => Ok(None),
+            QueryScope::Tab(t) => Ok(Some(t.ensure_isolated_world().await?)),
             QueryScope::Frame(f) => Ok(Some(f.ensure_isolated_world().await?)),
+            QueryScope::Element(_) => Ok(None),
         }
     }
 
@@ -169,32 +172,40 @@ impl SelectorKind {
 // Shared eval-in-scope helper
 // ---------------------------------------------------------------------
 
-/// Evaluate `expression` via `Runtime.evaluate`, pinned to `scope`'s
-/// execution context.
+/// Evaluate `expression` via `Runtime.evaluate` in `scope`'s execution
+/// context (see [`QueryScope::execution_context_id`]), so that a bare
+/// `document` in it is the scope's document, seen from zendriver's
+/// isolated world.
 ///
-/// For a `Frame` scope this sets `contextId` to the frame's isolated-world
-/// context (see [`QueryScope::execution_context_id`]) so a bare
-/// `document`/`document.querySelectorAll(...)` inside `expression`
-/// resolves against the *frame's* document rather than the parent tab's
-/// default context — the bug this helper exists to prevent recurring.
-/// For `Tab`/`Element` scope `execution_context_id()` is always `None`,
-/// so `contextId` is omitted and CDP falls back to the session's default
-/// (main-frame main-world) context, matching prior behavior exactly.
+/// If a navigation destroys that context between looking it up and the
+/// evaluation, the call is retried once in the new document's context.
+/// Without the retry, a `.one()` polling across a navigation could fail
+/// instead of waiting for the element on the next page.
 ///
 /// Every `Tab`/`Frame` match arm below (css/xpath/text/text_regex/
 /// predicate) routes through this one function instead of hand-rolling the
 /// `contextId` dance per resolver.
 async fn eval_expr_in_scope(scope: &QueryScope<'_>, expression: String) -> Result<Value> {
     let session = scope.session();
-    let ctx = scope.execution_context_id().await?;
-    let mut params = json!({
-        "expression": expression,
-        "returnByValue": false,
-    });
-    if let Some(id) = ctx {
-        params["contextId"] = json!(id);
+    for attempt in 0..2 {
+        let mut params = json!({
+            "expression": expression,
+            "returnByValue": false,
+        });
+        if let Some(id) = scope.execution_context_id().await? {
+            params["contextId"] = json!(id);
+        }
+        match session.call("Runtime.evaluate", params).await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                let e = ZendriverError::from(e);
+                if attempt > 0 || !crate::isolated_world::is_stale_context(&e) {
+                    return Err(e);
+                }
+            }
+        }
     }
-    Ok(session.call("Runtime.evaluate", params).await?)
+    unreachable!("the retry loop returns on both the Ok and the second-attempt Err arm")
 }
 
 // ---------------------------------------------------------------------
@@ -950,7 +961,7 @@ async fn describe_backend_id(session: &SessionHandle, object_id: &str) -> Result
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::test_support::expect;
+    use crate::test_support::{expect, expect_tab_query, serve_isolated_world};
     use zendriver_transport::SessionHandle;
     use zendriver_transport::testing::MockConnection;
 
@@ -975,7 +986,7 @@ mod tests {
             }
         });
 
-        let id = expect(&mut mock, "Runtime.evaluate").await;
+        let id = expect_tab_query(&mut mock).await;
         let expr = mock.last_sent()["params"]["expression"]
             .as_str()
             .unwrap()
@@ -989,6 +1000,41 @@ mod tests {
         assert!(hits.is_empty(), "null subtype must yield no matches");
         conn.shutdown();
         expr
+    }
+
+    /// A navigation can destroy the isolated world's context between its
+    /// lookup and the query's `Runtime.evaluate`. The query must then look
+    /// the world up again and retry once, rather than fail a `.one()` that
+    /// is polling across the navigation.
+    #[tokio::test]
+    async fn a_query_retries_once_in_a_fresh_context_after_a_stale_one() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let tab = Tab::new_for_test(sess);
+
+        let fut = tokio::spawn({
+            let t = tab.clone();
+            async move {
+                let scope = QueryScope::Tab(&t);
+                SelectorKind::Css("p".into()).resolve_many(&scope).await
+            }
+        });
+
+        let id = expect_tab_query(&mut mock).await;
+        mock.reply_err(id, -32000, "Cannot find context with specified id")
+            .await;
+
+        serve_isolated_world(&mut mock, 6).await;
+        let id = expect(&mut mock, "Runtime.evaluate").await;
+        assert_eq!(mock.last_sent()["params"]["contextId"], 6);
+        mock.reply(
+            id,
+            json!({ "result": { "type": "object", "subtype": "null" } }),
+        )
+        .await;
+
+        assert!(fut.await.unwrap().unwrap().is_empty());
+        conn.shutdown();
     }
 
     /// A query that matches nothing resolves to an empty vec, through the
@@ -1016,7 +1062,7 @@ mod tests {
             }
         });
 
-        let id_q = expect(&mut mock, "Runtime.evaluate").await;
+        let id_q = expect_tab_query(&mut mock).await;
         mock.reply(
             id_q,
             json!({ "result": { "objectId": "REmpty", "type": "object", "subtype": "array" } }),
@@ -1057,7 +1103,7 @@ mod tests {
             }
         });
 
-        let id = expect(&mut mock, "Runtime.evaluate").await;
+        let id = expect_tab_query(&mut mock).await;
         let description = "SyntaxError: Failed to execute 'querySelectorAll' on 'Document': \
                            'div[' is not a valid selector.";
         let thrown = json!({
@@ -1244,7 +1290,7 @@ mod tests {
             }
         });
 
-        let id_q = expect(&mut mock, "Runtime.evaluate").await;
+        let id_q = expect_tab_query(&mut mock).await;
         let sent = mock.last_sent()["params"]["expression"]
             .as_str()
             .unwrap()
@@ -1384,7 +1430,7 @@ mod tests {
             }
         });
 
-        let id_q = expect(&mut mock, "Runtime.evaluate").await;
+        let id_q = expect_tab_query(&mut mock).await;
         let sent = mock.last_sent()["params"]["expression"]
             .as_str()
             .unwrap()

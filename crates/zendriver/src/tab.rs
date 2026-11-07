@@ -3370,7 +3370,7 @@ impl zendriver_stealth::JsProbe for Tab {
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::test_support::expect;
+    use crate::test_support::{expect, expect_tab_query};
     use zendriver_transport::testing::MockConnection;
 
     #[tokio::test]
@@ -5152,7 +5152,7 @@ mod tests {
 
         // Step 1: find().css("body").one() resolves via querySelectorAll →
         // getProperties → describeNode.
-        let id_q = mock.expect_cmd("Runtime.evaluate").await;
+        let id_q = expect_tab_query(&mut mock).await;
         let expr = mock.last_sent()["params"]["expression"]
             .as_str()
             .unwrap_or("")
@@ -5396,7 +5396,7 @@ mod tests {
         // then a describeNode per node. Return one node so `many()` resolves
         // on the first poll (an empty result would re-poll until the 10s
         // default timeout — see `many_or_empty_returns_empty_vec_on_timeout`).
-        let id = mock.expect_cmd("Runtime.evaluate").await;
+        let id = expect_tab_query(&mut mock).await;
         let expr = mock.last_sent()["params"]["expression"]
             .as_str()
             .unwrap_or("")

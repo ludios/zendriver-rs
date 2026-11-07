@@ -37,6 +37,48 @@ pub(crate) async fn expect(mock: &mut MockConnection, method: &str) -> u64 {
     }
 }
 
+/// Serve the `Page.createIsolatedWorld` that a document-wide query or an
+/// isolated-world evaluation sends before its `Runtime.evaluate`, answering
+/// with execution context `context`. On a tab's first such call, also
+/// answer the `Page.getFrameTree` before it, which looks up the tab's main
+/// frame (as `MAIN_FRAME`). Skips any other command, as [`expect`] does.
+pub(crate) async fn serve_isolated_world(mock: &mut MockConnection, context: i64) {
+    loop {
+        let Some((method, id)) = mock.recv_cmd_timeout(EXPECT_TIMEOUT).await else {
+            panic!("timed out waiting for Page.createIsolatedWorld");
+        };
+        match method.as_str() {
+            "Page.getFrameTree" => {
+                let tree = json!({ "frameTree": { "frame": { "id": "MAIN_FRAME" } } });
+                mock.reply(id, tree).await;
+            }
+            "Page.createIsolatedWorld" => {
+                mock.reply(id, json!({ "executionContextId": context }))
+                    .await;
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The execution context that [`expect_tab_query`] gives the isolated world.
+pub(crate) const TAB_QUERY_CONTEXT: i64 = 5;
+
+/// Await the `Runtime.evaluate` of a document-wide query on a tab, after
+/// serving its [`serve_isolated_world`] (as [`TAB_QUERY_CONTEXT`]), and
+/// return its id. Asserts that the query runs in that context.
+pub(crate) async fn expect_tab_query(mock: &mut MockConnection) -> u64 {
+    serve_isolated_world(mock, TAB_QUERY_CONTEXT).await;
+    let id = expect(mock, "Runtime.evaluate").await;
+    assert_eq!(
+        mock.last_sent()["params"]["contextId"],
+        TAB_QUERY_CONTEXT,
+        "a tab-scope query must run in the isolated world",
+    );
+    id
+}
+
 /// Await `method`, returning `None` if nothing arrives within
 /// [`SILENCE_TIMEOUT`].
 ///

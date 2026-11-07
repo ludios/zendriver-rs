@@ -11,19 +11,16 @@
 //! answer is not "here": cases 2 to 5 shipped broken and are fixed in the
 //! **parent** commit of the stack, in `query/actionability.rs`,
 //! `input/keyboard.rs` and `tab.rs` — none of which this commit touches.
-//! Case 1 is a **forward guard** rather than a regression test: the defect it
-//! describes is real and was really observed, but nothing in this tree fixes
-//! it, because element reads no longer go through the isolated world at all
-//! (`attr` / `inner_text` route through `call_on_main` →
-//! `Runtime.callFunctionOn` on the element's own handle, so there is no
-//! cached `contextId` left to go stale). It passes today for that reason, and
-//! it is kept so that re-landing the isolated-world move cannot re-land the
-//! bug with it. `tab.rs`'s recovery path still matches only
-//! `"Cannot find context"`, so the trap is still armed for whoever does.
+//! Case 1 guards the move of element queries and actions into the isolated
+//! world, which has since been re-landed: queries now look up the isolated
+//! world's context on every call instead of caching it, and `attr` /
+//! `inner_text` call `Runtime.callFunctionOn` on the element's own handle,
+//! which the query created in that world. So there is no cached `contextId`
+//! left to go stale.
 //!
-//! 1. **Reads after a cross-document navigation.** *(forward guard)* Element
-//!    reads were moved into the tab's isolated world, whose
-//!    `executionContextId` is cached per tab. A navigation destroys that
+//! 1. **Reads after a cross-document navigation.** Element reads were moved
+//!    into the tab's isolated world, whose `executionContextId` was cached
+//!    per tab. A navigation destroys that
 //!    context; the cache was never invalidated, and the recovery path matched
 //!    only `"Cannot find context"` — the wording `Runtime.evaluate` produces.
 //!    `DOM.resolveNode` instead answers `-32000 "Node with given id does not
@@ -96,9 +93,8 @@
 //!    the capture also sends `captureBeyondViewport`. Fixed in this commit.
 //!
 //! None of these tests asserts *which* world the JS runs in; that is an
-//! implementation choice. They assert the observable behavior any world
-//! choice has to preserve, so they stay meaningful when the isolated-world
-//! move is re-landed with per-frame world resolution.
+//! implementation choice, tested in `isolated_world.rs`. They assert the
+//! observable behavior any world choice has to preserve.
 //!
 //! Cases 6, 7 and 8 are the ones a unit test cannot reach: each pins a string
 //! the code puts on the wire, and in all three the string is well-formed and

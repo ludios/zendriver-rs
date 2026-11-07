@@ -1793,6 +1793,7 @@ fn describe_predicates(pred: &PredicateSet) -> String {
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::test_support::expect_tab_query;
     use serde_json::json;
     use zendriver_transport::SessionHandle;
     use zendriver_transport::testing::MockConnection;
@@ -1810,7 +1811,7 @@ mod tests {
 
         // T12: one() now resolves via SelectorKind::resolve_many, which
         // for CSS dispatches `Array.from(document.querySelectorAll(...))`.
-        let id_q = mock.expect_cmd("Runtime.evaluate").await;
+        let id_q = expect_tab_query(&mut mock).await;
         let sent = mock.last_sent()["params"]["expression"]
             .as_str()
             .unwrap()
@@ -1884,7 +1885,7 @@ mod tests {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(220)) => break,
-                cmd = mock.expect_cmd("Runtime.evaluate") => {
+                cmd = expect_tab_query(&mut mock) => {
                     mock.reply(
                         cmd,
                         json!({ "result": { "objectId": "RArrEmpty", "type": "object", "subtype": "array" } }),
@@ -1929,7 +1930,7 @@ mod tests {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(200)) => break,
-                cmd = mock.expect_cmd("Runtime.evaluate") => {
+                cmd = expect_tab_query(&mut mock) => {
                     mock.reply(
                         cmd,
                         json!({ "result": { "objectId": "RArrEmpty", "type": "object", "subtype": "array" } }),
@@ -2183,7 +2184,7 @@ mod tests {
             async move { t.find_all().css(".item").many().await }
         });
 
-        let id_q = mock.expect_cmd("Runtime.evaluate").await;
+        let id_q = expect_tab_query(&mut mock).await;
         let sent = mock.last_sent()["params"]["expression"]
             .as_str()
             .unwrap()
@@ -2256,7 +2257,7 @@ mod tests {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(200)) => break,
-                cmd = mock.expect_cmd("Runtime.evaluate") => {
+                cmd = expect_tab_query(&mut mock) => {
                     mock.reply(
                         cmd,
                         json!({ "result": { "objectId": "RArrEmpty", "type": "object", "subtype": "array" } }),
@@ -2293,7 +2294,7 @@ mod tests {
             async move { t.find().css(".item").nth(1).one().await }
         });
 
-        let id_q = mock.expect_cmd("Runtime.evaluate").await;
+        let id_q = expect_tab_query(&mut mock).await;
         mock.reply(
             id_q,
             json!({ "result": { "objectId": "RArr", "type": "object", "subtype": "array" } }),
@@ -2351,7 +2352,7 @@ mod tests {
             async move { t.find().text("accept all").best_match().one().await }
         });
 
-        let id_q = mock.expect_cmd("Runtime.evaluate").await;
+        let id_q = expect_tab_query(&mut mock).await;
         let sent = mock.last_sent()["params"]["expression"]
             .as_str()
             .unwrap()
@@ -2420,7 +2421,7 @@ mod tests {
             async move { t.find().css("#b").best_match().one().await }
         });
 
-        let id_q = mock.expect_cmd("Runtime.evaluate").await;
+        let id_q = expect_tab_query(&mut mock).await;
         let sent = mock.last_sent()["params"]["expression"]
             .as_str()
             .unwrap()
@@ -2655,7 +2656,7 @@ mod tests {
         });
 
         // Main (Tab) scope resolves first and returns an empty array.
-        let id_q = mock.expect_cmd("Runtime.evaluate").await;
+        let id_q = expect_tab_query(&mut mock).await;
         assert_eq!(
             mock.last_sent()["sessionId"],
             "S_TAB",

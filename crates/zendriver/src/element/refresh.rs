@@ -214,6 +214,7 @@ mod tests {
 
     use crate::element::ElementInner;
     use crate::tab::Tab;
+    use crate::test_support::expect_tab_query;
 
     /// Build a Traversal-origin Element whose `parent` is a tracked
     /// Query/TabMain origin. Mirrors what `Element::parent()` produces
@@ -277,7 +278,7 @@ mod tests {
 
         // 1. Parent re-resolve via `resolve_many` → Runtime.evaluate with
         //    `Array.from(document.querySelectorAll('#root'))`.
-        let id_eval = mock.expect_cmd("Runtime.evaluate").await;
+        let id_eval = expect_tab_query(&mut mock).await;
         let sent = mock.last_sent()["params"]["expression"]
             .as_str()
             .unwrap()
@@ -387,7 +388,7 @@ mod tests {
         });
 
         // Level 2: grandparent re-resolve.
-        let id_eval = mock.expect_cmd("Runtime.evaluate").await;
+        let id_eval = expect_tab_query(&mut mock).await;
         assert!(
             mock.last_sent()["params"]["expression"]
                 .as_str()

@@ -174,6 +174,18 @@ zendriver finds without `Runtime.enable` (a well-known automation tell):
 `DOM.resolveNode` with no context id wraps the frame's document in that
 world, and V8 writes the world's context id into the returned object's id.
 
+Element queries (`find()` / `find_all()`) and everything done to the
+elements they return run in the isolated world too, that of the frame
+the element is in: the reads, the actionability checks,
+`scroll_into_view`, `focus`, the value setter. So
+a page that wraps `querySelectorAll`, `getBoundingClientRect`,
+`dispatchEvent` and the like neither sees these calls nor can falsify
+their answers; DOM changes and the events they fire still reach the
+page. `element.evaluate(...)` runs there too, and
+`element.evaluate_main(...)` runs in the main world of the element's
+frame, where page globals and what page scripts put on the element are
+visible.
+
 Each frame has its own isolated world, and `tab.evaluate(...)` uses the
 main frame's. Every call asks Chrome for the world's context in the
 frame's current document (`Page.createIsolatedWorld`, which returns the
