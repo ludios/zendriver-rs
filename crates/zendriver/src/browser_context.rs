@@ -41,8 +41,9 @@ impl BrowserContext {
     /// # Errors
     ///
     /// Returns [`ZendriverError::Navigation`] if the CDP response is
-    /// missing `targetId`, and [`ZendriverError::TabNotFound`] if the
-    /// internal tab registrar fails to register the new tab within 5s.
+    /// missing `targetId`, and [`ZendriverError::TabNotFound`] if the new
+    /// tab isn't set up: an observer fails on its target, or the observers
+    /// take longer than 5 s each.
     pub async fn new_tab_at(&self, url: impl Into<String>) -> Result<Tab, ZendriverError> {
         self.browser
             .create_tab(url.into(), json!({ "browserContextId": self.id }))

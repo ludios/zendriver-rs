@@ -8,7 +8,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use zendriver::{Browser, ObserverError, PausedSession, TargetObserver};
+use zendriver::{Browser, ObserverError, PausedSession, TargetObserver, ZendriverError};
 use zendriver_testkit::{FixtureServer, SITE_A, eval, launch_for_test, load};
 
 /// The registry holds one tab per target, and the main tab's is the main
@@ -94,4 +94,42 @@ async fn observers_run_once_on_the_main_target_before_launch_returns() {
     load(&main, &server.url(SITE_A, "/plain")).await;
     assert_eq!(eval(&main, "window.__countRunsScript").await, json!(1));
     browser.close().await;
+}
+
+/// An observer that fails on each page target.
+#[derive(Debug)]
+struct FailOnPages;
+
+#[async_trait::async_trait]
+impl TargetObserver for FailOnPages {
+    fn name(&self) -> &'static str {
+        "fail-on-pages"
+    }
+
+    async fn on_target_attached(&self, session: PausedSession<'_>) -> Result<(), ObserverError> {
+        if session.target_info.kind != "page" {
+            return Ok(());
+        }
+        Err(ObserverError::Other("failing on purpose".into()))
+    }
+}
+
+/// When an observer fails on the main target, `launch` fails at once, as
+/// Chrome reports that the transport detached the target, and not once the
+/// main tab's setup budget (20 s here) has run out.
+#[tokio::test]
+async fn launch_fails_at_once_when_an_observer_fails_on_the_main_target() {
+    let started = tokio::time::Instant::now();
+    let launched = Browser::builder()
+        .headless(true)
+        .observer(Arc::new(FailOnPages))
+        .launch()
+        .await;
+    let elapsed = started.elapsed();
+    let err = launched.expect_err("launched despite the failing observer");
+    assert!(matches!(err, ZendriverError::TabNotFound(_)), "{err:?}");
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "failed only after {elapsed:?}"
+    );
 }

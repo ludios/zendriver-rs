@@ -1811,8 +1811,9 @@ impl BrowserBuilder {
     /// always runs last, after every observer registered here — a ready
     /// barrier that keeps a `Tab` from being handed back until every
     /// observer above it (including this one) has finished running. That
-    /// holds for the main tab too: `launch` and `connect` return only once
-    /// the observers have finished on it.
+    /// holds for the main tab too (and, on `connect`, for the tabs already
+    /// open): `launch` and `connect` return only once the observer chain has
+    /// run on it.
     ///
     /// # Examples
     ///
@@ -2057,7 +2058,16 @@ pub struct Browser {
 #[derive(Debug)]
 pub(crate) struct BrowserInner {
     pub(crate) conn: Connection,
-    pub(crate) main_tab: Tab,
+    /// The id of the page target that [`Self::main_tab`] drives.
+    pub(crate) main_target_id: String,
+    /// The tab of the page that Chrome had open when zendriver connected (on
+    /// `launch`, the page that Chrome opens itself). Set by
+    /// [`finish_connect`], once the [`TabRegistrar`] has set up the tab,
+    /// before any [`Browser`] holds this `BrowserInner`.
+    pub(crate) main_tab: OnceLock<Tab>,
+    /// How long a new page target's tab may take to be set up: see
+    /// [`tab_setup_budget`].
+    pub(crate) tab_setup_budget: Duration,
     /// CDP `browserContextId` of the default `BrowserContext`, as
     /// `find_default_context_id` finds it at connect. Chrome names the
     /// default context too, but Chrome before ~153 rejects that id in
@@ -2098,9 +2108,8 @@ pub(crate) struct BrowserInner {
     /// the transport, and no `Child` is held so `kill_on_drop` never fires).
     pub(crate) owns_process: bool,
     /// Browser-wide tab registry keyed by `sessionId`. Populated by the
-    /// [`TabRegistrar`] observer on `Target.attachedToTarget` (and the
-    /// initial main tab, inserted manually after construction); pruned on
-    /// `Target.detachedFromTarget`. Used by `Browser::new_tab` to discover
+    /// [`TabRegistrar`] observer on `Target.attachedToTarget` (the main tab
+    /// included); pruned on `Target.detachedFromTarget`. Used by `Browser::new_tab` to discover
     /// the [`Tab`] handle for a freshly-created page target and by
     /// `Browser::tabs` / `Browser::tab_count` for snapshot reads.
     pub(crate) tabs: tokio::sync::RwLock<HashMap<String, Tab>>,
@@ -2206,9 +2215,7 @@ impl BrowserInner {
     /// # Errors
     ///
     /// Returns [`ZendriverError::Navigation`] if the response lacks
-    /// `targetId`, and [`ZendriverError::TabNotFound`] if the registrar
-    /// doesn't register the tab within 5s — usually a sign that auto-attach
-    /// is misconfigured or the registrar observer crashed.
+    /// `targetId`, and the errors of [`Self::wait_for_tab`].
     pub(crate) async fn create_tab(
         &self,
         url: String,
@@ -2217,6 +2224,7 @@ impl BrowserInner {
         // Chrome opens an empty URL as about:blank, and ignores its case.
         let navigates = !url.is_empty() && !url.eq_ignore_ascii_case("about:blank");
         params["url"] = serde_json::Value::String(url);
+        let mut events = self.conn.subscribe_raw_accounted();
         let res = self
             .conn
             .call_raw("Target.createTarget", params, None)
@@ -2229,19 +2237,40 @@ impl BrowserInner {
             })?
             .to_string();
 
-        // Wait for the TabRegistrar observer to insert the new Tab.
-        // The 5s outer bound covers the typical CDP roundtrip + observer
-        // chain latency (stealth → tab-registrar) with comfortable
-        // headroom; instead of polling, we wait on `tabs_changed`, which
-        // the registrar fires on every tabs-map mutation. The notification
-        // is `enable()`d before each read so a notify that lands between
-        // the read and the wait is still delivered.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let notif = self.tabs_changed.notified();
-            tokio::pin!(notif);
-            notif.as_mut().enable();
+        let tab = self.wait_for_tab(&mut events, &target_id).await?;
+        if navigates {
+            tab.arm_initial_navigation().await;
+        }
+        Ok(tab)
+    }
 
+    /// Wait for the [`TabRegistrar`] to register the tab of the page target
+    /// `target_id`, which it does once the observer chain on the target's
+    /// session has run.
+    ///
+    /// `events` is a subscription to [`Self::conn`] made before Chrome could
+    /// attach the target, so that it holds the target's detach, if any.
+    ///
+    /// Returns the tab. Returns [`ZendriverError::TabNotFound`] at once if
+    /// Chrome detaches the target first (as the transport does when an
+    /// observer fails: the log says which), or once
+    /// [`Self::tab_setup_budget`] has elapsed; and
+    /// [`ZendriverError::Disconnected`] if the connection ends.
+    pub(crate) async fn wait_for_tab(
+        &self,
+        events: &mut (impl futures::Stream<Item = zendriver_transport::AccountedRawEvent> + Unpin),
+        target_id: &str,
+    ) -> Result<Tab, ZendriverError> {
+        use futures::StreamExt;
+        use zendriver_transport::AccountedRawEvent;
+
+        let deadline = tokio::time::Instant::now() + self.tab_setup_budget;
+        loop {
+            // Enabled before the read, so that an insert between the read
+            // and the wait still wakes the wait.
+            let inserted = self.tabs_changed.notified();
+            tokio::pin!(inserted);
+            inserted.as_mut().enable();
             let tab = self
                 .tabs
                 .read()
@@ -2250,19 +2279,35 @@ impl BrowserInner {
                 .find(|t| t.target_id() == target_id)
                 .cloned();
             if let Some(tab) = tab {
-                if navigates {
-                    tab.arm_initial_navigation().await;
-                }
                 return Ok(tab);
             }
 
-            if tokio::time::Instant::now() >= deadline {
-                return Err(ZendriverError::TabNotFound(target_id));
-            }
-
             tokio::select! {
-                () = notif => {}
-                () = tokio::time::sleep_until(deadline) => {}
+                () = inserted => {}
+                event = events.next() => match event {
+                    // `targetId` is deprecated in this event, but Chrome
+                    // sends it; without it, the wait ends at the deadline.
+                    Some(AccountedRawEvent::Event { event, .. })
+                        if event.method == "Target.detachedFromTarget"
+                            && event.params["targetId"] == target_id =>
+                    {
+                        warn!(target_id, "the target was detached before its tab was set up");
+                        return Err(ZendriverError::TabNotFound(target_id.to_string()));
+                    }
+                    Some(
+                        AccountedRawEvent::Disconnected { .. } | AccountedRawEvent::Shutdown { .. },
+                    )
+                    | None => return Err(ZendriverError::Disconnected),
+                    Some(_) => {}
+                },
+                () = tokio::time::sleep_until(deadline) => {
+                    warn!(
+                        target_id,
+                        budget = ?self.tab_setup_budget,
+                        "the target's tab was not set up within the budget",
+                    );
+                    return Err(ZendriverError::TabNotFound(target_id.to_string()));
+                }
             }
         }
     }
@@ -2372,7 +2417,9 @@ pub(crate) fn test_only_inner_with(
         map.insert("S1".to_string(), main_tab.clone());
         let mut inner = BrowserInner {
             conn,
-            main_tab,
+            main_target_id: "T1".to_string(),
+            main_tab: OnceLock::from(main_tab),
+            tab_setup_budget: Duration::from_secs(5),
             default_context_id: None,
             download_behaviors: Default::default(),
             #[cfg(feature = "expect")]
@@ -2470,6 +2517,16 @@ fn auto_attach_params() -> serde_json::Value {
     })
 }
 
+/// Whether `url` is one of Chrome's own pages (`chrome://newtab/`,
+/// `devtools://…`, an extension's page, …), which the [`TabRegistrar`]
+/// doesn't set up as a tab, unless it's the main tab's.
+fn is_chrome_page(url: &str) -> bool {
+    url.starts_with("chrome://")
+        || url.starts_with("devtools://")
+        || url.starts_with("chrome-extension://")
+        || url.starts_with("chrome-untrusted://")
+}
+
 /// [`TargetObserver`] that maintains [`BrowserInner::tabs`] in step with
 /// CDP target lifecycle events.
 ///
@@ -2483,10 +2540,7 @@ fn auto_attach_params() -> serde_json::Value {
 /// observer chain does not extend the browser's lifetime — if the browser is
 /// dropped before a target event arrives, the upgrade fails silently and
 /// the event is ignored. The weak ref is wired in via [`OnceLock::set`]
-/// after the surrounding [`Arc::new_cyclic`] resolves. Before that, the
-/// registrar registers no tab: it only records each page that reaches it,
-/// so that [`finish_connect`] can build the main tab on the main target's
-/// session (see [`TabRegistrar::early_session`]).
+/// by [`finish_connect`], before it lets Chrome attach any target.
 ///
 /// Registered LAST in the observer chain — after [`StealthObserver`], every
 /// user-supplied [`BrowserBuilder::observer`], and the opt-in
@@ -2512,10 +2566,6 @@ fn auto_attach_params() -> serde_json::Value {
 pub(crate) struct TabRegistrar {
     browser: OnceLock<Weak<BrowserInner>>,
     input_profile: zendriver_stealth::InputProfile,
-    /// Each page target whose observer chain reached this registrar before
-    /// [`Self::set_browser`]: target id → id of the session that the chain
-    /// ran on.
-    early_pages: tokio::sync::watch::Sender<HashMap<String, String>>,
 }
 
 impl TabRegistrar {
@@ -2523,33 +2573,13 @@ impl TabRegistrar {
         Self {
             browser: OnceLock::new(),
             input_profile,
-            early_pages: tokio::sync::watch::Sender::new(HashMap::new()),
         }
     }
 
-    /// Wire the weak [`BrowserInner`] ref. Called once after
-    /// [`Arc::new_cyclic`] resolves; subsequent calls are silently ignored.
+    /// Wire the weak [`BrowserInner`] ref. Called once, by
+    /// [`finish_connect`]; subsequent calls are silently ignored.
     fn set_browser(&self, browser: Weak<BrowserInner>) {
         let _ = self.browser.set(browser);
-    }
-
-    /// Wait for an observer chain on the page target `target_id` to reach
-    /// this registrar before [`Self::set_browser`], and so to have finished
-    /// every observer before it.
-    ///
-    /// `budget` bounds the wait.
-    ///
-    /// Returns the id of the session that the chain ran on, or `None` if no
-    /// chain on `target_id` reached this registrar within `budget` (an
-    /// observer that failed detaches the target, and so ends its chain).
-    async fn early_session(&self, target_id: &str, budget: Duration) -> Option<String> {
-        let mut pages = self.early_pages.subscribe();
-        let reached = tokio::time::timeout(budget, pages.wait_for(|p| p.contains_key(target_id)));
-        // `wait_for` fails only once the sender is dropped, which `self` holds.
-        let Ok(Ok(pages)) = reached.await else {
-            return None;
-        };
-        pages.get(target_id).cloned()
     }
 }
 
@@ -2561,20 +2591,9 @@ impl TargetObserver for TabRegistrar {
 
     async fn on_target_attached(&self, session: PausedSession<'_>) -> Result<(), ObserverError> {
         let Some(weak) = self.browser.get() else {
-            // Not wired yet: `finish_connect` is still building the browser.
-            // It builds the main tab itself, on the session recorded here.
-            // The other pages that land here are, on `launch`, stray windows
-            // that it closes, and on `connect`, the user's own tabs, which
-            // aren't tracked.
-            if session.target_info.kind == "page" {
-                self.early_pages.send_modify(|pages| {
-                    pages.insert(
-                        session.target_info.target_id.clone(),
-                        session.session_id.to_string(),
-                    );
-                });
-            }
-            debug!(
+            // `finish_connect` wires the registrar before it turns on
+            // auto-attach, so no target should be attached before that.
+            warn!(
                 target_id = %session.target_info.target_id,
                 url = %session.target_info.url,
                 "tab-registrar: target attached before the browser was built; not registered"
@@ -2619,12 +2638,11 @@ impl TargetObserver for TabRegistrar {
                 // one of the two live candidates for the double-window
                 // symptom, so make it observable rather than inferring it from
                 // a screenshot.
+                //
+                // The main target is never skipped: on `connect`, the user's
+                // first tab may well be a `chrome://newtab/`.
                 let url = &session.target_info.url;
-                if url.starts_with("chrome://")
-                    || url.starts_with("devtools://")
-                    || url.starts_with("chrome-extension://")
-                    || url.starts_with("chrome-untrusted://")
-                {
+                if is_chrome_page(url) && session.target_info.target_id != browser.main_target_id {
                     warn!(
                         url = %url,
                         target_id = %session.target_info.target_id,
@@ -2881,9 +2899,9 @@ impl QuitOutcome {
 /// How long [`resolve_ws_from_http`] waits for the `/json/version` round-trip.
 const JSON_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Budget for everything *after* Chrome advertises its WS endpoint: the
-/// WebSocket dial plus the initial `Target.setAutoAttach` / `Target.getTargets`
-/// round-trips, and the wait for the observer chain on the main target.
+/// Budget for everything *after* Chrome advertises its WS endpoint, except
+/// the main tab's setup, whose budget `launch` adds: the WebSocket dial plus
+/// the initial `Target.getTargets` / `Target.setAutoAttach` round-trips.
 ///
 /// Before this existed, every step past the `WS_ENDPOINT_TIMEOUT`-guarded
 /// stderr read was unbounded, so a Chrome whose CDP responder was slow or
@@ -3170,11 +3188,12 @@ pub(crate) struct FinishConnect {
     /// The freshly-established transport (already wired with the observer
     /// chain via `connect_with_observers`).
     pub(crate) conn: Connection,
-    /// The tab registrar from the observer chain; its weak `BrowserInner`
-    /// ref is wired here once the cyclic `Arc` resolves.
+    /// The tab registrar from the observer chain; [`finish_connect`] wires
+    /// its weak `BrowserInner` ref.
     pub(crate) registrar: Arc<TabRegistrar>,
-    /// Per-tab input profile cached on `BrowserInner` for new-tab construction.
-    pub(crate) input_profile: zendriver_stealth::InputProfile,
+    /// How long a new page target's tab may take to be set up: see
+    /// [`tab_setup_budget`].
+    pub(crate) tab_setup_budget: Duration,
     /// The spawned Chrome process — occupied for `launch`, empty for `connect`
     /// (which attaches to a process it does not own). Taken out of the slot and
     /// installed on [`BrowserInner`] once the handshake succeeds; see
@@ -3185,10 +3204,11 @@ pub(crate) struct FinishConnect {
     /// (not our process to kill) and on every other platform.
     ///
     /// Owned by this struct — and therefore by the handshake future — until
-    /// [`finish_connect`] installs it on [`BrowserInner`]. That is deliberate:
-    /// if the handshake budget expires, dropping the future drops the job,
-    /// which kills the entire tree rather than leaking the helpers of a Chrome
-    /// that never finished starting.
+    /// [`finish_connect`] installs it on [`BrowserInner`], and then by that.
+    /// That is deliberate: if the handshake fails or its budget expires,
+    /// dropping the future (and so the `BrowserInner`) drops the job, which
+    /// kills the entire tree rather than leaking the helpers of a Chrome that
+    /// never finished starting.
     pub(crate) job: ProcessJob,
     /// Owned `user_data_dir` tempdir — `Some` only when `launch` allocated one.
     pub(crate) owned_tmp: Option<TempDir>,
@@ -3204,12 +3224,11 @@ pub(crate) struct FinishConnect {
     pub(crate) owns_process: bool,
     /// Combined tracker matcher built by `launch` (`None` for `connect` and
     /// when blocking is unconfigured). Stored on `BrowserInner` and installed
-    /// on the main tab + future tabs.
+    /// on every tab.
     #[cfg(feature = "tracker-blocking")]
     pub(crate) tracker_matcher: Option<std::sync::Arc<crate::HostMatcher>>,
     /// [`BrowserBuilder::proxy_auth`]'s credentials. Stored on
-    /// `BrowserInner` and given to the main tab + future tabs in the
-    /// default context.
+    /// `BrowserInner` and given to every tab in the default context.
     #[cfg(feature = "interception")]
     pub(crate) proxy_auth: Option<crate::proxy::ProxyCredentials>,
 }
@@ -3291,22 +3310,28 @@ async fn find_default_context_id(
         .map(str::to_string)
 }
 
-/// How long [`finish_connect`] waits for the observer chain on the main
-/// target to finish.
+/// How long a new page target's tab may take to be set up, when the
+/// observer chain on it has `observers` observers, the [`TabRegistrar`]
+/// included.
 ///
-/// Generous, because a failed launch costs more than a slow one: each
-/// observer in the chain may take up to the transport's observer timeout
-/// (5 s by default) before the chain skips it or detaches the target.
-const MAIN_TAB_SETUP_TIMEOUT: Duration = Duration::from_secs(20);
+/// The chain ends within the transport's [`DEFAULT_OBSERVER_TIMEOUT`] per
+/// observer, as the transport detaches the target at an observer that runs
+/// out of time, or skips a `BestEffort` one. The rest allows for Chrome's
+/// round trips around the chain.
+///
+/// [`DEFAULT_OBSERVER_TIMEOUT`]: zendriver_transport::DEFAULT_OBSERVER_TIMEOUT
+fn tab_setup_budget(observers: usize) -> Duration {
+    let observers = u32::try_from(observers).unwrap_or(u32::MAX);
+    zendriver_transport::DEFAULT_OBSERVER_TIMEOUT.saturating_mul(observers) + Duration::from_secs(5)
+}
 
 /// Run the post-connect CDP handshake and assemble [`BrowserInner`].
 ///
 /// Shared by [`BrowserBuilder::launch`] and [`BrowserBuilder::connect`]: both
 /// arrive here with a live [`Connection`] (observer chain already attached)
-/// and need the same sequence — enable browser-scoped auto-attach, discover
-/// the main page target and wait for the observer chain on the session that
-/// auto-attach opened on it, build the self-referential `Arc<BrowserInner>`,
-/// then backfill the registrar's weak ref and the main-tab registry entry.
+/// and need the same sequence — discover the main page target, build the
+/// `BrowserInner` and wire the registrar to it, enable browser-scoped
+/// auto-attach, and wait for the registrar to set up the main tab.
 ///
 /// The only spawn-vs-attach differences are carried in [`FinishConnect`]: the
 /// owned `Child` / `TempDir` (present only for `launch`) and the
@@ -3314,16 +3339,16 @@ const MAIN_TAB_SETUP_TIMEOUT: Duration = Duration::from_secs(20);
 ///
 /// # Errors
 ///
-/// Returns [`ZendriverError::TabNotFound`] if the observer chain on the main
-/// target doesn't finish within [`MAIN_TAB_SETUP_TIMEOUT`] (an observer
-/// failed, say), besides the errors of the CDP calls.
+/// Returns [`ZendriverError::Navigation`] if Chrome lists no page target,
+/// the errors of [`BrowserInner::wait_for_tab`] for the main tab, and the
+/// errors of the CDP calls.
 pub(crate) async fn finish_connect(
     args: FinishConnect,
 ) -> Result<Arc<BrowserInner>, ZendriverError> {
     let FinishConnect {
         conn,
         registrar,
-        input_profile,
+        tab_setup_budget,
         child,
         job,
         owned_tmp,
@@ -3336,14 +3361,6 @@ pub(crate) async fn finish_connect(
         #[cfg(feature = "interception")]
         proxy_auth,
     } = args;
-
-    // Enable auto-attach with debugger-pause. Sent at browser scope (no
-    // session_id), so Chrome attaches every page target that exists (not
-    // paused, as it's running already) before it replies, and every page
-    // target that appears later (paused until the observer chain on it has
-    // finished). The main tab's session is one of these.
-    conn.call_raw("Target.setAutoAttach", auto_attach_params(), None)
-        .await?;
 
     // Discover the initial page target via Target.getTargets.
     //
@@ -3370,64 +3387,86 @@ pub(crate) async fn finish_connect(
     let targets = list["targetInfos"].as_array().unwrap_or(&no_targets);
     // The first page target. A target of another type (a worker, say) is no
     // tab to drive.
-    let main_target = targets.iter().find(|t| t["type"] == "page");
-    let target_id = main_target
+    let target_id = targets
+        .iter()
+        .find(|t| t["type"] == "page")
         .and_then(|t| t["targetId"].as_str())
         .ok_or_else(|| ZendriverError::Navigation("no initial page target found".into()))?
         .to_string();
     let default_context_id = find_default_context_id(&conn, targets).await;
-    // Like every tab, the main tab names its context only when it isn't the
-    // default one (see `BrowserInner::default_context_id`).
-    let main_context_id = main_target
-        .and_then(|t| t["browserContextId"].as_str())
-        .filter(|id| default_context_id.as_deref() != Some(*id))
-        .map(str::to_string);
 
     // Every *other* page target is a window we are not driving. Chrome opens
     // some on its own (a Windows first-run window, a `chrome://newtab/`), and
     // `.find()`-ing one target used to silently discard the rest: invisible to
     // `Browser::tabs()`, and closed by nothing — `close()` only ever killed the
-    // one tracked PID. Collect them now, sweep them once we are attached.
+    // one tracked PID. Collect them now, and sweep them before auto-attach,
+    // which would set each of them up as a tab.
     //
     // Only for a Chrome we spawned. On the `connect` path those extra pages are
     // the user's own tabs in their own browser; closing them would be
-    // destructive and is emphatically not ours to do. Non-page targets (workers,
-    // etc.) are never swept — they are not windows.
-    let strays: Vec<String> = if owns_process {
-        targets
-            .iter()
-            .filter(|t| t["type"] == "page")
-            .filter_map(|t| t["targetId"].as_str())
-            .filter(|id| *id != target_id)
-            .map(str::to_string)
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // destructive and is emphatically not ours to do: they are set up as tabs
+    // instead, but for Chrome's own pages, which the registrar leaves out.
+    // Non-page targets (workers, etc.) are never swept — they are not windows.
+    let others = targets
+        .iter()
+        .filter(|t| t["type"] == "page" && t["targetId"] != target_id.as_str());
+    let mut strays = Vec::new();
+    let mut user_tabs = Vec::new();
+    for page in others {
+        let Some(id) = page["targetId"].as_str() else {
+            continue;
+        };
+        if owns_process {
+            strays.push(id.to_string());
+        } else if !is_chrome_page(page["url"].as_str().unwrap_or_default()) {
+            user_tabs.push(id.to_string());
+        }
+    }
 
-    // Take the session that auto-attach opened on the main target, once the
-    // observer chain on it has finished, so the caller never gets a main tab
-    // whose stealth or user setup is still under way. Attaching the target
-    // once more instead would run the whole chain a second time: every
-    // stealth patch, and every script of a user's observer, twice.
-    let Some(session_id) = registrar
-        .early_session(&target_id, MAIN_TAB_SETUP_TIMEOUT)
-        .await
-    else {
-        warn!(
-            target_id,
-            waited = ?MAIN_TAB_SETUP_TIMEOUT,
-            "the observer chain on the main tab's target did not finish; if an observer \
-             failed, the log says which",
-        );
-        return Err(ZendriverError::TabNotFound(target_id));
-    };
+    // The registrar needs the `BrowserInner` to set up any tab, the main tab
+    // included, so it's built (without its main tab) and wired before
+    // auto-attach. From here on, a failure drops it, which shuts the
+    // connection down.
+    let inner = Arc::new(BrowserInner {
+        conn,
+        main_target_id: target_id.clone(),
+        main_tab: OnceLock::new(),
+        tab_setup_budget,
+        default_context_id,
+        download_behaviors: Default::default(),
+        #[cfg(feature = "expect")]
+        downloads: Default::default(),
+        // The child is moved in only at the end, once the handshake has
+        // succeeded: until then `guard_handshake` owns the cleanup, and if
+        // the budget expires, the child is still in the slot and gets killed
+        // there.
+        child: tokio::sync::Mutex::new(None),
+        // From here on, the job belongs to this `BrowserInner`, which drops
+        // with the handshake future when the handshake fails or runs out of
+        // time (or a little later, if a registrar run on a target still holds
+        // it), and so still takes the whole Chrome tree down.
+        job,
+        _user_data: owned_tmp,
+        _extension_dirs: extension_dirs,
+        owns_process,
+        tabs: tokio::sync::RwLock::new(HashMap::new()),
+        debug_host_port,
+        ws_url,
+        tabs_changed: tokio::sync::Notify::new(),
+        #[cfg(feature = "interception")]
+        context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
+        #[cfg(feature = "tracker-blocking")]
+        tracker_matcher,
+        #[cfg(feature = "interception")]
+        proxy_auth,
+    });
+    registrar.set_browser(Arc::downgrade(&inner));
 
-    // Sweep the stray windows now that our own tab is set up.
     // Best-effort: a stray we cannot close is worth a warning, not a failed
     // launch — the caller has a perfectly usable browser either way.
     for stray in strays {
-        match conn
+        match inner
+            .conn
             .call_raw("Target.closeTarget", json!({ "targetId": stray }), None)
             .await
         {
@@ -3438,90 +3477,39 @@ pub(crate) async fn finish_connect(
         }
     }
 
-    // The registrar only recorded the main target, so dial its socket here.
-    let main_session = per_tab_session(
-        debug_host_port.as_deref(),
-        ws_url.as_deref(),
-        SessionHandle::new(conn.clone(), session_id.clone()),
-        &target_id,
-    )
+    // Enable auto-attach with debugger-pause. Sent at browser scope (no
+    // session_id), so Chrome attaches every page target that exists (the main
+    // target included; not paused, as they're running already) before it
+    // replies, and every page target that appears later (paused until the
+    // observer chain on it has run). The observer chain runs once on each,
+    // and its last observer, the registrar, sets up each one's tab.
+    let mut main_events = inner.conn.subscribe_raw_accounted();
+    let user_tabs: Vec<_> = user_tabs
+        .into_iter()
+        .map(|id| (id, inner.conn.subscribe_raw_accounted()))
+        .collect();
+    inner
+        .conn
+        .call_raw("Target.setAutoAttach", auto_attach_params(), None)
+        .await?;
+    let main_tab = inner.wait_for_tab(&mut main_events, &target_id).await?;
+    let unset = inner.main_tab.set(main_tab);
+    assert!(unset.is_ok(), "only finish_connect sets the main tab");
+
+    // On `connect`, the user's other tabs, which are set up meanwhile, so
+    // that `Browser::tabs` lists them once `connect` returns. A tab that
+    // isn't set up (it closed, say) is only logged, by `wait_for_tab`.
+    let inner_ref = &inner;
+    futures::future::join_all(user_tabs.into_iter().map(|(id, mut events)| async move {
+        let _ = inner_ref.wait_for_tab(&mut events, &id).await;
+    }))
     .await;
 
-    // Wrap session in Tab; build BrowserInner via the canonical
-    // `Arc::new_cyclic` self-referential pattern.
-    let inner = Arc::new_cyclic(|weak: &std::sync::Weak<BrowserInner>| {
-        let main_tab_input = InputController::new(input_profile.clone());
-        let main_tab = Tab::new(
-            main_session,
-            weak.clone(),
-            main_tab_input,
-            target_id,
-            main_context_id,
-        );
-        BrowserInner {
-            conn,
-            main_tab,
-            default_context_id,
-            download_behaviors: Default::default(),
-            #[cfg(feature = "expect")]
-            downloads: Default::default(),
-            // Take ownership of the child only now, once every CDP round-trip
-            // that can fail the handshake has succeeded. Until this point
-            // `guard_handshake` owns the cleanup: if the budget expires
-            // mid-handshake the child is still in the slot and gets killed
-            // there. (If it expires later, during the main tab's
-            // `Network.enable` or interception, dropping this `BrowserInner`
-            // kills the child.)
-            child: tokio::sync::Mutex::new(
-                child
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take(),
-            ),
-            // Moves with the child, for the same reason: until this point the
-            // job belongs to the handshake future, so a timed-out launch drops
-            // it and takes the whole Chrome tree down with it.
-            job,
-            _user_data: owned_tmp,
-            _extension_dirs: extension_dirs,
-            owns_process,
-            tabs: tokio::sync::RwLock::new(HashMap::new()),
-            debug_host_port,
-            ws_url,
-            tabs_changed: tokio::sync::Notify::new(),
-            #[cfg(feature = "interception")]
-            context_proxy_auth: tokio::sync::Mutex::new(HashMap::new()),
-            #[cfg(feature = "tracker-blocking")]
-            tracker_matcher,
-            #[cfg(feature = "interception")]
-            proxy_auth,
-        }
-    });
-
-    // Insert the main tab by hand (the registrar only recorded it, as it
-    // wasn't wired yet), then wire the registrar: in that order, a repeated
-    // attach of the main target, which the registrar would handle right
-    // after, finds the main tab, and builds no second one.
-    inner
-        .tabs
-        .write()
-        .await
-        .insert(session_id, inner.main_tab.clone());
-    registrar.set_browser(Arc::downgrade(&inner));
-
-    // Network on, acknowledged (within a budget), before the caller gets the
-    // browser: see `Tab::enable_network`. (The registrar does the same for
-    // every later tab.)
-    inner.main_tab.enable_network().await?;
-
-    // The main tab's tracker blocking and proxy credentials, in force
-    // before the caller gets the browser. (The registrar starts them for
-    // every later tab.) A failure is only logged, as on a later tab.
-    #[cfg(feature = "interception")]
-    if let Err(e) = inner.start_browser_intercept(&inner.main_tab).await {
-        warn!(error = %e, "could not start the main tab's tracker blocking / proxy credentials");
-    }
-
+    let child = child
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    *inner.child.lock().await = child;
     Ok(inner)
 }
 
@@ -3933,8 +3921,9 @@ impl BrowserBuilder {
     /// fails or the configured screen is one that headless Chrome can't take
     /// (see [`StealthObserver::headless_flags`]),
     /// [`ZendriverError::Transport`] when the WebSocket attach times out, and
-    /// [`ZendriverError::TabNotFound`] when the observers don't finish on the
-    /// main tab's target within 20 s (an observer failed, say).
+    /// [`ZendriverError::TabNotFound`] when the main tab isn't set up: an
+    /// observer fails on its target, or the observers take longer than 5 s
+    /// each.
     ///
     /// # Examples
     ///
@@ -3970,17 +3959,17 @@ impl BrowserBuilder {
         // not called this follows the active `StealthProfile`'s timing
         // (`Spoofed` → humanized `spoofed()`, `Native`/`Off` → `native()`); an
         // explicit `.input_profile(..)` decouples input timing from the stealth
-        // selection (see `resolved_input_profile`). Cached on `BrowserInner` so
-        // `Browser::new_tab` + the `TabRegistrar` observer can build fresh
-        // per-Tab controllers without re-resolving the profile each time.
+        // selection (see `resolved_input_profile`). Cached on the
+        // `TabRegistrar` so it can build fresh per-Tab controllers without
+        // re-resolving the profile each time.
         let input_profile = self.resolved_input_profile();
 
         // 3. Build the `TabRegistrar` observer. Holds a `OnceLock` for the
-        // `Weak<BrowserInner>` that gets wired in step 10 — observers must
-        // be passed to `connect_with_observers` before the cyclic `Arc` is
-        // resolved, so the weak ref is filled in later. Retained here so
-        // we can `set_browser` after construction.
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
+        // `Weak<BrowserInner>` that `finish_connect` wires — observers must
+        // be passed to `connect_with_observers` before the `BrowserInner`
+        // exists, so the weak ref is filled in later. Retained here so
+        // `finish_connect` can `set_browser`.
+        let registrar = Arc::new(TabRegistrar::new(input_profile));
 
         // 3b. Resolve the geo-derived locale overlay (if `.geo_auto()` /
         // `.geo_resolver(..)` is set), before `resolved_persona()` below reads
@@ -4156,8 +4145,9 @@ impl BrowserBuilder {
         .await
         .map_err(|_| launch_timeout_error(self.effective_gpu_backend()))??;
 
-        // 7–12. WS dial + shared post-connect handshake (auto-attach, main-tab
-        // discovery + attach, BrowserInner construction, registrar wiring).
+        // 7–12. WS dial + shared post-connect handshake (main-tab discovery,
+        // BrowserInner construction, registrar wiring, auto-attach, the main
+        // tab's setup).
         // Identical for spawn (`launch`) and attach (`connect`); the only
         // differences are the owned `Child` / `TempDir` we hand it and the
         // `owns_process` flag (true here — we spawned Chrome).
@@ -4172,13 +4162,17 @@ impl BrowserBuilder {
         // child we spawned on expiry, so a failed launch is retryable and
         // leaves no orphan `chrome.exe`.
         let child_slot: ChildSlot = Arc::new(std::sync::Mutex::new(Some(child)));
-        let inner = guard_handshake(HANDSHAKE_TIMEOUT, &child_slot, async {
+        // The main tab's setup gets its own budget on top, so that a long
+        // observer chain fails as such, not as a handshake timeout.
+        let tab_setup_budget = tab_setup_budget(observers.len());
+        let budget = HANDSHAKE_TIMEOUT + tab_setup_budget;
+        let inner = guard_handshake(budget, &child_slot, async {
             debug!(ws_url = %ws_url, "connecting to chrome");
             let conn = zendriver_transport::connect_with_observers(&ws_url, observers).await?;
             finish_connect(FinishConnect {
                 conn,
                 registrar,
-                input_profile,
+                tab_setup_budget,
                 child: child_slot.clone(),
                 job,
                 owned_tmp,
@@ -4258,11 +4252,15 @@ impl BrowserBuilder {
     /// **not** terminate Chrome. Use this to drive a long-lived browser you
     /// started elsewhere.
     ///
-    /// `.stealth(profile)` and `.observer(..)` still apply, but only to
-    /// targets attached **after** this call — the stealth observer is wired
-    /// into the same browser-wide `Target.setAutoAttach { flatten: true }`
-    /// that fires on newly-attached targets. Tabs already open when you
-    /// connect predate the observer chain and are **not** patched.
+    /// `.stealth(profile)` and `.observer(..)` still apply, to the tabs
+    /// already open when you connect as well as to every page opened later:
+    /// the browser-wide `Target.setAutoAttach { flatten: true }` attaches
+    /// both, and the observer chain runs on each. In a tab that was already
+    /// open, the current document has run its scripts already, so only what
+    /// an observer does at once, or registers for the next document, takes
+    /// effect there. `connect` sets up each open tab (but Chrome's own pages,
+    /// such as `chrome://newtab/`) as a [`Tab`], so [`Browser::tabs`] lists
+    /// it; the first page Chrome lists is the main tab.
     ///
     /// The spawn-only builder fields — [`BrowserBuilder::executable`],
     /// [`BrowserBuilder::user_data_dir`], [`BrowserBuilder::downloads_dir`],
@@ -4280,8 +4278,9 @@ impl BrowserBuilder {
     /// with the reply's status and the start of its body);
     /// [`BrowserError::WsTimeout`] when that reply takes too long;
     /// [`ZendriverError::Transport`] when the WebSocket attach fails; and
-    /// [`ZendriverError::TabNotFound`] when the observers don't finish on the
-    /// main tab's target within 20 s (an observer failed, say).
+    /// [`ZendriverError::TabNotFound`] when the main tab isn't set up: an
+    /// observer fails on its target, or the observers take longer than 5 s
+    /// each.
     ///
     /// # Examples
     ///
@@ -4315,8 +4314,7 @@ impl BrowserBuilder {
         // force-open-shadow-roots → tab registrar LAST, the ready barrier).
         // The spawn-only branches (`executable`, flags, TempDir) are
         // intentionally skipped — `connect` never launches a process.
-        let input_profile = self.resolved_input_profile();
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
+        let registrar = Arc::new(TabRegistrar::new(self.resolved_input_profile()));
         let stealth_obs: Option<Arc<dyn TargetObserver>> = if let Some(ref profile) = self.stealth {
             // No executable to resolve a fingerprint from on the connect path;
             // fall back to the profile's default fingerprint.
@@ -4337,6 +4335,7 @@ impl BrowserBuilder {
         );
 
         debug!(ws_url = %ws_url, "attaching to running chrome");
+        let tab_setup_budget = tab_setup_budget(observers.len());
         let conn = zendriver_transport::connect_with_observers(&ws_url, observers).await?;
 
         // Same post-connect handshake as `launch`, but with no owned process:
@@ -4344,7 +4343,7 @@ impl BrowserBuilder {
         let inner = finish_connect(FinishConnect {
             conn,
             registrar,
-            input_profile,
+            tab_setup_budget,
             child: ChildSlot::default(),
             // We attached to a Chrome we did not spawn. Confining someone
             // else's browser to our job would kill it — and every tab they had
@@ -4612,7 +4611,11 @@ impl Browser {
     /// ```
     #[must_use]
     pub fn main_tab(&self) -> Tab {
-        self.inner.main_tab.clone()
+        self.inner
+            .main_tab
+            .get()
+            .expect("finish_connect sets the main tab before a Browser exists")
+            .clone()
     }
 
     /// Raw root [`Connection`] for browser-scope CDP commands.
@@ -4793,9 +4796,9 @@ impl Browser {
     ///
     /// # Errors
     ///
-    /// Returns [`ZendriverError::TabNotFound`] if the registrar fails to
-    /// register the new tab within the 5s window — usually a sign that
-    /// auto-attach is misconfigured or the registrar observer crashed.
+    /// Returns [`ZendriverError::TabNotFound`] if the new tab isn't set up:
+    /// an observer fails on its target, or the observers take longer than
+    /// 5 s each.
     ///
     /// # Examples
     ///
@@ -4846,8 +4849,7 @@ impl Browser {
     /// # Errors
     ///
     /// Same as [`Browser::new_tab`]: [`ZendriverError::TabNotFound`] if the
-    /// registrar fails to register the new window's tab within the wait
-    /// window.
+    /// new window's tab isn't set up.
     ///
     /// # Examples
     ///
@@ -5019,7 +5021,7 @@ impl Browser {
         // and interception would keep running beside the rebuilt tab's:
         // close that socket.
         let mut tabs = self.inner.tabs.write().await;
-        for tab in tabs.values().chain([&self.inner.main_tab]) {
+        for tab in tabs.values().chain(self.inner.main_tab.get()) {
             if tab.session().is_root() {
                 tab.session().connection().shutdown();
             }
@@ -5142,7 +5144,7 @@ impl Browser {
         // below once the quit is answered, so it may never see the reset.
         self.inner.conn.expect_disconnect();
         let tabs = self.inner.tabs.read().await;
-        for tab in tabs.values().chain([&self.inner.main_tab]) {
+        for tab in tabs.values().chain(self.inner.main_tab.get()) {
             tab.session().connection().expect_disconnect();
         }
         drop(tabs);
@@ -7239,39 +7241,14 @@ mod tests {
     }
 
     /// `finish_connect` returns only once the main tab's `Network.enable` is
-    /// answered.
+    /// answered (or, past what this test waits, its budget has run out: see
+    /// `Tab::enable_network`).
     #[tokio::test]
     async fn finish_connect_returns_only_after_the_main_tabs_network_enable_is_answered() {
-        use zendriver_transport::testing::MockConnection;
-
-        let input_profile = zendriver_stealth::InputProfile::native();
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
-        let (mut mock, conn) =
-            MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
-        let mut fut = tokio::spawn(finish_connect(FinishConnect {
-            conn,
-            registrar,
-            input_profile,
-            child: ChildSlot::default(),
-            job: ProcessJob::none(),
-            owned_tmp: None,
-            extension_dirs: Vec::new(),
-            debug_host_port: None,
-            ws_url: None,
-            owns_process: false,
-            #[cfg(feature = "tracker-blocking")]
-            tracker_matcher: None,
-            #[cfg(feature = "interception")]
-            proxy_auth: None,
-        }));
-        let id = mock.expect_cmd("Target.setAutoAttach").await;
-        emit_page_attach(&mock, "T1", "S1").await;
-        mock.reply(id, json!({})).await;
-        answer_targets(
-            &mut mock,
-            json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
-        )
-        .await;
+        let (mut mock, args) = finish_connect_args(Vec::new());
+        let mut fut = tokio::spawn(finish_connect(args));
+        answer_targets(&mut mock, one_page()).await;
+        answer_auto_attach(&mut mock, &[("T1", "S1")]).await;
         let enable_id = timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
             .await
             .expect("no Network.enable within 2s");
@@ -7290,38 +7267,6 @@ mod tests {
         inner.conn.shutdown();
     }
 
-    /// Spawn `finish_connect` for a browser it didn't spawn, on a mock Chrome
-    /// whose observer chain is `observers` and then a registrar.
-    fn spawn_finish_connect(
-        mut observers: Vec<Arc<dyn TargetObserver>>,
-    ) -> (
-        zendriver_transport::testing::MockConnection,
-        tokio::task::JoinHandle<Result<Arc<BrowserInner>, ZendriverError>>,
-    ) {
-        let input_profile = zendriver_stealth::InputProfile::native();
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
-        observers.push(registrar.clone());
-        let (mock, conn) =
-            zendriver_transport::testing::MockConnection::pair_with_observers(observers);
-        let fut = tokio::spawn(finish_connect(FinishConnect {
-            conn,
-            registrar,
-            input_profile,
-            child: ChildSlot::default(),
-            job: ProcessJob::none(),
-            owned_tmp: None,
-            extension_dirs: Vec::new(),
-            debug_host_port: None,
-            ws_url: None,
-            owns_process: false,
-            #[cfg(feature = "tracker-blocking")]
-            tracker_matcher: None,
-            #[cfg(feature = "interception")]
-            proxy_auth: None,
-        }));
-        (mock, fut)
-    }
-
     /// An observer that holds each target's chain until its `Notify` gets a
     /// permit.
     struct Gate(Arc<tokio::sync::Notify>);
@@ -7338,22 +7283,18 @@ mod tests {
         }
     }
 
-    /// `finish_connect` builds the main tab on the session that auto-attach
-    /// opened on the main target, once the observer chain on that session has
-    /// finished, and attaches the target no second time: a second attach ran
-    /// the chain once more, and nothing waited for either run.
+    /// `finish_connect` returns the main tab that the registrar set up on the
+    /// session that auto-attach opened on the main target, once the observer
+    /// chain on that session has run, and attaches the target no second time:
+    /// a second attach ran the chain once more, and nothing waited for either
+    /// run.
     #[tokio::test]
-    async fn finish_connect_takes_the_auto_attached_session_once_its_observers_finish() {
+    async fn finish_connect_returns_the_main_tab_once_its_observers_ran() {
         let gate = Arc::new(tokio::sync::Notify::new());
-        let (mut mock, fut) = spawn_finish_connect(vec![Arc::new(Gate(gate.clone()))]);
-        let id = mock.expect_cmd("Target.setAutoAttach").await;
-        emit_page_attach(&mock, "T1", "S1").await;
-        mock.reply(id, json!({})).await;
-        answer_targets(
-            &mut mock,
-            json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
-        )
-        .await;
+        let (mut mock, args) = finish_connect_args(vec![Arc::new(Gate(gate.clone()))]);
+        let fut = tokio::spawn(finish_connect(args));
+        answer_targets(&mut mock, one_page()).await;
+        answer_auto_attach(&mut mock, &[("T1", "S1")]).await;
 
         let mut sent = commands_within(&mut mock, Duration::from_millis(300)).await;
         assert_eq!(sent, Vec::<String>::new(), "sent while the observers ran");
@@ -7364,8 +7305,9 @@ mod tests {
                 .recv_cmd_timeout(Duration::from_secs(2))
                 .await
                 .expect("no Network.enable within 2s of the observers' finish");
+            let enable = method == "Network.enable";
             sent.push(method);
-            if sent.last().unwrap() == "Network.enable" {
+            if enable {
                 mock.reply(id, json!({})).await;
                 break;
             }
@@ -7378,7 +7320,8 @@ mod tests {
             !sent.iter().any(|m| m == "Target.attachToTarget"),
             "attached the main target once more: {sent:?}"
         );
-        assert_eq!(inner.main_tab.session().session_id(), Some("S1"));
+        let main_tab = inner.main_tab.get().unwrap();
+        assert_eq!(main_tab.session().session_id(), Some("S1"));
         assert!(inner.tabs.read().await.contains_key("S1"));
         inner.conn.shutdown();
     }
@@ -7397,26 +7340,66 @@ mod tests {
         }
     }
 
-    /// When the observer chain on the main target doesn't finish (here, an
-    /// observer fails, and so the target is detached), `finish_connect` fails
-    /// instead of handing out a main tab without its setup.
-    #[tokio::test(start_paused = true)]
-    async fn finish_connect_fails_when_an_observer_fails_on_the_main_target() {
-        let (mut mock, fut) = spawn_finish_connect(vec![Arc::new(Fail)]);
-        let id = mock.expect_cmd("Target.setAutoAttach").await;
-        emit_page_attach(&mock, "T1", "S1").await;
+    /// When an observer fails on the main target, and so the transport
+    /// detaches it, `finish_connect` fails at once, instead of handing out a
+    /// main tab without its setup or waiting out its setup budget.
+    #[tokio::test]
+    async fn finish_connect_fails_at_once_when_an_observer_fails_on_the_main_target() {
+        let (mut mock, args) = finish_connect_args(vec![Arc::new(Fail)]);
+        let fut = tokio::spawn(finish_connect(args));
+        answer_targets(&mut mock, one_page()).await;
+        answer_auto_attach(&mut mock, &[("T1", "S1")]).await;
+        let id = mock.expect_cmd("Target.detachFromTarget").await;
         mock.reply(id, json!({})).await;
-        answer_targets(
-            &mut mock,
-            json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
-        )
-        .await;
+        let detached = json!({ "sessionId": "S1", "targetId": "T1" });
+        mock.emit_event("Target.detachedFromTarget", detached).await;
+
+        let err = timeout(Duration::from_secs(2), fut)
+            .await
+            .expect("finish_connect did not fail within 2s of the detach")
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            matches!(err, ZendriverError::TabNotFound(ref t) if t == "T1"),
+            "{err:?}"
+        );
+    }
+
+    /// `finish_connect` gives up on a main tab that isn't set up within its
+    /// setup budget.
+    #[tokio::test(start_paused = true)]
+    async fn finish_connect_gives_up_on_a_main_tab_not_set_up_within_the_budget() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (mut mock, mut args) = finish_connect_args(vec![Arc::new(Gate(gate))]);
+        args.tab_setup_budget = Duration::from_secs(1);
+        let fut = tokio::spawn(finish_connect(args));
+        answer_targets(&mut mock, one_page()).await;
+        answer_auto_attach(&mut mock, &[("T1", "S1")]).await;
 
         let err = fut.await.unwrap().unwrap_err();
         assert!(
             matches!(err, ZendriverError::TabNotFound(ref t) if t == "T1"),
             "{err:?}"
         );
+    }
+
+    /// The main tab is set up even when its page is one of Chrome's own,
+    /// which the registrar doesn't set up for other targets: on `connect`,
+    /// the user's first tab may be a `chrome://newtab/`.
+    #[tokio::test]
+    async fn finish_connect_sets_up_a_main_tab_on_a_chrome_page() {
+        let (mut mock, args) = finish_connect_args(Vec::new());
+        let fut = tokio::spawn(finish_connect(args));
+        let newtab = json!({ "targetId": "T1", "type": "page", "url": "chrome://newtab/" });
+        answer_targets(&mut mock, json!({ "targetInfos": [newtab] })).await;
+        let id = mock.expect_cmd("Target.setAutoAttach").await;
+        emit_page_attach(&mock, "T1", "S1", "chrome://newtab/").await;
+        mock.reply(id, json!({})).await;
+        answer_network_enable(&mut mock).await;
+
+        let inner = fut.await.unwrap().unwrap();
+        assert_eq!(inner.main_tab.get().unwrap().target_id(), "T1");
+        inner.conn.shutdown();
     }
 
     /// The `TabRegistrar` gives a page tab whose `browserContextId` has
@@ -8479,38 +8462,18 @@ mod tests {
     /// process: `owns_process` is false and no `Child` handle is held.
     #[tokio::test]
     async fn connect_ws_endpoint_does_not_spawn() {
-        use zendriver_transport::testing::MockConnection;
-
-        let input_profile = zendriver_stealth::InputProfile::native();
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
-        let (mut mock, conn) =
-            MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
-
         // Run the exact post-connect handshake `connect` invokes: no child,
         // no tempdir, owns_process = false.
-        let fut = tokio::spawn(async move {
-            finish_connect(FinishConnect {
-                conn,
-                registrar,
-                input_profile,
-                child: ChildSlot::default(),
-                job: ProcessJob::none(),
-                owned_tmp: None,
-                extension_dirs: Vec::new(),
-                debug_host_port: debug_host_port_from_ws(
-                    "ws://127.0.0.1:9222/devtools/browser/abc",
-                ),
-                ws_url: Some("ws://127.0.0.1:9222/devtools/browser/abc".to_string()),
-                owns_process: false,
-                #[cfg(feature = "tracker-blocking")]
-                tracker_matcher: None,
-                #[cfg(feature = "interception")]
-                proxy_auth: None,
-            })
-            .await
-        });
+        let (mut mock, mut args) = finish_connect_args(Vec::new());
+        let ws_url = "ws://127.0.0.1:9222/devtools/browser/abc";
+        args.debug_host_port = debug_host_port_from_ws(ws_url);
+        args.ws_url = Some(ws_url.to_string());
+        let fut = tokio::spawn(finish_connect(args));
 
-        // 1. Browser-scoped auto-attach.
+        // 1. Initial-target discovery.
+        answer_targets(&mut mock, one_page()).await;
+
+        // 2. Browser-scoped auto-attach.
         let id = mock.expect_cmd("Target.setAutoAttach").await;
         let sent = mock.last_sent();
         assert_eq!(sent["params"]["flatten"], true);
@@ -8526,15 +8489,8 @@ mod tests {
             "auto-attach is browser-scope"
         );
         // Chrome attaches the existing page before it answers.
-        emit_page_attach(&mock, "T1", "S1").await;
+        emit_page_attach(&mock, "T1", "S1", "about:blank").await;
         mock.reply(id, json!({})).await;
-
-        // 2. Initial-target discovery.
-        answer_targets(
-            &mut mock,
-            json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
-        )
-        .await;
         answer_network_enable(&mut mock).await;
 
         let inner = fut.await.unwrap().unwrap();
@@ -8552,18 +8508,53 @@ mod tests {
         inner.conn.shutdown();
     }
 
-    /// Answer the handshake's `Target.getTargets` with `reply`, and its
-    /// `Target.getBrowserContexts` with the default context `CTX_DEFAULT`.
-    /// Emit Chrome's auto-attach of the page `target_id`, which exists
-    /// already and so isn't paused, under `session_id`: as Chrome does for
-    /// each existing page before it answers a browser-scoped
+    /// The arguments of `finish_connect` for a `connect` (no process, nothing
+    /// owned) to a mock Chrome whose observer chain is `observers` and then a
+    /// registrar.
+    ///
+    /// Returns the mock Chrome, and the arguments.
+    fn finish_connect_args(
+        mut observers: Vec<Arc<dyn TargetObserver>>,
+    ) -> (zendriver_transport::testing::MockConnection, FinishConnect) {
+        let registrar = Arc::new(TabRegistrar::new(zendriver_stealth::InputProfile::native()));
+        observers.push(registrar.clone());
+        let (mock, conn) =
+            zendriver_transport::testing::MockConnection::pair_with_observers(observers);
+        let args = FinishConnect {
+            conn,
+            registrar,
+            tab_setup_budget: Duration::from_secs(5),
+            child: ChildSlot::default(),
+            job: ProcessJob::none(),
+            owned_tmp: None,
+            extension_dirs: Vec::new(),
+            debug_host_port: None,
+            ws_url: None,
+            owns_process: false,
+            #[cfg(feature = "tracker-blocking")]
+            tracker_matcher: None,
+            #[cfg(feature = "interception")]
+            proxy_auth: None,
+        };
+        (mock, args)
+    }
+
+    /// A reply to `Target.getTargets` that lists one page, `T1`.
+    fn one_page() -> serde_json::Value {
+        json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] })
+    }
+
+    /// Emit Chrome's auto-attach of the page `target_id` at `url`, which
+    /// exists already and so isn't paused, under `session_id`: as Chrome does
+    /// for each existing page before it answers a browser-scoped
     /// `Target.setAutoAttach`.
     async fn emit_page_attach(
         mock: &zendriver_transport::testing::MockConnection,
         target_id: &str,
         session_id: &str,
+        url: &str,
     ) {
-        let target_info = json!({ "targetId": target_id, "type": "page", "url": "about:blank" });
+        let target_info = json!({ "targetId": target_id, "type": "page", "url": url });
         let params = json!({
             "sessionId": session_id,
             "targetInfo": target_info,
@@ -8572,6 +8563,29 @@ mod tests {
         mock.emit_event("Target.attachedToTarget", params).await;
     }
 
+    /// Answer `finish_connect`'s `Target.setAutoAttach` as Chrome does: attach
+    /// each of the existing `pages` (target id, session id) before the reply.
+    async fn answer_auto_attach(
+        mock: &mut zendriver_transport::testing::MockConnection,
+        pages: &[(&str, &str)],
+    ) {
+        let id = mock.expect_cmd("Target.setAutoAttach").await;
+        for (target_id, session_id) in pages {
+            emit_page_attach(mock, target_id, session_id, "about:blank").await;
+        }
+        mock.reply(id, json!({})).await;
+    }
+
+    /// Play Chrome's part in `finish_connect` with the one page `T1`, which
+    /// auto-attach attaches under the session `S1`.
+    async fn answer_handshake_of_one_page(mock: &mut zendriver_transport::testing::MockConnection) {
+        answer_targets(mock, one_page()).await;
+        answer_auto_attach(mock, &[("T1", "S1")]).await;
+        answer_network_enable(mock).await;
+    }
+
+    /// Answer the handshake's `Target.getTargets` with `reply`, and its
+    /// `Target.getBrowserContexts` with the default context `CTX_DEFAULT`.
     async fn answer_targets(
         mock: &mut zendriver_transport::testing::MockConnection,
         reply: serde_json::Value,
@@ -8613,42 +8627,9 @@ mod tests {
     /// and the `owns_process` guard short-circuits before the kill path).
     #[tokio::test]
     async fn connect_sets_owns_process_false_and_skips_kill() {
-        use zendriver_transport::testing::MockConnection;
-
-        let input_profile = zendriver_stealth::InputProfile::native();
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
-        let (mut mock, conn) =
-            MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
-
-        let fut = tokio::spawn(async move {
-            finish_connect(FinishConnect {
-                conn,
-                registrar,
-                input_profile,
-                child: ChildSlot::default(),
-                job: ProcessJob::none(),
-                owned_tmp: None,
-                extension_dirs: Vec::new(),
-                debug_host_port: None,
-                ws_url: None,
-                owns_process: false,
-                #[cfg(feature = "tracker-blocking")]
-                tracker_matcher: None,
-                #[cfg(feature = "interception")]
-                proxy_auth: None,
-            })
-            .await
-        });
-
-        let id = mock.expect_cmd("Target.setAutoAttach").await;
-        emit_page_attach(&mock, "T1", "S1").await;
-        mock.reply(id, json!({})).await;
-        answer_targets(
-            &mut mock,
-            json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
-        )
-        .await;
-        answer_network_enable(&mut mock).await;
+        let (mut mock, args) = finish_connect_args(Vec::new());
+        let fut = tokio::spawn(finish_connect(args));
+        answer_handshake_of_one_page(&mut mock).await;
 
         let inner = fut.await.unwrap().unwrap();
         assert!(!inner.owns_process);
@@ -8671,29 +8652,10 @@ mod tests {
         zendriver_transport::testing::MockConnection,
         impl std::future::Future<Output = Result<Arc<BrowserInner>, ZendriverError>>,
     ) {
-        use zendriver_transport::testing::MockConnection;
-
-        let input_profile = zendriver_stealth::InputProfile::native();
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
-        let (mock, conn) =
-            MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
-        let fut = finish_connect(FinishConnect {
-            conn,
-            registrar,
-            input_profile,
-            child,
-            job: ProcessJob::none(),
-            owned_tmp: None,
-            extension_dirs: Vec::new(),
-            debug_host_port: None,
-            ws_url: None,
-            owns_process: true,
-            #[cfg(feature = "tracker-blocking")]
-            tracker_matcher: None,
-            #[cfg(feature = "interception")]
-            proxy_auth: None,
-        });
-        (mock, fut)
+        let (mock, mut args) = finish_connect_args(Vec::new());
+        args.child = child;
+        args.owns_process = true;
+        (mock, finish_connect(args))
     }
 
     /// T1: a handshake that never completes must surface the dedicated
@@ -8921,15 +8883,7 @@ mod tests {
             async move { guard_handshake(Duration::from_secs(30), &slot, fut).await }
         });
 
-        let id = mock.expect_cmd("Target.setAutoAttach").await;
-        emit_page_attach(&mock, "T1", "S1").await;
-        mock.reply(id, json!({})).await;
-        answer_targets(
-            &mut mock,
-            json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
-        )
-        .await;
-        answer_network_enable(&mut mock).await;
+        answer_handshake_of_one_page(&mut mock).await;
 
         let inner = guarded.await.unwrap().expect("handshake should succeed");
         assert!(inner.tabs.read().await.contains_key("S1"));
@@ -8947,38 +8901,12 @@ mod tests {
     async fn owning_browser_with_child(
         child: Option<Child>,
     ) -> (zendriver_transport::testing::MockConnection, Browser) {
-        use zendriver_transport::testing::MockConnection;
+        let (mut mock, mut args) = finish_connect_args(Vec::new());
+        args.child = Arc::new(std::sync::Mutex::new(child));
+        args.owns_process = true;
+        let fut = tokio::spawn(finish_connect(args));
 
-        let input_profile = zendriver_stealth::InputProfile::native();
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
-        let (mut mock, conn) =
-            MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
-        let fut = tokio::spawn(finish_connect(FinishConnect {
-            conn,
-            registrar,
-            input_profile,
-            child: Arc::new(std::sync::Mutex::new(child)),
-            job: ProcessJob::none(),
-            owned_tmp: None,
-            extension_dirs: Vec::new(),
-            debug_host_port: None,
-            ws_url: None,
-            owns_process: true,
-            #[cfg(feature = "tracker-blocking")]
-            tracker_matcher: None,
-            #[cfg(feature = "interception")]
-            proxy_auth: None,
-        }));
-
-        let id = mock.expect_cmd("Target.setAutoAttach").await;
-        emit_page_attach(&mock, "T1", "S1").await;
-        mock.reply(id, json!({})).await;
-        answer_targets(
-            &mut mock,
-            json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
-        )
-        .await;
-        answer_network_enable(&mut mock).await;
+        answer_handshake_of_one_page(&mut mock).await;
 
         let inner = fut.await.unwrap().unwrap();
         (mock, Browser { inner })
@@ -9171,37 +9099,9 @@ mod tests {
     /// not just ours. It must never be sent on a non-owning handle.
     #[tokio::test]
     async fn close_never_sends_browser_close_on_a_non_owning_browser() {
-        use zendriver_transport::testing::MockConnection;
-
-        let input_profile = zendriver_stealth::InputProfile::native();
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
-        let (mut mock, conn) =
-            MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
-        let fut = tokio::spawn(finish_connect(FinishConnect {
-            conn,
-            registrar,
-            input_profile,
-            child: ChildSlot::default(),
-            job: ProcessJob::none(),
-            owned_tmp: None,
-            extension_dirs: Vec::new(),
-            debug_host_port: None,
-            ws_url: None,
-            owns_process: false,
-            #[cfg(feature = "tracker-blocking")]
-            tracker_matcher: None,
-            #[cfg(feature = "interception")]
-            proxy_auth: None,
-        }));
-        let id = mock.expect_cmd("Target.setAutoAttach").await;
-        emit_page_attach(&mock, "T1", "S1").await;
-        mock.reply(id, json!({})).await;
-        answer_targets(
-            &mut mock,
-            json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
-        )
-        .await;
-        answer_network_enable(&mut mock).await;
+        let (mut mock, args) = finish_connect_args(Vec::new());
+        let fut = tokio::spawn(finish_connect(args));
+        answer_handshake_of_one_page(&mut mock).await;
         let inner = fut.await.unwrap().unwrap();
 
         Browser { inner }.close().await.unwrap();
@@ -9224,34 +9124,11 @@ mod tests {
     /// nothing. The first page is the main tab, and every other page is swept.
     #[tokio::test]
     async fn finish_connect_drives_one_page_and_closes_every_other() {
-        use zendriver_transport::testing::MockConnection;
-
-        let input_profile = zendriver_stealth::InputProfile::native();
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
-        let (mut mock, conn) =
-            MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
-        let fut = tokio::spawn(finish_connect(FinishConnect {
-            conn,
-            registrar,
-            input_profile,
-            child: ChildSlot::default(),
-            job: ProcessJob::none(),
-            owned_tmp: None,
-            extension_dirs: Vec::new(),
-            debug_host_port: None,
-            ws_url: None,
-            owns_process: true,
-            #[cfg(feature = "tracker-blocking")]
-            tracker_matcher: None,
-            #[cfg(feature = "interception")]
-            proxy_auth: None,
-        }));
+        let (mut mock, mut args) = finish_connect_args(Vec::new());
+        args.owns_process = true;
+        let fut = tokio::spawn(finish_connect(args));
 
         // Two page targets — the double-window symptom.
-        let id = mock.expect_cmd("Target.setAutoAttach").await;
-        emit_page_attach(&mock, "T1", "S1").await;
-        emit_page_attach(&mock, "T2", "S2").await;
-        mock.reply(id, json!({})).await;
         answer_targets(
             &mut mock,
             json!({ "targetInfos": [
@@ -9261,7 +9138,8 @@ mod tests {
         )
         .await;
 
-        // The loser is closed, not abandoned.
+        // The loser is closed, not abandoned, and before auto-attach, so that
+        // it isn't set up as a tab first.
         let id = mock.expect_cmd("Target.closeTarget").await;
         assert_eq!(
             mock.last_sent()["params"]["targetId"],
@@ -9269,10 +9147,12 @@ mod tests {
             "the non-chosen page target must be swept",
         );
         mock.reply(id, json!({ "success": true })).await;
+        answer_auto_attach(&mut mock, &[("T1", "S1")]).await;
         answer_network_enable(&mut mock).await;
 
         // The first page is the main tab.
         let inner = fut.await.unwrap().unwrap();
+        assert_eq!(inner.main_tab.get().unwrap().target_id(), "T1");
         assert!(inner.tabs.read().await.contains_key("S1"));
 
         // Exactly one close — no sweep of the target we are driving.
@@ -9355,8 +9235,6 @@ mod tests {
     )]
     async fn finish_connect_gives_the_main_tab_its_own_socket() {
         use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
-        use zendriver_transport::testing::MockConnection;
-
         // Fake DevTools server: accepts one WebSocket and reports its path.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let host_port = listener.local_addr().unwrap().to_string();
@@ -9383,37 +9261,13 @@ mod tests {
             }
         });
 
-        let input_profile = zendriver_stealth::InputProfile::native();
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
-        let (mut mock, conn) =
-            MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
-        let fut = tokio::spawn(finish_connect(FinishConnect {
-            conn,
-            registrar,
-            input_profile,
-            child: ChildSlot::default(),
-            job: ProcessJob::none(),
-            owned_tmp: None,
-            extension_dirs: Vec::new(),
-            debug_host_port: Some(host_port),
-            ws_url: None,
-            owns_process: true,
-            #[cfg(feature = "tracker-blocking")]
-            tracker_matcher: None,
-            #[cfg(feature = "interception")]
-            proxy_auth: None,
-        }));
+        let (mut mock, mut args) = finish_connect_args(Vec::new());
+        args.debug_host_port = Some(host_port);
+        args.owns_process = true;
+        let fut = tokio::spawn(finish_connect(args));
 
-        let id = mock.expect_cmd("Target.setAutoAttach").await;
-        emit_page_attach(&mock, "T1", "S1").await;
-        mock.reply(id, json!({})).await;
-        answer_targets(
-            &mut mock,
-            json!({ "targetInfos": [
-                { "targetId": "T1", "type": "page", "url": "about:blank" },
-            ] }),
-        )
-        .await;
+        answer_targets(&mut mock, one_page()).await;
+        answer_auto_attach(&mut mock, &[("T1", "S1")]).await;
 
         let inner = fut.await.unwrap().unwrap();
         let path = tokio::time::timeout(std::time::Duration::from_secs(5), path_rx)
@@ -9421,11 +9275,12 @@ mod tests {
             .expect("finish_connect never dialed a socket for the main tab")
             .unwrap();
         assert_eq!(path, "/devtools/page/T1");
-        assert!(inner.main_tab.session().is_root());
+        let main_tab = inner.main_tab.get().unwrap();
+        assert!(main_tab.session().is_root());
         // Keyed by the flat session id, which is what detach events carry.
         assert!(inner.tabs.read().await.contains_key("S1"));
 
-        inner.main_tab.session().connection().shutdown();
+        main_tab.session().connection().shutdown();
         inner.conn.shutdown();
         drop(server);
     }
@@ -9434,33 +9289,10 @@ mod tests {
     /// sweep must not close the target we just attached to.
     #[tokio::test]
     async fn finish_connect_sweeps_nothing_when_there_is_one_page() {
-        use zendriver_transport::testing::MockConnection;
+        let (mut mock, mut args) = finish_connect_args(Vec::new());
+        args.owns_process = true;
+        let fut = tokio::spawn(finish_connect(args));
 
-        let input_profile = zendriver_stealth::InputProfile::native();
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
-        let (mut mock, conn) =
-            MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
-        let fut = tokio::spawn(finish_connect(FinishConnect {
-            conn,
-            registrar,
-            input_profile,
-            child: ChildSlot::default(),
-            job: ProcessJob::none(),
-            owned_tmp: None,
-            extension_dirs: Vec::new(),
-            debug_host_port: None,
-            ws_url: None,
-            owns_process: true,
-            #[cfg(feature = "tracker-blocking")]
-            tracker_matcher: None,
-            #[cfg(feature = "interception")]
-            proxy_auth: None,
-        }));
-
-        // Auto-attach leaves the worker out.
-        let id = mock.expect_cmd("Target.setAutoAttach").await;
-        emit_page_attach(&mock, "T1", "S1").await;
-        mock.reply(id, json!({})).await;
         answer_targets(
             &mut mock,
             json!({ "targetInfos": [
@@ -9470,6 +9302,8 @@ mod tests {
             ] }),
         )
         .await;
+        // Auto-attach leaves the worker out.
+        answer_auto_attach(&mut mock, &[("T1", "S1")]).await;
 
         // Bounded for the same reason: sweeping the worker (or the main tab's
         // page) would block on a reply that never comes.
@@ -9498,35 +9332,10 @@ mod tests {
     /// `launch` and `connect`, so this is gated on `owns_process`, not implied.
     #[tokio::test]
     async fn finish_connect_never_sweeps_tabs_of_a_browser_it_did_not_spawn() {
-        use zendriver_transport::testing::MockConnection;
+        // Attached, not spawned — this is the user's Chrome.
+        let (mut mock, args) = finish_connect_args(Vec::new());
+        let fut = tokio::spawn(finish_connect(args));
 
-        let input_profile = zendriver_stealth::InputProfile::native();
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
-        let (mut mock, conn) =
-            MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
-        let fut = tokio::spawn(finish_connect(FinishConnect {
-            conn,
-            registrar,
-            input_profile,
-            child: ChildSlot::default(),
-            job: ProcessJob::none(),
-            owned_tmp: None,
-            extension_dirs: Vec::new(),
-            debug_host_port: None,
-            ws_url: None,
-            // Attached, not spawned — this is the user's Chrome.
-            owns_process: false,
-            #[cfg(feature = "tracker-blocking")]
-            tracker_matcher: None,
-            #[cfg(feature = "interception")]
-            proxy_auth: None,
-        }));
-
-        let id = mock.expect_cmd("Target.setAutoAttach").await;
-        for (target_id, session_id) in [("T1", "S1"), ("T2", "S2"), ("T3", "S3")] {
-            emit_page_attach(&mock, target_id, session_id).await;
-        }
-        mock.reply(id, json!({})).await;
         answer_targets(
             &mut mock,
             json!({ "targetInfos": [
@@ -9536,10 +9345,14 @@ mod tests {
             ] }),
         )
         .await;
+        answer_auto_attach(&mut mock, &[("T1", "S1"), ("T2", "S2"), ("T3", "S3")]).await;
 
         // Bounded: a sweep here would block on a `closeTarget` reply the mock
         // never sends, so a regression must fail cleanly rather than hang.
-        let mut closes = answer_network_enable(&mut mock).await;
+        let mut closes = Vec::new();
+        for _ in 0..3 {
+            closes.extend(answer_network_enable(&mut mock).await);
+        }
         let inner = timeout(Duration::from_secs(5), fut)
             .await
             .expect("finish_connect must not block sweeping tabs it does not own")
@@ -9555,6 +9368,10 @@ mod tests {
             closes.is_empty(),
             "connect() must not close the user's tabs; closed: {closes:?}",
         );
+        // Each of the user's tabs is set up as a tab, the first as the main
+        // one.
+        assert_eq!(inner.main_tab.get().unwrap().target_id(), "T1");
+        wait_for_tabs(&inner, 3).await;
         inner.conn.shutdown();
     }
 
@@ -9568,31 +9385,9 @@ mod tests {
     /// asserts. The conclusion is unchanged — that is the point of the polling change.
     #[tokio::test(start_paused = true)]
     async fn finish_connect_errors_cleanly_without_a_page_target() {
-        use zendriver_transport::testing::MockConnection;
-
-        let input_profile = zendriver_stealth::InputProfile::native();
-        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
-        let (mut mock, conn) =
-            MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
-        let fut = tokio::spawn(finish_connect(FinishConnect {
-            conn,
-            registrar,
-            input_profile,
-            child: ChildSlot::default(),
-            job: ProcessJob::none(),
-            owned_tmp: None,
-            extension_dirs: Vec::new(),
-            debug_host_port: None,
-            ws_url: None,
-            owns_process: true,
-            #[cfg(feature = "tracker-blocking")]
-            tracker_matcher: None,
-            #[cfg(feature = "interception")]
-            proxy_auth: None,
-        }));
-
-        let id = mock.expect_cmd("Target.setAutoAttach").await;
-        mock.reply(id, json!({})).await;
+        let (mut mock, mut args) = finish_connect_args(Vec::new());
+        args.owns_process = true;
+        let fut = tokio::spawn(finish_connect(args));
 
         // Answer every poll with only a worker until the driver stops asking. The clock is
         // advanced by hand because `start_paused` only auto-advances while the runtime is idle,

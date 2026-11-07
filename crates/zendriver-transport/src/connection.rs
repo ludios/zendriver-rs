@@ -22,9 +22,13 @@ use crate::observer::TargetObserver;
 
 /// Default ceiling on a single observer's `on_target_attached` future, applied
 /// before the actor releases the debugger via
-/// `Runtime.runIfWaitingForDebugger`. Slow observers don't block the actor
-/// indefinitely; a misbehaving one trips the timeout and the debugger releases.
-pub(crate) const DEFAULT_OBSERVER_TIMEOUT: Duration = Duration::from_secs(5);
+/// `Runtime.runIfWaitingForDebugger`. A slow observer doesn't hold up the
+/// target indefinitely: once it runs out of time, the actor detaches the
+/// target, or, for an [`ObserverFailurePolicy::BestEffort`] observer, moves on
+/// to the next one.
+///
+/// [`ObserverFailurePolicy::BestEffort`]: crate::ObserverFailurePolicy::BestEffort
+pub const DEFAULT_OBSERVER_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Default per-call budget for [`Connection::call_raw`] — the ceiling on one
 /// whole CDP call, queueing included.

@@ -102,11 +102,15 @@ The same observer chain re-applies stealth on every new tab — that's
 why `Browser::new_tab()` gives you a fully stealth-patched tab without
 extra code.
 
-The main tab is the exception to the pause: Chrome opened its page
-before zendriver connected, so auto-attach attaches it (once, like any
-page) without a pause, and the document already open in it has run its
-scripts. `launch()` and `connect()` return only once the observers have
-finished on it, so every document you load in it gets their setup.
+Pages that are open already when zendriver turns on auto-attach are the
+exception to the pause: the main tab (zendriver waits for Chrome to open
+its page first), and on `connect()`, every tab that's open. Chrome
+attaches each of them once, like any page, but without a pause, so the
+document already open in it has run its scripts. `launch()` and
+`connect()` return only once the observer chain has run on them, so what
+an observer registers for new documents (a script added with
+`Page.addScriptToEvaluateOnNewDocument`, say) is in place for every
+document you load in them.
 
 ## Auto-refresh on stale handles
 

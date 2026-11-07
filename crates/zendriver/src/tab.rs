@@ -5435,7 +5435,7 @@ mod tests {
         let (_mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
         // Endpoint is `None` for the test helper by default → error path.
-        let tab = inner.main_tab.clone();
+        let tab = inner.main_tab.get().unwrap().clone();
         let err = tab.inspector_url().unwrap_err();
         assert!(
             matches!(err, ZendriverError::Navigation(_)),
@@ -5452,7 +5452,7 @@ mod tests {
         let inner = crate::browser::test_only_inner_with(conn.clone(), |inner| {
             inner.debug_host_port = Some("127.0.0.1:9222".to_string());
         });
-        let url = inner.main_tab.inspector_url().unwrap();
+        let url = inner.main_tab.get().unwrap().inspector_url().unwrap();
         assert_eq!(
             url,
             "http://127.0.0.1:9222/devtools/inspector.html?ws=127.0.0.1:9222/devtools/page/T1"
@@ -5470,7 +5470,7 @@ mod tests {
     async fn tab_set_download_path_dispatches_set_download_behavior_allow() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        let tab = inner.main_tab.clone();
+        let tab = inner.main_tab.get().unwrap().clone();
 
         let fut = tokio::spawn(async move { tab.set_download_path("/tmp/x").await });
 
@@ -5698,7 +5698,7 @@ mod tests {
     async fn download_file_sets_behavior_then_injects_fetch_anchor_script() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        let tab = inner.main_tab.clone();
+        let tab = inner.main_tab.get().unwrap().clone();
 
         let fut = tokio::spawn({
             let t = tab.clone();
@@ -5758,7 +5758,7 @@ mod tests {
     async fn download_file_skips_default_path_when_already_set() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        let tab = inner.main_tab.clone();
+        let tab = inner.main_tab.get().unwrap().clone();
 
         // Pre-set a download path; download_file must NOT re-install a default.
         let browser = crate::Browser {

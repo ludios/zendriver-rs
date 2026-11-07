@@ -772,7 +772,8 @@ mod tests {
     async fn a_download_is_followed_into_the_staging_directory() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        let (expectation, params) = expect_download(&mut mock, &inner.main_tab, true).await;
+        let (expectation, params) =
+            expect_download(&mut mock, inner.main_tab.get().unwrap(), true).await;
         let params = params.unwrap();
         assert_eq!(params["behavior"], "allowAndName");
         assert_eq!(params["eventsEnabled"], true);
@@ -809,7 +810,8 @@ mod tests {
     async fn a_download_that_completed_before_its_claim_is_found() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        let (expectation, _) = expect_download(&mut mock, &inner.main_tab, true).await;
+        let (expectation, _) =
+            expect_download(&mut mock, inner.main_tab.get().unwrap(), true).await;
 
         progress(&mock, "G1", "completed", json!({})).await;
         begin(&mock, "G1").await;
@@ -832,7 +834,8 @@ mod tests {
     async fn a_download_is_followed_after_its_tab_closes() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        let (expectation, _) = expect_download(&mut mock, &inner.main_tab, true).await;
+        let (expectation, _) =
+            expect_download(&mut mock, inner.main_tab.get().unwrap(), true).await;
         begin(&mock, "G1").await;
         let dl = tokio::time::timeout(PROMPTLY, expectation)
             .await
@@ -856,14 +859,15 @@ mod tests {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
         let setting = tokio::spawn({
-            let tab = inner.main_tab.clone();
+            let tab = inner.main_tab.get().unwrap().clone();
             async move { tab.set_download_path("/tmp/chosen").await }
         });
         let id = mock.expect_cmd("Browser.setDownloadBehavior").await;
         mock.reply(id, json!({})).await;
         setting.await.unwrap().unwrap();
 
-        let (expectation, _) = expect_download(&mut mock, &inner.main_tab, false).await;
+        let (expectation, _) =
+            expect_download(&mut mock, inner.main_tab.get().unwrap(), false).await;
         begin(&mock, "G1").await;
         let dl = tokio::time::timeout(PROMPTLY, expectation)
             .await
@@ -878,7 +882,8 @@ mod tests {
             .unwrap();
         assert_eq!(file, Path::new("/tmp/chosen/report.pdf"));
 
-        let (expectation, _) = expect_download(&mut mock, &inner.main_tab, false).await;
+        let (expectation, _) =
+            expect_download(&mut mock, inner.main_tab.get().unwrap(), false).await;
         begin(&mock, "G2").await;
         let dl = tokio::time::timeout(PROMPTLY, expectation)
             .await
@@ -899,7 +904,8 @@ mod tests {
     async fn a_canceled_download_fails_the_wait() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        let (expectation, _) = expect_download(&mut mock, &inner.main_tab, true).await;
+        let (expectation, _) =
+            expect_download(&mut mock, inner.main_tab.get().unwrap(), true).await;
         begin(&mock, "G1").await;
         let dl = tokio::time::timeout(PROMPTLY, expectation)
             .await
@@ -922,7 +928,8 @@ mod tests {
     async fn a_download_in_progress_when_the_connection_dies_is_unknown() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        let (expectation, _) = expect_download(&mut mock, &inner.main_tab, true).await;
+        let (expectation, _) =
+            expect_download(&mut mock, inner.main_tab.get().unwrap(), true).await;
         begin(&mock, "G1").await;
         let dl = tokio::time::timeout(PROMPTLY, expectation)
             .await
@@ -945,7 +952,8 @@ mod tests {
     async fn a_download_in_progress_when_the_browser_drops_is_unknown() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        let (expectation, _) = expect_download(&mut mock, &inner.main_tab, true).await;
+        let (expectation, _) =
+            expect_download(&mut mock, inner.main_tab.get().unwrap(), true).await;
         begin(&mock, "G1").await;
         let dl = tokio::time::timeout(PROMPTLY, expectation)
             .await
@@ -1008,7 +1016,8 @@ mod tests {
     async fn an_unreadable_progress_ends_its_download_as_unknown() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        let (expectation, _) = expect_download(&mut mock, &inner.main_tab, true).await;
+        let (expectation, _) =
+            expect_download(&mut mock, inner.main_tab.get().unwrap(), true).await;
         begin(&mock, "G1").await;
         let dl = tokio::time::timeout(PROMPTLY, expectation)
             .await
@@ -1031,7 +1040,8 @@ mod tests {
     async fn save_to_onto_the_file_itself_keeps_it() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        let (expectation, _) = expect_download(&mut mock, &inner.main_tab, true).await;
+        let (expectation, _) =
+            expect_download(&mut mock, inner.main_tab.get().unwrap(), true).await;
         begin(&mock, "G1").await;
         let dl = tokio::time::timeout(PROMPTLY, expectation)
             .await
@@ -1054,7 +1064,8 @@ mod tests {
     async fn expect_download_times_out() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        let (expectation, _) = expect_download(&mut mock, &inner.main_tab, true).await;
+        let (expectation, _) =
+            expect_download(&mut mock, inner.main_tab.get().unwrap(), true).await;
 
         let res = expectation.timeout(Duration::from_millis(50)).await;
         match res {
@@ -1074,7 +1085,8 @@ mod tests {
     async fn expect_download_returns_event_stream_incomplete_on_disconnect() {
         let (mut mock, conn) = MockConnection::pair();
         let inner = crate::browser::test_only_inner_from_conn(conn.clone());
-        let (expectation, _) = expect_download(&mut mock, &inner.main_tab, true).await;
+        let (expectation, _) =
+            expect_download(&mut mock, inner.main_tab.get().unwrap(), true).await;
 
         mock.disconnect();
         let res = tokio::time::timeout(PROMPTLY, expectation)

@@ -160,8 +160,8 @@ pub enum ZendriverError {
     FrameNotFound(String),
 
     /// Tab lookup by target_id / session_id failed, or a new target's tab
-    /// (a new tab, or the main tab at launch or connect) wasn't set up in
-    /// time: the target's observers didn't finish, say.
+    /// (a new tab, or a tab that launch or connect sets up) wasn't set up:
+    /// an observer failed on the target, or its setup ran out of time.
     #[error("tab not found: {0}")]
     TabNotFound(String),
 
