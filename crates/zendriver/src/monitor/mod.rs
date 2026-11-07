@@ -1327,30 +1327,44 @@ mod tests {
         );
     }
 
-    /// Spawn a monitor over a fresh mock session and return the live monitor
-    /// plus the mock (to emit events) and connection (to shut down).
+    /// Run `builder.start()` to completion while `mock` answers the
+    /// `Network.enable` command that `start()` sends and awaits (the mock
+    /// never answers on its own): with success, or with the JSON-RPC error
+    /// `refusal` if that is given. Returns what `start()` returned.
+    async fn start_with_enable_answered(
+        builder: MonitorBuilder,
+        mock: &mut MockConnection,
+        refusal: Option<(i32, &str)>,
+    ) -> crate::Result<NetworkMonitor> {
+        let answer = async {
+            let id = mock.expect_cmd("Network.enable").await;
+            match refusal {
+                None => mock.reply(id, json!({})).await,
+                Some((code, message)) => mock.reply_err(id, code, message).await,
+            }
+        };
+        // Bounded, so that a `start()` that fails before sending the command
+        // fails the test instead of hanging it.
+        let answer = tokio::time::timeout(Duration::from_secs(2), answer);
+        let (started, answered) = tokio::join!(builder.start(), answer);
+        answered.expect("start() did not send Network.enable within 2s");
+        started
+    }
+
+    /// Spawn a monitor over a caller-supplied `(MockConnection, Connection)`
+    /// pair — which lets a test force a deterministic `Lagged` boundary via
+    /// [`MockConnection::pair_with_accounted_capacity`] — with
+    /// [`MonitorBuilder::stream_bodies`] set to `stream_bodies`, and return
+    /// the live monitor plus the mock (to emit events) and connection (to
+    /// shut down).
     ///
     /// An event of `SID` that the test emits after this returns reaches the
     /// correlator: `start()` subscribes before it sends `Network.enable`, and
-    /// returns only once that command
-    /// is answered — which [`start_answering_enable`] does, since the mock
-    /// never answers on its own.
-    async fn spawn_monitor(
-        filter: Option<UrlMatcher>,
-    ) -> (
-        NetworkMonitor,
-        MockConnection,
-        zendriver_transport::Connection,
-    ) {
-        spawn_monitor_with(MockConnection::pair(), filter).await
-    }
-
-    /// Like [`spawn_monitor`], but over a caller-supplied `(MockConnection,
-    /// Connection)` pair — lets a test force a deterministic `Lagged`
-    /// boundary via [`MockConnection::pair_with_accounted_capacity`].
+    /// returns only once that command is answered.
     async fn spawn_monitor_with(
         pair: (MockConnection, zendriver_transport::Connection),
         filter: Option<UrlMatcher>,
+        stream_bodies: bool,
     ) -> (
         NetworkMonitor,
         MockConnection,
@@ -1358,26 +1372,37 @@ mod tests {
     ) {
         let (mut mock, conn) = pair;
         let session = SessionHandle::new(conn.clone(), SID);
-        let mut builder = MonitorBuilder::new(session);
+        let mut builder = MonitorBuilder::new(session).stream_bodies(stream_bodies);
         if let Some(f) = filter {
             builder = builder.url_pattern(f);
         }
-        let monitor = start_answering_enable(builder, &mut mock).await;
+        let monitor = start_with_enable_answered(builder, &mut mock, None)
+            .await
+            .unwrap();
         (monitor, mock, conn)
     }
 
-    /// Run `builder.start()` to completion, answering the `Network.enable`
-    /// that it sends on `mock` and waits for. Returns the started monitor.
-    async fn start_answering_enable(
-        builder: MonitorBuilder,
-        mock: &mut MockConnection,
-    ) -> NetworkMonitor {
-        let answer = async {
-            let id = mock.expect_cmd("Network.enable").await;
-            mock.reply(id, json!({})).await;
-        };
-        let (started, ()) = tokio::join!(builder.start(), answer);
-        started.unwrap()
+    /// [`spawn_monitor_with`] over a fresh mock session, without body
+    /// streaming.
+    async fn spawn_monitor(
+        filter: Option<UrlMatcher>,
+    ) -> (
+        NetworkMonitor,
+        MockConnection,
+        zendriver_transport::Connection,
+    ) {
+        spawn_monitor_with(MockConnection::pair(), filter, false).await
+    }
+
+    /// [`spawn_monitor_with`] over a fresh mock session, with body streaming.
+    async fn spawn_monitor_streaming(
+        filter: Option<UrlMatcher>,
+    ) -> (
+        NetworkMonitor,
+        MockConnection,
+        zendriver_transport::Connection,
+    ) {
+        spawn_monitor_with(MockConnection::pair(), filter, true).await
     }
 
     /// Await the next emitted event, failing if none arrives within 2s. The
@@ -1584,24 +1609,6 @@ mod tests {
     }
 
     // ---------- stream_bodies (Network.streamResourceContent) --------------
-
-    /// Like [`spawn_monitor`], but with [`MonitorBuilder::stream_bodies`] set.
-    async fn spawn_monitor_streaming(
-        filter: Option<UrlMatcher>,
-    ) -> (
-        NetworkMonitor,
-        MockConnection,
-        zendriver_transport::Connection,
-    ) {
-        let (mut mock, conn) = MockConnection::pair();
-        let session = SessionHandle::new(conn.clone(), SID);
-        let mut builder = MonitorBuilder::new(session).stream_bodies(true);
-        if let Some(f) = filter {
-            builder = builder.url_pattern(f);
-        }
-        let monitor = start_answering_enable(builder, &mut mock).await;
-        (monitor, mock, conn)
-    }
 
     /// End-to-end happy path: `requestWillBeSent` triggers
     /// `Network.streamResourceContent`, its `bufferedData` is emitted as the
@@ -2130,7 +2137,7 @@ mod tests {
     #[tokio::test]
     async fn lagged_mid_exchange_clears_partial_and_emits_boundary() {
         let (mut monitor, mock, conn) =
-            spawn_monitor_with(MockConnection::pair_with_accounted_capacity(2), None).await;
+            spawn_monitor_with(MockConnection::pair_with_accounted_capacity(2), None, false).await;
 
         // Start (but never finish) an exchange.
         mock.emit_event_for_session(
@@ -2391,16 +2398,20 @@ mod tests {
         assert!(next.is_none(), "expected the stream to end, got {next:?}");
     }
 
-    /// `start()` returns only once Chrome has answered `Network.enable`, with
-    /// the subscription already live: a navigation that the caller starts
-    /// after `start()` returns can't outrun the domain being enabled, and
-    /// the first request that Chrome then reports is observed.
+    /// `start()` subscribes before it sends `Network.enable`, and returns only
+    /// once Chrome has answered that command: a request that Chrome reports
+    /// while the answer is pending is observed, and a navigation that the
+    /// caller starts after `start()` returns can't begin before the domain is
+    /// enabled.
     #[tokio::test]
-    async fn start_returns_only_after_network_enable_is_answered() {
+    async fn start_subscribes_before_network_enable_and_returns_after_its_answer() {
         let (mut mock, conn) = MockConnection::pair();
         let session = SessionHandle::new(conn, SID);
         let mut start = tokio::spawn(MonitorBuilder::new(session).start());
         let id = mock.expect_cmd("Network.enable").await;
+        // Reported while the answer is pending, as a request is when something
+        // else had already enabled the domain.
+        emit_request(&mut mock, "1").await;
         // The command is out but unanswered, so `start()` must still be pending.
         let early = tokio::time::timeout(Duration::from_millis(100), &mut start).await;
         assert!(
@@ -2410,7 +2421,6 @@ mod tests {
 
         mock.reply(id, json!({})).await;
         let mut monitor = start.await.unwrap().unwrap();
-        emit_request(&mut mock, "1").await;
         settle_by_completing(&mut monitor, &mock, "1").await;
     }
 
@@ -2420,11 +2430,9 @@ mod tests {
     async fn start_fails_when_network_enable_is_refused() {
         let (mut mock, conn) = MockConnection::pair();
         let session = SessionHandle::new(conn, SID);
-        let refuse = async {
-            let id = mock.expect_cmd("Network.enable").await;
-            mock.reply_err(id, -32000, "Not allowed").await;
-        };
-        let (started, ()) = tokio::join!(MonitorBuilder::new(session).start(), refuse);
+        let refusal = Some((-32000, "Not allowed"));
+        let started =
+            start_with_enable_answered(MonitorBuilder::new(session), &mut mock, refusal).await;
         let Err(err) = started else {
             panic!("start() succeeded despite the refused Network.enable");
         };
