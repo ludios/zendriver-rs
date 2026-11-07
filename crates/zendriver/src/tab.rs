@@ -429,6 +429,14 @@ impl Default for IdleOptions {
     }
 }
 
+/// How long [`Tab::enable_network`] waits for Chrome's acknowledgement.
+/// Bounded so that the registrar's wait for it stays well under the observer
+/// timeout (whose expiry detaches the target), next to the per-tab socket
+/// dial and the interception start, which are bounded alike: `connect` and
+/// `reconnect` attach to existing pages, and a page busy running script
+/// answers only once its script yields.
+pub(crate) const NETWORK_ENABLE_BUDGET: Duration = Duration::from_secs(2);
+
 impl Tab {
     /// Wrap a page target and start its background trackers.
     ///
@@ -522,21 +530,48 @@ impl Tab {
     }
 
     /// Enable the `Network` domain on this tab's session, and return once
-    /// Chrome has acknowledged that. Every path that hands out a tab awaits
-    /// this first: the browser's registrar, for every target Chrome attaches,
-    /// and `finish_connect`, for the main tab. So, for a tab that a caller
-    /// holds, Chrome reports the `Network.*` events of the tab's session, and
-    /// the in-flight tracker behind `wait_for_idle` (whose subscription
-    /// [`Tab::new`] registered), `expect_request` / `expect_response`, and
-    /// `monitor` rely on that without a round-trip of their own.
+    /// Chrome has acknowledged that — or once [`NETWORK_ENABLE_BUDGET`] is
+    /// spent waiting for the acknowledgement: then a warning is logged, and
+    /// the command stays in flight, so the domain still comes on when Chrome
+    /// gets to it. Every path that hands out a tab awaits this first: the
+    /// browser's registrar, for every page target that becomes a tab, and
+    /// `finish_connect`, for the main tab. So, for a tab that a caller holds,
+    /// Chrome reports the `Network.*` events of the tab's session (from the
+    /// acknowledgement on, or, after the warning, from whenever Chrome gets
+    /// to the command), unless raw CDP on the session disables the domain
+    /// later. The in-flight tracker behind `wait_for_idle` (whose
+    /// subscription [`Tab::new`] registered), `expect_request` /
+    /// `expect_response`, and `monitor` rely on that without a round-trip of
+    /// their own.
     ///
-    /// Returns the call's error as is, so that the registrar can report it as
-    /// an observer failure.
+    /// # Errors
+    ///
+    /// The call's error as is, so that the registrar can report it as an
+    /// observer failure: Chrome refused the command, or the session is gone
+    /// ([`zendriver_transport::TransportError::SessionDetached`]).
     pub(crate) async fn enable_network(&self) -> Result<(), zendriver_transport::CallError> {
-        self.session()
-            .call("Network.enable", serde_json::json!({}))
-            .await?;
-        Ok(())
+        let session = self.session().clone();
+        let mut call =
+            Box::pin(async move { session.call("Network.enable", serde_json::json!({})).await });
+        match tokio::time::timeout(NETWORK_ENABLE_BUDGET, &mut call).await {
+            Ok(result) => result.map(|_| ()),
+            Err(_) => {
+                warn!(
+                    target_id = %self.target_id(),
+                    budget = ?NETWORK_ENABLE_BUDGET,
+                    "Network.enable not acknowledged within the budget; handing the tab out with \
+                     the command still in flight"
+                );
+                // Kept alive, so that the command isn't abandoned and its
+                // outcome is logged.
+                tokio::spawn(async move {
+                    if let Err(e) = call.await {
+                        warn!(error = %e, "Network.enable failed, after its acknowledgement was given up on");
+                    }
+                });
+                Ok(())
+            }
+        }
     }
 
     /// Test-only constructor: [`Tab::new_for_test_in`] with no owning

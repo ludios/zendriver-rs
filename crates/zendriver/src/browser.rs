@@ -35,7 +35,8 @@ use zendriver_stealth::{
     GpuBackend, InputProfile, Persona, Seed, StealthObserver, StealthProfile, Strategy, Surface,
 };
 use zendriver_transport::{
-    Connection, ObserverError, PausedSession, SessionHandle, TargetObserver,
+    CallError, Connection, ObserverError, PausedSession, SessionHandle, TargetObserver,
+    TransportError,
 };
 
 use crate::error::{BrowserError, ZendriverError};
@@ -2654,9 +2655,22 @@ impl TargetObserver for TabRegistrar {
                         .clone()
                         .filter(|id| browser.default_context_id.as_ref() != Some(id)),
                 );
-                // Network on, acknowledged, before the tab is registered — and
-                // so before `new_tab` returns it: see `Tab::enable_network`.
-                tab.enable_network().await?;
+                // Network on, acknowledged (within a budget), before the tab
+                // is registered — and so before `new_tab` returns it: see
+                // `Tab::enable_network`. A target that is gone already (a
+                // popup that closed itself, say) is nothing to register, and
+                // nothing to detach.
+                match tab.enable_network().await {
+                    Ok(()) => {}
+                    Err(CallError::Transport(TransportError::SessionDetached)) => {
+                        debug!(
+                            target_id = %session.target_info.target_id,
+                            "target gone before its Network.enable was answered; not registered"
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e.into()),
+                }
 
                 // Before the target runs (the observer chain resumes it
                 // after this), so the page's first request is intercepted.
@@ -3419,7 +3433,8 @@ pub(crate) async fn finish_connect(
             // `guard_handshake` owns the cleanup: if the budget expires
             // mid-handshake the child is still in the slot and gets killed
             // there. (If it expires later, during the main tab's
-            // interception, dropping this `BrowserInner` kills the child.)
+            // `Network.enable` or interception, dropping this `BrowserInner`
+            // kills the child.)
             child: tokio::sync::Mutex::new(
                 child
                     .lock()
@@ -3457,9 +3472,9 @@ pub(crate) async fn finish_connect(
         .insert(session_id, inner.main_tab.clone());
     registrar.set_browser(Arc::downgrade(&inner));
 
-    // Network on, acknowledged, before the caller gets the browser: see
-    // `Tab::enable_network`. (The registrar does the same for every later
-    // tab.)
+    // Network on, acknowledged (within a budget), before the caller gets the
+    // browser: see `Tab::enable_network`. (The registrar does the same for
+    // every later tab.)
     inner.main_tab.enable_network().await?;
 
     // The main tab's tracker blocking and proxy credentials, in force
@@ -4904,7 +4919,9 @@ impl Browser {
     /// # What is NOT restored (deferred)
     ///
     /// This is the scoped v1. It does **not** replay per-feature domain arming
-    /// (active `Fetch` interception rules, `DOMStorage.enable`,
+    /// (a `Network.enable` with parameters of your own — the default one is
+    /// part of every tab's setup —, active `Fetch` interception rules,
+    /// `DOMStorage.enable`,
     /// download behavior, …) that individual features turned on before the
     /// drop — re-arm those yourself after reconnecting. The browser's own
     /// options (stealth, tracker blocking, proxy credentials) are applied to
@@ -7015,6 +7032,224 @@ mod tests {
         conn.shutdown();
     }
 
+    /// A registrar over a mock browser connection whose registry holds the
+    /// main tab, "S1", with a page target "T2" just attached as session
+    /// "S2", paused. Returns the mock and the browser.
+    async fn registrar_with_an_attached_page() -> (
+        zendriver_transport::testing::MockConnection,
+        Arc<BrowserInner>,
+    ) {
+        let registrar = Arc::new(TabRegistrar::new(zendriver_stealth::InputProfile::native()));
+        let (mock, conn) = zendriver_transport::testing::MockConnection::pair_with_observers(vec![
+            registrar.clone() as Arc<dyn TargetObserver>,
+        ]);
+        let inner = test_only_inner_from_conn(conn);
+        registrar.set_browser(Arc::downgrade(&inner));
+        mock.emit_event(
+            "Target.attachedToTarget",
+            json!({
+                "sessionId": "S2",
+                "targetInfo": {
+                    "targetId": "T2",
+                    "type": "page",
+                    "url": "about:blank",
+                    "attached": true,
+                },
+                "waitingForDebugger": true,
+            }),
+        )
+        .await;
+        (mock, inner)
+    }
+
+    /// The methods of the commands sent within `window`, in order (consumed).
+    async fn commands_within(
+        mock: &mut zendriver_transport::testing::MockConnection,
+        window: Duration,
+    ) -> Vec<String> {
+        let deadline = tokio::time::Instant::now() + window;
+        let mut methods = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let Some((method, _id)) = mock.recv_cmd_timeout(left).await else {
+                return methods;
+            };
+            methods.push(method);
+        }
+    }
+
+    /// Wait up to 2s for the registry to hold `n` tabs.
+    async fn wait_for_tabs(inner: &BrowserInner, n: usize) {
+        for _ in 0..200 {
+            if inner.tabs.read().await.len() == n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the registry did not reach {n} tabs within 2s");
+    }
+
+    /// The registrar releases a page target, and registers its tab, only
+    /// once the tab's `Network.enable` is answered.
+    #[tokio::test]
+    async fn registrar_registers_a_tab_only_after_its_network_enable_is_answered() {
+        let (mut mock, inner) = registrar_with_an_attached_page().await;
+        let enable_id = timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
+            .await
+            .expect("no Network.enable within 2s");
+
+        // Unanswered: neither released nor registered.
+        let sent = commands_within(&mut mock, Duration::from_millis(300)).await;
+        assert!(
+            !sent.iter().any(|m| m == "Runtime.runIfWaitingForDebugger"),
+            "released before Network.enable was answered: {sent:?}"
+        );
+        assert_eq!(
+            inner.tabs.read().await.len(),
+            1,
+            "registered before Network.enable was answered"
+        );
+
+        mock.reply(enable_id, json!({})).await;
+        let release_id = timeout(
+            Duration::from_secs(2),
+            mock.expect_cmd("Runtime.runIfWaitingForDebugger"),
+        )
+        .await
+        .expect("not released within 2s of the answer");
+        mock.reply(release_id, json!({})).await;
+        wait_for_tabs(&inner, 2).await;
+        assert!(inner.tabs.read().await.contains_key("S2"));
+    }
+
+    /// A page target whose `Network.enable` Chrome refuses is detached, and
+    /// its tab not registered.
+    #[tokio::test]
+    async fn registrar_detaches_a_target_whose_network_enable_is_refused() {
+        let (mut mock, inner) = registrar_with_an_attached_page().await;
+        let enable_id = timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
+            .await
+            .expect("no Network.enable within 2s");
+        mock.reply_err(enable_id, -32000, "Not allowed").await;
+
+        let detach_id = timeout(
+            Duration::from_secs(2),
+            mock.expect_cmd("Target.detachFromTarget"),
+        )
+        .await
+        .expect("not detached within 2s of the refusal");
+        assert_eq!(mock.last_sent()["params"]["sessionId"], "S2");
+        mock.reply(detach_id, json!({})).await;
+        assert_eq!(inner.tabs.read().await.len(), 1);
+    }
+
+    /// A page target that Chrome detaches before its `Network.enable` is
+    /// answered is skipped quietly: its tab is not registered, and the
+    /// registrar neither fails (which would detach the target again) nor
+    /// waits for the answer.
+    #[tokio::test]
+    async fn registrar_skips_a_target_detached_before_its_network_enable_is_answered() {
+        let (mut mock, inner) = registrar_with_an_attached_page().await;
+        let _enable_id = timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
+            .await
+            .expect("no Network.enable within 2s");
+        mock.emit_event(
+            "Target.detachedFromTarget",
+            json!({ "sessionId": "S2", "targetId": "T2" }),
+        )
+        .await;
+
+        // The registrar returning Ok is what makes the actor release the
+        // (gone) target; returning Err would make it detach instead.
+        let sent = commands_within(&mut mock, Duration::from_millis(500)).await;
+        assert!(
+            sent.iter().any(|m| m == "Runtime.runIfWaitingForDebugger"),
+            "the registrar did not return Ok promptly: {sent:?}"
+        );
+        assert!(
+            !sent.iter().any(|m| m == "Target.detachFromTarget"),
+            "the registrar failed: {sent:?}"
+        );
+        assert_eq!(inner.tabs.read().await.len(), 1);
+    }
+
+    /// A page target whose `Network.enable` goes unanswered past
+    /// [`NETWORK_ENABLE_BUDGET`] is still released and registered (with a
+    /// warning), the command left in flight: an existing page attached by
+    /// `connect` or `reconnect` may be busy running script, which is what
+    /// answers the command.
+    #[tokio::test]
+    async fn registrar_registers_a_tab_whose_network_enable_is_slow() {
+        let (mut mock, inner) = registrar_with_an_attached_page().await;
+        let enable_id = timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
+            .await
+            .expect("no Network.enable within 2s");
+
+        let release_id = timeout(
+            crate::tab::NETWORK_ENABLE_BUDGET + Duration::from_secs(2),
+            mock.expect_cmd("Runtime.runIfWaitingForDebugger"),
+        )
+        .await
+        .expect("not released within 2s past the enable budget");
+        mock.reply(release_id, json!({})).await;
+        wait_for_tabs(&inner, 2).await;
+        // The late answer is consumed, not an error.
+        mock.reply(enable_id, json!({})).await;
+    }
+
+    /// `finish_connect` returns only once the main tab's `Network.enable` is
+    /// answered.
+    #[tokio::test]
+    async fn finish_connect_returns_only_after_the_main_tabs_network_enable_is_answered() {
+        use zendriver_transport::testing::MockConnection;
+
+        let input_profile = zendriver_stealth::InputProfile::native();
+        let registrar = Arc::new(TabRegistrar::new(input_profile.clone()));
+        let (mut mock, conn) =
+            MockConnection::pair_with_observers(vec![registrar.clone() as Arc<dyn TargetObserver>]);
+        let mut fut = tokio::spawn(finish_connect(FinishConnect {
+            conn,
+            registrar,
+            input_profile,
+            child: ChildSlot::default(),
+            job: ProcessJob::none(),
+            owned_tmp: None,
+            extension_dirs: Vec::new(),
+            debug_host_port: None,
+            ws_url: None,
+            owns_process: false,
+            #[cfg(feature = "tracker-blocking")]
+            tracker_matcher: None,
+            #[cfg(feature = "interception")]
+            proxy_auth: None,
+        }));
+        let id = mock.expect_cmd("Target.setAutoAttach").await;
+        mock.reply(id, json!({})).await;
+        answer_targets(
+            &mut mock,
+            json!({ "targetInfos": [{ "targetId": "T1", "type": "page", "url": "about:blank" }] }),
+        )
+        .await;
+        let id = mock.expect_cmd("Target.attachToTarget").await;
+        mock.reply(id, json!({ "sessionId": "S1" })).await;
+        let enable_id = timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
+            .await
+            .expect("no Network.enable within 2s");
+
+        assert!(
+            timeout(Duration::from_millis(300), &mut fut).await.is_err(),
+            "finish_connect returned before the main tab's Network.enable was answered"
+        );
+
+        mock.reply(enable_id, json!({})).await;
+        let inner = timeout(Duration::from_secs(2), fut)
+            .await
+            .expect("finish_connect did not return within 2s of the answer")
+            .unwrap()
+            .unwrap();
+        inner.conn.shutdown();
+    }
+
     /// The `TabRegistrar` gives a page tab whose `browserContextId` has
     /// registered proxy credentials in `BrowserInner.context_proxy_auth`
     /// those credentials — no per-tab boilerplate. Drives the install
@@ -8164,16 +8399,18 @@ mod tests {
         mock.reply(id, contexts).await;
     }
 
-    /// Answer the `Network.enable` of a tab being built, which its builder
-    /// awaits before it hands the tab out, within 5s. Returns the `targetId`
-    /// of every `Target.closeTarget` sent before it, so a test of the sweep
-    /// can see what was closed.
+    /// Answer the `Network.enable` of a tab being built, which the code that
+    /// builds the tab awaits before it hands the tab out, within 5s in all.
+    /// Returns the `targetId` of every `Target.closeTarget` sent before it,
+    /// so a test of the sweep can see what was closed.
     async fn answer_network_enable(
         mock: &mut zendriver_transport::testing::MockConnection,
     ) -> Vec<serde_json::Value> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut closes = Vec::new();
         loop {
-            let Some((method, id)) = mock.recv_cmd_timeout(Duration::from_secs(5)).await else {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let Some((method, id)) = mock.recv_cmd_timeout(left).await else {
                 panic!("no Network.enable within 5s; closed before that: {closes:?}");
             };
             if method == "Target.closeTarget" {
