@@ -1,7 +1,8 @@
 //! Transport-layer errors.
 
-/// Connection-level failure modes — anything that happens "below" a CDP
-/// response getting routed back to its caller.
+/// Failures below a CDP response being routed back to its caller: of the
+/// connection, or ([`SessionDetached`](Self::SessionDetached)) of the
+/// command's session alone, while the connection lives on.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TransportError {
@@ -25,11 +26,14 @@ pub enum TransportError {
     #[error("connection shut down")]
     Shutdown,
 
-    /// Chrome detached the session that the command was sent on (the
-    /// session's target closed, or the session was detached) before
-    /// answering the command. Chrome never answers a command of a detached
-    /// session, so the actor fails such a command at the detach instead of
-    /// leaving it to its timeout.
+    /// The session that the command was sent on is gone: Chrome detached it
+    /// (its target closed, or it was detached), with the command in flight
+    /// or before the command was sent. The connection, and its other
+    /// sessions, live on. A command in flight at the detach is dropped by
+    /// Chrome when the session's target closes, so the actor fails it at the
+    /// detach instead of leaving it to its timeout; a command sent after the
+    /// detach is answered by Chrome with "Session with given id not found",
+    /// which maps here too.
     #[error("session detached by Chrome")]
     SessionDetached,
 
@@ -58,7 +62,9 @@ impl From<tokio_tungstenite::tungstenite::Error> for TransportError {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CallError {
-    /// Connection-level failure (see [`TransportError`]).
+    /// A failure below Chrome's answering (see [`TransportError`]): the
+    /// connection is gone, or — [`TransportError::SessionDetached`] — only
+    /// the command's session is.
     #[error("transport: {0}")]
     Transport(#[from] TransportError),
     /// Chrome answered the command with a structured JSON-RPC error. Carries
@@ -82,8 +88,9 @@ pub enum CallError {
     ///
     /// - [`CallError::Rpc`] — Chrome heard the command and **said no**. The
     ///   browser is healthy; the command was wrong. Retrying is pointless.
-    /// - [`CallError::Transport`] — the **connection broke**. Chrome may be
-    ///   gone; the handle is unusable.
+    /// - [`CallError::Transport`] — the **connection broke** (Chrome may be
+    ///   gone; the handle is unusable), or — [`TransportError::SessionDetached`]
+    ///   — the command's session is gone while the connection lives on.
     /// - `Timeout` — the connection has **not reported a failure**. Chrome is
     ///   wedged, the operation is slower than the budget allows, or the actor
     ///   is too backed up to take the command. Retrying (or raising the

@@ -1007,9 +1007,10 @@ const JSON_RPC_INVALID_PARAMS: i32 = -32602;
 /// that is persistent it costs one doomed round-trip per request forever, so it
 /// warns once (via `warned_other_error`) where an operator running a default
 /// subscriber will actually see it. A transport failure or an unanswered call
-/// is not Chrome refusing anything at all — it is the connection going away
-/// with this call in flight, which is what every ordinary browser close looks
-/// like — so it stays at debug and latches nothing. In every case the monitor
+/// is not Chrome refusing anything at all — it is the connection, or this
+/// session, going away with this call in flight, which is what every ordinary
+/// browser or tab close looks like — so it stays at debug and latches
+/// nothing. In every case the monitor
 /// keeps running and [`NetworkExchange::body`] remains the working fallback for
 /// this request.
 ///
@@ -1082,10 +1083,11 @@ fn spawn_stream_resource_content(
                         );
                     }
                     CallError::Transport(_) | CallError::Timeout { .. } => {
-                        // Not Chrome refusing anything: the connection went
-                        // away, or never answered, with this call in flight.
-                        // Closing a browser resolves every in-flight call this
-                        // way, so warning here would fire at the most ordinary
+                        // Not Chrome refusing anything: the connection, or
+                        // this session, went away, or never answered, with
+                        // this call in flight. Closing a browser or a tab
+                        // resolves every in-flight call this way, so warning
+                        // here would fire at the most ordinary
                         // end of a session — and the "every request pays a
                         // failed call" clause below would be false there,
                         // because there is no next request to spend a

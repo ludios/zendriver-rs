@@ -31,7 +31,11 @@ pub enum ZendriverError {
     #[error("browser process failed: {0}")]
     Browser(#[from] BrowserError),
 
-    /// Lower-level transport (WebSocket) failure.
+    /// Lower-level transport failure: of the WebSocket, or
+    /// ([`zendriver_transport::TransportError::SessionDetached`]) of one
+    /// tab's CDP session, which Chrome detached (typically because the tab
+    /// closed) with a command in flight or before one was sent, while the
+    /// connection lives on.
     #[error("transport: {0}")]
     Transport(Box<zendriver_transport::TransportError>),
 

@@ -76,33 +76,33 @@ pub(crate) const DEFAULT_OBSERVER_TIMEOUT: Duration = Duration::from_secs(5);
 /// [`Connection::set_call_timeout`] (per-connection).
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Internal JSON-RPC code stamped onto drained pendings when the transport
-/// actor shuts down. Mapped back to [`TransportError::Shutdown`] by
-/// [`Connection::call_raw`]. Picked from the reserved internal range
-/// (-32000 to -32099 per JSON-RPC) and chosen far enough from
-/// [`CdpRpcError`] codes Chrome actually emits that an unambiguous code
-/// check suffices — no message-string match required.
-pub(crate) const SHUTDOWN_DRAIN_CODE: i32 = -32001;
+/// Chrome's own JSON-RPC codes in the implementation-defined range (-32000
+/// to -32099) are `-32000` (`SERVER_ERROR`) and `-32001`
+/// (`SESSION_NOT_FOUND`), from crdtp's `DispatchCode`. The codes that the
+/// actor stamps onto the pendings it answers itself are chosen apart from
+/// those, so a code-only check tells each of them from anything Chrome sends.
+///
+/// Stamped onto drained pendings when the transport actor shuts down. Mapped
+/// back to [`TransportError::Shutdown`] by [`Connection::call_raw`].
+pub(crate) const SHUTDOWN_DRAIN_CODE: i32 = -32011;
 
-/// Internal JSON-RPC code stamped onto drained pendings when the WebSocket
-/// dies *unexpectedly* — a Chrome-sent Close frame, a read error, or the
-/// stream ending — as opposed to a caller-requested
-/// [`Connection::shutdown`]. Mapped back to [`TransportError::Disconnected`]
-/// by [`Connection::call_raw`], which the `zendriver` crate in turn surfaces
-/// as `ZendriverError::Disconnected`. Distinct from [`SHUTDOWN_DRAIN_CODE`]
-/// so a long-running caller can tell "Chrome died / socket dropped" apart
-/// from "I closed it." Picked from the reserved internal JSON-RPC range
-/// (-32000 to -32099); Chrome never emits it, so a code-only check is
-/// unambiguous.
-pub(crate) const DISCONNECTED_CODE: i32 = -32002;
+/// Stamped onto drained pendings when the WebSocket dies *unexpectedly* — a
+/// Chrome-sent Close frame, a read error, or the stream ending — as opposed
+/// to a caller-requested [`Connection::shutdown`]. Mapped back to
+/// [`TransportError::Disconnected`] by [`Connection::call_raw`], which the
+/// `zendriver` crate in turn surfaces as `ZendriverError::Disconnected`.
+/// Distinct from [`SHUTDOWN_DRAIN_CODE`] so a long-running caller can tell
+/// "Chrome died / socket dropped" apart from "I closed it."
+pub(crate) const DISCONNECTED_CODE: i32 = -32012;
 
-/// Internal JSON-RPC code stamped onto the pendings of a session when Chrome
-/// detaches that session (`Target.detachedFromTarget`): Chrome never answers
-/// them, so the actor does. Mapped back to
-/// [`TransportError::SessionDetached`] by [`Connection::call_raw`]. Picked
-/// from the reserved internal JSON-RPC range (-32000 to -32099); Chrome never
-/// emits it, so a code-only check is unambiguous.
-pub(crate) const SESSION_DETACHED_CODE: i32 = -32003;
+/// Chrome's code for a command that names a session Chrome doesn't have
+/// (crdtp `DispatchCode::SESSION_NOT_FOUND`, "Session with given id not
+/// found."): what a command sent after its session's detach gets. The actor
+/// stamps the same code onto a detached session's pending commands, which
+/// Chrome drops when the session's target closes (`DevToolsSession::Dispose`
+/// answers nothing). Both are mapped to [`TransportError::SessionDetached`]
+/// by [`Connection::call_raw`].
+pub(crate) const SESSION_NOT_FOUND_CODE: i32 = -32001;
 
 /// Ceiling on a single [`Connection::redial`] — the TCP connect plus the
 /// WebSocket upgrade handshake.
@@ -287,8 +287,9 @@ impl Connection {
     ///
     /// Returns [`CallError::Rpc`] when Chrome answered with a JSON-RPC error
     /// (preserving `code`, `message`, and `data`), [`CallError::Transport`]
-    /// for connection-level failures, and [`CallError::Timeout`] when the call
-    /// ran out its budget — whether or not Chrome ever saw it.
+    /// when the connection is gone or the command's session is
+    /// ([`TransportError::SessionDetached`]), and [`CallError::Timeout`] when
+    /// the call ran out its budget — whether or not Chrome ever saw it.
     pub async fn call_raw(
         &self,
         method: impl Into<String>,
@@ -390,14 +391,13 @@ impl Connection {
             // wedged-but-connected Chrome blocked the caller forever.
             match reply_rx.await {
                 Ok(Ok(v)) => Ok(v),
-                // Preserve the transport drain sentinels for drained pendings;
-                // everything else surfaces as a typed RPC error. The sentinel
-                // codes are reserved internally — Chrome never emits them — so
-                // a code-only check is unambiguous.
+                // The actor's own sentinel codes (which Chrome never sends)
+                // and Chrome's session-not-found code map to transport
+                // errors; everything else surfaces as a typed RPC error.
                 Ok(Err(rpc_err)) => Err(match rpc_err.code {
                     SHUTDOWN_DRAIN_CODE => CallError::Transport(TransportError::Shutdown),
                     DISCONNECTED_CODE => CallError::Transport(TransportError::Disconnected),
-                    SESSION_DETACHED_CODE => CallError::Transport(TransportError::SessionDetached),
+                    SESSION_NOT_FOUND_CODE => CallError::Transport(TransportError::SessionDetached),
                     _ => CallError::Rpc(rpc_err.code, rpc_err.message, rpc_err.data),
                 }),
                 // The command was accepted but the actor dropped our reply
@@ -1232,6 +1232,50 @@ mod tests {
         conn.shutdown();
     }
 
+    /// Chrome's own answer to a command of a session it doesn't have (one
+    /// sent after the detach) maps to `SessionDetached` as well.
+    #[tokio::test]
+    async fn call_raw_maps_chromes_session_not_found_to_session_detached() {
+        let (ws, inbound, mut outbound) = duplex_pair();
+        let conn = spawn_actor(ws);
+        let call = tokio::spawn({
+            let c = conn.clone();
+            async move {
+                c.call_raw("Page.navigate", json!({}), Some("S1".into()))
+                    .await
+            }
+        });
+        let sent = tokio::time::timeout(Duration::from_secs(5), outbound.recv())
+            .await
+            .expect("the command must reach the socket")
+            .expect("the driver must forward it");
+        let Message::Text(text) = sent else {
+            panic!("expected a text frame, got {sent:?}");
+        };
+        let id = serde_json::from_str::<serde_json::Value>(&text).unwrap()["id"].clone();
+
+        inbound
+            .send(Ok(Message::text(
+                json!({
+                    "id": id,
+                    "error": { "code": -32001, "message": "Session with given id not found." },
+                })
+                .to_string(),
+            )))
+            .await
+            .unwrap();
+
+        let res = call.await.unwrap();
+        assert!(
+            matches!(
+                res,
+                Err(CallError::Transport(TransportError::SessionDetached))
+            ),
+            "Chrome's session-not-found must map to TransportError::SessionDetached, got {res:?}"
+        );
+        conn.shutdown();
+    }
+
     /// `expect_disconnect` changes only how a socket's death is logged: a
     /// call in flight when the socket dies still drains as `Disconnected`.
     /// The socket dies by the read error a quitting Chrome causes.
@@ -1691,8 +1735,8 @@ mod tests {
     }
 
     /// A timeout must be distinguishable from "Chrome said no" (`Rpc`) and
-    /// "the connection broke" (`Transport`). Callers key retry/diagnosis off
-    /// exactly this distinction.
+    /// "the connection, or the session, is gone" (`Transport`). Callers key
+    /// retry/diagnosis off exactly this distinction.
     #[tokio::test]
     async fn call_raw_timeout_is_distinct_from_rpc_and_transport() {
         let (ws, test_tx, mut test_rx) = duplex_pair();

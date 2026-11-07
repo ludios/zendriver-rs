@@ -17,7 +17,7 @@ new variants may land in minor releases.
 | Variant | Common cause | Fix |
 |---------|-------------|-----|
 | `Browser(BrowserError)` | Chrome launch / discovery failed. | See [BrowserError](#browsererror-variants) below. |
-| `Transport(TransportError)` | WebSocket failure (Chrome crashed, socket reset). | Retry the operation; if recurring, check Chrome's stderr for crash dumps. |
+| `Transport(TransportError)` | WebSocket failure (Chrome crashed, socket reset); or `SessionDetached`: one tab's CDP session is gone (its tab closed) while the connection lives on. | For `SessionDetached`, drop that tab's handles and go on. Otherwise retry the operation; if recurring, check Chrome's stderr for crash dumps. |
 | `Disconnected` | The connection to Chrome dropped without a caller-requested shutdown of it: Chrome crashed or quit, or the socket was severed. A tab that has its own socket also gets this during and after `browser.close()`, because Chrome quits. | If the browser wasn't closed: reconnect via `Browser::reconnect`, then re-acquire any `Tab`/`Frame`/`Element` handles (a reconnect invalidates them) via `Browser::tabs` (`Browser::main_tab` still returns the old tab). |
 | `Cdp { code, message, data }` | Chrome returned a CDP RPC error. | Inspect `message` — `Invalid params` usually means a stale `RemoteObjectId` or wrong type signature. |
 | `ElementNotFound { selector }` | Query selector matched zero elements within the timeout. | Confirm the page actually rendered the element (`tab.wait_for_load()` / `wait_for_idle()`); check the selector with `tab.find().css(...).count()`. |
@@ -68,6 +68,7 @@ Re-exported from `zendriver-transport`. Surfaced via
 | `Ws(tungstenite::Error)` | Underlying WebSocket error. | Inspect the wrapped error — `ConnectionClosed` is benign during shutdown. |
 | `Frame(serde_json::Error)` | JSON framing failed on a CDP message. | Indicates a Chrome protocol drift; file an issue. |
 | `Shutdown` | Actor was told to shut down; pending calls drain with this. | Expected during graceful `browser.close()`; only an error if it surprises you. |
+| `SessionDetached` | Chrome detached the session the command was sent on (its tab closed, or it was detached), with the command in flight or before it was sent. The connection and the other sessions are unaffected. | Drop that tab's `Tab` / `Frame` / `Element` handles. Expected if you closed the tab yourself. |
 | `ResponseDropped { id }` | Actor replied but the caller's `oneshot` receiver had dropped. | Should not happen in normal use; indicates a panic somewhere up-stack. |
 | `Io(io::Error)` | I/O error inside tungstenite. | Standard I/O handling. |
 

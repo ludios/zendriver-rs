@@ -87,9 +87,11 @@ struct PendingCall {
 }
 
 /// Fail every pending command of the session `session_id`, which Chrome has
-/// detached: Chrome never answers a command of a detached session. Each gets
-/// the [`crate::connection::SESSION_DETACHED_CODE`] sentinel. Returns how
-/// many were failed.
+/// detached, with Chrome's own session-not-found code
+/// ([`crate::connection::SESSION_NOT_FOUND_CODE`]): Chrome drops such a
+/// command when the session's target closes. Returns how many commands
+/// matched (each was sent the error, whether or not its caller still
+/// waited).
 fn fail_detached_session_pendings(
     pending: &mut HashMap<u64, PendingCall>,
     session_id: &str,
@@ -102,8 +104,8 @@ fn fail_detached_session_pendings(
     for id in &detached {
         if let Some(call) = pending.remove(id) {
             let _ = call.reply.send(Err(CdpRpcError {
-                code: crate::connection::SESSION_DETACHED_CODE,
-                message: "session detached by Chrome".into(),
+                code: crate::connection::SESSION_NOT_FOUND_CODE,
+                message: "Session with given id not found.".into(),
                 data: None,
             }));
         }
@@ -368,74 +370,71 @@ pub(crate) async fn run_actor<S>(
                                         ),
                                     }
                                 } else if method == "Target.detachedFromTarget" {
-                                    if let Ok(ev) =
-                                        serde_json::from_value::<TargetDetached>(params.clone())
-                                    {
-                                        let failed =
-                                            fail_detached_session_pendings(&mut pending, &ev.session_id);
-                                        if failed > 0 {
-                                            debug!(
-                                                session_id = %ev.session_id,
-                                                failed,
-                                                "failed the pending commands of a detached session"
+                                    match serde_json::from_value::<TargetDetached>(params.clone()) {
+                                        Ok(ev) => {
+                                            let failed = fail_detached_session_pendings(
+                                                &mut pending,
+                                                &ev.session_id,
                                             );
-                                        }
-                                    } else {
-                                        warn!("bad Target.detachedFromTarget payload");
-                                    }
-                                }
-                                if method == "Target.detachedFromTarget" && !observers.is_empty() {
-                                    if let Ok(ev) =
-                                        serde_json::from_value::<TargetDetached>(params.clone())
-                                    {
-                                        // Mirror the `attachedToTarget` path:
-                                        // observers can panic in user code, so
-                                        // wrap each call in AssertUnwindSafe +
-                                        // catch_unwind and a soft timeout. We
-                                        // can't tear down the session on
-                                        // failure (it's already detaching),
-                                        // but logging gives users a fighting
-                                        // chance to find a regression instead
-                                        // of dropping the panic silently.
-                                        let timeout_dur = match weak_inner.upgrade()
-                                        { Some(strong) => {
-                                            Connection { inner: strong }.observer_timeout()
-                                        } _ => {
-                                            // Connection has dropped — pick a
-                                            // short default so the task can't
-                                            // hang forever.
-                                            Duration::from_secs(5)
-                                        }};
-                                        for obs in &observers {
-                                            let obs2 = obs.clone();
-                                            let sid = ev.session_id.clone();
-                                            let name = obs2.name();
-                                            tokio::spawn(async move {
-                                                let fut = obs2.on_target_detached(&sid);
-                                                match tokio::time::timeout(
-                                                    timeout_dur,
-                                                    AssertUnwindSafe(fut).catch_unwind(),
-                                                )
-                                                .await
-                                                {
-                                                    Ok(Ok(())) => {}
-                                                    Ok(Err(panic)) => {
-                                                        let msg = panic_payload(&panic);
-                                                        error!(
+                                            if failed > 0 {
+                                                debug!(
+                                                    session_id = %ev.session_id,
+                                                    failed,
+                                                    "failed the pending commands of a detached session"
+                                                );
+                                            }
+                                            if !observers.is_empty() {
+                                            // Mirror the `attachedToTarget` path:
+                                            // observers can panic in user code, so
+                                            // wrap each call in AssertUnwindSafe +
+                                            // catch_unwind and a soft timeout. We
+                                            // can't tear down the session on
+                                            // failure (it's already detaching),
+                                            // but logging gives users a fighting
+                                            // chance to find a regression instead
+                                            // of dropping the panic silently.
+                                            let timeout_dur = match weak_inner.upgrade()
+                                            { Some(strong) => {
+                                                Connection { inner: strong }.observer_timeout()
+                                            } _ => {
+                                                // Connection has dropped — pick a
+                                                // short default so the task can't
+                                                // hang forever.
+                                                Duration::from_secs(5)
+                                            }};
+                                            for obs in &observers {
+                                                let obs2 = obs.clone();
+                                                let sid = ev.session_id.clone();
+                                                let name = obs2.name();
+                                                tokio::spawn(async move {
+                                                    let fut = obs2.on_target_detached(&sid);
+                                                    match tokio::time::timeout(
+                                                        timeout_dur,
+                                                        AssertUnwindSafe(fut).catch_unwind(),
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(Ok(())) => {}
+                                                        Ok(Err(panic)) => {
+                                                            let msg = panic_payload(&panic);
+                                                            error!(
+                                                                observer = name,
+                                                                session_id = %sid,
+                                                                panic = %msg,
+                                                                "detached-target observer panicked",
+                                                            );
+                                                        }
+                                                        Err(_) => warn!(
                                                             observer = name,
                                                             session_id = %sid,
-                                                            panic = %msg,
-                                                            "detached-target observer panicked",
-                                                        );
+                                                            "detached-target observer timed out",
+                                                        ),
                                                     }
-                                                    Err(_) => warn!(
-                                                        observer = name,
-                                                        session_id = %sid,
-                                                        "detached-target observer timed out",
-                                                    ),
-                                                }
-                                            });
+                                                });
+                                            }
+                                            }
                                         }
+                                        Err(e) => warn!("bad Target.detachedFromTarget payload: {e}"),
                                     }
                                 }
                                 let ev = RawEvent { method, params, session_id };
@@ -924,7 +923,7 @@ mod tests {
 
         let res = reply_rx.await.unwrap();
         let err = res.unwrap_err();
-        assert_eq!(err.code, -32001);
+        assert_eq!(err.code, crate::connection::SHUTDOWN_DRAIN_CODE);
         assert!(err.message.contains("shut down"));
 
         actor_handle.await.unwrap();
@@ -991,7 +990,7 @@ mod tests {
             .expect("S1's command must fail at the detach")
             .unwrap()
             .unwrap_err();
-        assert_eq!(err.code, crate::connection::SESSION_DETACHED_CODE);
+        assert_eq!(err.code, crate::connection::SESSION_NOT_FOUND_CODE);
         for other in &mut replies {
             assert!(
                 other.try_recv().is_err(),
