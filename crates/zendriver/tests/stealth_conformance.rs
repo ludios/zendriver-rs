@@ -85,9 +85,6 @@ const INVARIANTS: &[(&str, &str)] = &[
           'WebGLRenderingContext.prototype.getParameter':
             WebGLRenderingContext.prototype.getParameter,
           'Element.prototype.getClientRects': Element.prototype.getClientRects,
-          'HTMLMediaElement.prototype.canPlayType': HTMLMediaElement.prototype.canPlayType,
-          'HTMLImageElement.prototype.naturalWidth getter':
-            getter(HTMLImageElement.prototype, 'naturalWidth'),
         };
         const wrong = [];
         for (const [name, f] of Object.entries(functions)) {

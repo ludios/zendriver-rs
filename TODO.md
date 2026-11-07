@@ -181,7 +181,6 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
 - [ ] **`getClientRects()` returns an `Array`,** not a `DOMRectList`. *(ST #11)*
 - [ ] **Masked functions are constructible** in the spoofed patches: each is an ordinary `function`, with an own `prototype` (rebrowser's `nativeTampering` checks for one). *(ST #12)*
 - [ ] **Own properties on instances** where Chrome has them on the prototype: `fonts.js` patches `document.fonts`, and `hardware.js` patches `navigator`, `navigator.mediaDevices` and `speechSynthesis`, when a persona sets their values. *(ST #13)*
-- [ ] **`broken_image.js`** reports 16 for every image with no `src`. *(ST #14)*
 - [ ] **Generative personas use Safari/Firefox UAs.** Filter to Chrome UAs only. *(ST #15)* Test `unit`.
 - [ ] **Generative network cache:** validate before writing, and key the cache by URL. *(ST #16)* Test `unit`.
 - [ ] **Geo timezone table (`locale-gen`'s "first row wins").** Germany gets `Europe/Zurich`, Netherlands gets Brussels, Iceland gets `Africa/Abidjan`, Vietnam gets Bangkok. Pick each country's principal zone (e.g. from `zone.tab`), then regenerate. *(FW #5, ST #17)*
@@ -255,7 +254,6 @@ Each item needs a test; `unit` is fine where no browser is involved.
   - Imperva `AlreadyClear { reese84 }` unreachable
   - `inject_captcha_solution` escaping
 - [ ] **Stealth:** *(ST #18–#23)*
-  - `codecs.js` says `'probably'` too often
   - WebGPU architecture wrong for 5 NVIDIA workstation cards
   - u64 seed loses precision in JS
   - `nearest_to_renderer` sibling match

@@ -26,9 +26,7 @@ use crate::{Fingerprint, GpuProfile, Persona, Platform, Seed};
 const NATIVE: &str = include_str!("patches/_native.js");
 
 // --- Identity patches (run inside the fp IIFE) ---------------------------
-const CODECS: &str = include_str!("patches/codecs.js");
 const DEVICE_MEMORY: &str = include_str!("patches/device_memory.js");
-const BROKEN_IMAGE: &str = include_str!("patches/broken_image.js");
 
 // --- Persona surface patches (appended after the identity IIFE) ----------
 //
@@ -175,7 +173,7 @@ fn resolved_platform(persona: &Persona, identity: &Fingerprint) -> Platform {
 fn identity_iife(persona: &Persona, identity: &Fingerprint) -> String {
     let mem = persona.device_memory_gb.unwrap_or(identity.memory_gb);
     let fp_json = json!({ "memoryGb": mem });
-    format!("(function(fp){{\n{CODECS}\n{DEVICE_MEMORY}\n{BROKEN_IMAGE}\n}})({fp_json});")
+    format!("(function(fp){{\n{DEVICE_MEMORY}\n}})({fp_json});")
 }
 
 /// JS source for the resolved seed token of a noise surface, or `None` when
@@ -595,9 +593,7 @@ mod tests {
             s.contains("UNMASKED_VENDOR_WEBGL") || s.contains("37445"),
             "webgl patch missing"
         );
-        assert!(s.contains("canPlayType"), "codecs patch missing");
         assert!(s.contains("deviceMemory"), "device_memory patch missing");
-        assert!(s.contains("naturalWidth"), "broken_image patch missing");
     }
 
     #[test]
@@ -1156,9 +1152,7 @@ mod tests {
         // Only the webgl block is dropped — identity IIFE + other surfaces
         // are byte-for-byte what `bootstrap_script` would emit.
         let s = bootstrap_script_native_webgl(&Persona::default(), &mock_identity());
-        assert!(s.contains("canPlayType"), "codecs patch missing");
         assert!(s.contains("deviceMemory"), "device_memory patch missing");
-        assert!(s.contains("naturalWidth"), "broken_image patch missing");
     }
 
     #[test]
@@ -1757,8 +1751,10 @@ mod tests {
     #[test]
     fn identity_patches_route_through_masking_helpers() {
         let s = bootstrap_script(&Persona::default(), &mock_identity());
-        assert!(s.contains("__zdReplace"), "codecs methods routed");
-        assert!(s.contains("__zdMark"), "value-fn members marked");
+        assert!(
+            s.contains("__zdGetter(Navigator.prototype, 'deviceMemory'"),
+            "deviceMemory getter routed"
+        );
     }
 
     /// `(needle, why)`: what the bootstrap must not contain, because Chrome
@@ -1804,6 +1800,14 @@ mod tests {
             "RTCPeerConnection",
             "the launch flag --webrtc-ip-handling-policy=disable_non_proxied_udp stops \
              Chrome from gathering ICE candidates that bypass a proxy",
+        ),
+        (
+            "canPlayType",
+            "Chrome itself plays the proprietary codecs (H.264, AAC)",
+        ),
+        (
+            "naturalWidth",
+            "Chrome reports 0 for an image with no source, as any Chrome does",
         ),
         (
             "Navigator.prototype, 'languages'",

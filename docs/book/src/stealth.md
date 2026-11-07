@@ -162,8 +162,6 @@ injects:
 - Noise on canvas, audio and client-rect readback, and the fonts and
   hardware values, as the persona's surfaces say (see
   [Fingerprint spoofing](./fingerprint.md)).
-- `HTMLMediaElement.canPlayType` for the proprietary codecs, and the size
-  of a broken image.
 
 It also sends `Emulation.setHardwareConcurrencyOverride`, so Chrome's own
 `navigator.hardwareConcurrency` reports the persona's CPU count, and
