@@ -46,10 +46,6 @@ const WEBGPU: &str = include_str!("patches/webgpu.js");
 // and availHeight===height that setDeviceMetricsOverride leaves behind (a hard
 // reese84/Imperva bot tell). References no `fp` fields; emitted unconditionally.
 const SCREEN: &str = include_str!("patches/screen.js");
-// Synthetic pointer entropy — a zero-mouse-motion session is a top reese84
-// behavioral bot tell. Feeds a human-looking trajectory to the challenge's own
-// mouse listeners. References no `fp` fields; emitted unconditionally.
-const MOUSE: &str = include_str!("patches/mouse.js");
 
 /// Build the bootstrap script for the spoofed profile.
 ///
@@ -86,7 +82,7 @@ pub fn bootstrap_script(persona: &Persona, identity: &Fingerprint) -> String {
 /// not apply) would disagree with the real WebGL renderer, a cross-API
 /// coherence tell. An explicit WebGPU `Block` (hiding `navigator.gpu`) is
 /// renderer-neutral and is still honored. Every other patch (identity IIFE,
-/// noise surfaces, fonts, hardware, webrtc, screen/mouse coherence) is
+/// noise surfaces, fonts, hardware, webrtc, screen coherence) is
 /// unaffected. See
 /// [`StealthProfile::native_isolation`](crate::StealthProfile::native_isolation)
 /// for the caller-facing trade-off this backs.
@@ -140,9 +136,6 @@ fn bootstrap_script_impl(persona: &Persona, identity: &Fingerprint, spoof_webgl:
     body.push_str(&screen_patch(
         persona.screen.as_ref().or(identity.screen.as_ref()),
     ));
-    // Synthetic pointer entropy, also unconditional.
-    body.push('\n');
-    body.push_str(MOUSE);
 
     push_noise(
         &mut body,

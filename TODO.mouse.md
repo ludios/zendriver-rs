@@ -15,11 +15,7 @@ This plan makes zendriver's realistic mouse moves move like a hand: `Element::cl
 - `move_realistic` also waits for Chrome's reply to each `Input.dispatchMouseEvent` before it starts the next wait. Chrome replies at the next frame boundary, and frames come every 16.7 ms (see "Chrome facts" below). So each step takes the longer of its sleep and the time to the next frame. A 600 px move is 60 steps with 6.67 ms sleeps, so it takes about 60 frames, ≈ 1.0 s, where `mouse_speed_px_per_ms` says 0.4 s. Replaying that schedule over raw CDP took 982 ms. Moves whose sleeps are longer than a frame (about 1,500 px and up) aren't slowed. The unit tests use a mocked connection and a paused clock, so they can't see any of this.
 - [`InputProfile::overshoot_rate`](crates/zendriver-stealth/src/input_profile.rs#L32) (0.20 in `spoofed`) is never read anywhere. The phase-3 design spec promised overshoot, but it was never built.
 - `click` and `hover` aim at the exact center of the element's bounding box.
-- [`patches/mouse.js`](crates/zendriver-stealth/src/patches/mouse.js) is injected only with `spoofed` stealth (`ProfileKind::Spoofed`), not `native` or `off`.
-  - On about 8 page loads in 11 (`rnd(0, 10) > 2`), each time the page adds a `mousemove` listener on `document`, it calls that listener with up to four events built with `new MouseEvent(...)`.
-  - It also sends `mouseout`/`mouseover` pairs, gated the same way.
-  - Such events have `isTrusted === false`, and its moves always go down and to the right.
-  - It stops early once the page removes any listener from `document`.
+- No profile moves the mouse while the page is idle. Until 2026-11-07, `spoofed` stealth injected `patches/mouse.js`, which called the page's `mousemove`/`mouseover`/`mouseout` listeners on `document` with events built by `new MouseEvent(...)`. It was deleted because such events have `isTrusted === false`, which detectors score (brotector gives it its maximum score), and because its own `addEventListener` on `Document.prototype` gave it away.
 
 ## What I measured
 
@@ -113,7 +109,7 @@ The durations mix the model with how it's played back. ghost-cursor's are 16.7 m
    - **Rejected:** depending on `cursorflow = "=0.3.0"`, which would add rand 0.10 to the core crate with nobody upstream to fix bugs. Also rejected: a smaller generator of our own, which would leave out the corrections and tremor.
 2. **Replace `InputProfile`'s mouse fields.** `mouse_speed_px_per_ms`, `jitter_amplitude_px` and `overshoot_rate` give way to the model's own settings: speed factor, precision, nervousness, overshoot tendency, maximum phases, jerk smoothness and arc direction. This is a breaking change to a public type.
 3. **`click` and `hover` end where the cursor comes to rest.** That's a random point inside the element's box, like a person's, so the actionability gate hit-tests that point instead of the center.
-4. **Replace `patches/mouse.js` with real CDP moves,** under the same condition (`spoofed` stealth). Moves through the new model produce trusted events, and then `mouse.js` is deleted. Real moves reach real page handlers, unlike `mouse.js`'s direct calls to listeners, so item 7 sets the limits.
+4. **Move the mouse while the page is idle, with real CDP moves,** under `spoofed` stealth (the condition the deleted `mouse.js` had). Moves through the new model produce trusted events. Real moves reach real page handlers, unlike `mouse.js`'s direct calls to listeners, so item 7 sets the limits.
 
 ## Work items
 
@@ -188,13 +184,13 @@ The durations mix the model with how it's played back. ghost-cursor's are 16.7 m
   - **If they disagree under stealth only:** add a `KNOWN_DISAGREEMENTS` row, then make the spoofed window geometry agree with what Chrome puts in events.
   - **Don't patch `MouseEvent.prototype.screenX`/`screenY` instead.** That would replace native getters with JS functions, which is a worse tell.
   - Tags: `probe`.
-- [ ] **7. Replace `patches/mouse.js` with real idle moves** (decision 4), after items 1 and 2.
-  - **Gate:** the same as `mouse.js`'s: `spoofed` stealth, whatever the `InputProfile`. Record in the changelog that native/off stealth with a humanized `InputProfile` still gets no idle moves.
+- [ ] **7. Add real idle moves** (decision 4), after items 1 and 2.
+  - **Gate:** the same as the deleted `mouse.js`'s: `spoofed` stealth, whatever the `InputProfile`. Record in the changelog that native/off stealth with a humanized `InputProfile` still gets no idle moves.
   - **Gesture ownership:** add a per-tab gesture lock.
     - A foreground gesture holds it for the whole gesture: a click's approach, press and release, and all of a drag. Today `click_at` releases `InputController`'s lock between those steps, and `mouse_drag` dispatches without it.
     - The idle task takes the gesture lock only when it's free, and gives it up between waypoints.
     - Callers set a "gesture waiting" flag before they wait for the lock, and the idle task stops at the next waypoint when it sees the flag. tokio's `Mutex` doesn't report waiters.
-  - **Trigger:** `mouse.js` starts when the page adds a `mousemove` listener on `document`, which also covers sensors that load late. A one-time wander after load would miss those. Options:
+  - **Trigger:** `mouse.js` started when the page added a `mousemove` listener on `document`, which also covers sensors that load late. A one-time wander after load would miss those. Options:
     - (a) Wander once after each document loads.
     - (b) Have Rust poll `DOMDebugger.getEventListeners` on `document` after load, and wander when a `mousemove` listener appears. The page can't see this.
 
@@ -205,7 +201,6 @@ The durations mix the model with how it's played back. ghost-cursor's are 16.7 m
     - Keep wanders short (one to three waypoints).
     - Document the remaining risk in the rustdoc.
   - **Test that fails first:** under `spoofed`, a fixture page records zero trusted `mousemove` events after load today, and at least one after this item (also for a listener added late).
-  - **Delete:** remove `mouse.js` and its line in `patches.rs`.
   - **Check:** against a reese84/Incapsula fixture or site, which is what `mouse.js` was written for.
   - Tags: `chrome`.
 - [ ] **8. Update the docs and MCP descriptions** (CLAUDE.md's three doc surfaces).
