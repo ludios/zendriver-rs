@@ -104,7 +104,8 @@ extra code.
 
 Pages that are open already when zendriver turns on auto-attach are the
 exception to the pause: the main tab (zendriver waits for Chrome to open
-its page first), and on `connect()`, every tab that's open. Chrome
+its page first), and on `connect()`, every tab that's open (except
+Chrome's own pages, which zendriver doesn't set up as tabs). Chrome
 attaches each of them once, like any page, but without a pause, so the
 document already open in it has run its scripts. `launch()` and
 `connect()` return only once the observer chain has run on them, so what

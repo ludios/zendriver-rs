@@ -163,11 +163,17 @@ pub enum ZendriverError {
     #[error("tab not found: {0}")]
     TabNotFound(String),
 
-    /// The tab of a new page target wasn't set up: of a tab that
-    /// [`crate::Browser::new_tab`] (or a sibling) opened, or of one that
-    /// `launch` or `connect` sets up, such as the main tab. Chrome detached
-    /// the target first, which the transport does when an observer fails on
-    /// it, or the setup didn't end within its budget (5 s for each observer).
+    /// The [`crate::Tab`] of a page target wasn't set up: of a tab that
+    /// [`crate::Browser::new_tab`], [`crate::Browser::new_tab_at`],
+    /// [`crate::Browser::new_window`] or [`crate::BrowserContext::new_tab_at`]
+    /// opened, or of the main tab at `launch` or `connect`.
+    ///
+    /// Either Chrome detached the target's session before the tab was set up
+    /// (the target closed, or an observer failed on it, and so the transport
+    /// detached it, and logged which observer), or the setup didn't end
+    /// within its budget: 5 s for each observer in the chain, plus 5 s. A
+    /// page that zendriver doesn't set up as a tab at all, such as
+    /// `chrome://version`, also ends at that budget.
     #[error("the tab of target {target_id} was not set up: {reason}")]
     TabSetup {
         /// The id of the page target.

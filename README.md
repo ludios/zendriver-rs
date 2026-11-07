@@ -138,7 +138,7 @@ No manual MCP config — the plugin bundles the server plus scraping skills, the
   - `browser_intercept_*` — continue/block/redirect/respond/modify requests via CDP `Fetch.*`, as one ordered list per tab that the agent reads and places each rule in (ahead of or behind the tracker blocking)
   - `browser_expect_register / _await` — Playwright-style "wait for response/dialog/download" matchers, split across MCP calls so the agent can act in between
   - `browser_install_chrome` — pull a pinned Chrome-for-Testing build on demand
-- **Actionable errors** — every error carries an `_meta.suggested_next` hint pointing the agent at the right recovery tool (e.g. `ElementNotFound` → "try `browser_html` to inspect")
+- **Actionable errors** — an error that a tool can help with carries an `_meta.suggested_next` hint pointing the agent at that tool (e.g. `ElementNotFound` → "try `browser_html` to inspect")
 
 See the [MCP chapter](https://turtiesocks.github.io/zendriver-rs/mcp.html) for the full tool reference, CLI flags, HTTP-mode operator notes, and troubleshooting guide.
 

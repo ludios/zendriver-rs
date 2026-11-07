@@ -35,10 +35,12 @@ fully-initialised [`Tab`]:
 
 Internally, `new_tab*` waits for the observer chain to set up the new
 target's tab, and returns as soon as it has — typically within a few
-milliseconds. If an observer fails on the target, the transport detaches
-it, and you get [`ZendriverError::TabSetup`] at once; you get it too if
-the setup takes longer than 5 s for each observer in the chain.
-`launch()` and `connect()` wait the same way for the main tab.
+milliseconds. If the target is detached first (an observer failed on it,
+and so the transport detached it, or the page closed), you get
+[`ZendriverError::TabSetup`] at once, and the target is closed; you get
+it too if the setup doesn't end within its budget, which is 5 s for each
+observer in the chain, plus 5 s. `launch()` and `connect()` wait the same
+way for the main tab.
 
 [`Browser::new_tab()`]: https://docs.rs/zendriver/latest/zendriver/struct.Browser.html#method.new_tab
 [`Browser::new_tab_at()`]: https://docs.rs/zendriver/latest/zendriver/struct.Browser.html#method.new_tab_at
@@ -59,6 +61,8 @@ for tab in browser.tabs().await {
 currently-registered tab, including:
 
 - The main tab (the one Chrome opened with).
+- On a browser from `connect()`, the tabs that were open when it
+  connected (except Chrome's own pages, such as `chrome://newtab/`).
 - Tabs you opened via `new_tab*`.
 - Tabs page scripts opened via `window.open(...)` (auto-attach wires
   these into the registrar).

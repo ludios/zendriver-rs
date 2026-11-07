@@ -2552,9 +2552,9 @@ fn auto_attach_params() -> serde_json::Value {
     })
 }
 
-/// Whether `url` is one of Chrome's own pages (`chrome://newtab/`,
-/// `devtools://…`, an extension's page, …), which the [`TabRegistrar`]
-/// doesn't set up as a tab, unless it's the main tab's.
+/// Whether `url` is a page of Chrome's (`chrome://newtab/`, `devtools://…`,
+/// …) or of an extension (`chrome-extension://…`), which the
+/// [`TabRegistrar`] doesn't set up as a tab, unless it's the main tab's.
 fn is_chrome_page(url: &str) -> bool {
     url.starts_with("chrome://")
         || url.starts_with("devtools://")
@@ -2681,8 +2681,8 @@ impl TargetObserver for TabRegistrar {
                     warn!(
                         url = %url,
                         target_id = %session.target_info.target_id,
-                        "chrome opened an internal page on its own; not tracked as a tab \
-                         (if a stray window is visible, this is it)",
+                        "a page of Chrome's or of an extension is not tracked as a tab \
+                         (if a stray window is visible, this may be it)",
                     );
                     return Ok(());
                 }
@@ -3440,7 +3440,7 @@ pub(crate) async fn finish_connect(
     // Only for a Chrome we spawned. On the `connect` path those extra pages are
     // the user's own tabs in their own browser; closing them would be
     // destructive and is emphatically not ours to do: they are set up as tabs
-    // instead, but for Chrome's own pages, which the registrar leaves out.
+    // instead, except Chrome's own pages, which the registrar leaves out.
     // Non-page targets (workers, etc.) are never swept — they are not windows.
     let others = targets
         .iter()
@@ -3476,10 +3476,11 @@ pub(crate) async fn finish_connect(
         // the budget expires, the child is still in the slot and gets killed
         // there.
         child: tokio::sync::Mutex::new(None),
-        // From here on, the job belongs to this `BrowserInner`, which drops
-        // with the handshake future when the handshake fails or runs out of
-        // time (or a little later, if a registrar run on a target still holds
-        // it), and so still takes the whole Chrome tree down.
+        // From here on, this `BrowserInner` holds the job. When the
+        // handshake fails or runs out of time, the `BrowserInner` drops with
+        // the handshake future (or a little later, if a registrar run on a
+        // target still holds it), and so does the job, which kills the whole
+        // Chrome tree.
         job,
         _user_data: owned_tmp,
         _extension_dirs: extension_dirs,
@@ -3966,9 +3967,8 @@ impl BrowserBuilder {
     /// fails or the configured screen is one that headless Chrome can't take
     /// (see [`StealthObserver::headless_flags`]),
     /// [`ZendriverError::Transport`] when the WebSocket attach times out, and
-    /// [`ZendriverError::TabSetup`] when the main tab isn't set up: an
-    /// observer fails on its target, or the observers take longer than 5 s
-    /// each.
+    /// [`ZendriverError::TabSetup`] when the main tab isn't set up (see that
+    /// variant for when).
     ///
     /// # Examples
     ///
@@ -4303,9 +4303,11 @@ impl BrowserBuilder {
     /// both, and the observer chain runs on each. In a tab that was already
     /// open, the current document has run its scripts already, so only what
     /// an observer does at once, or registers for the next document, takes
-    /// effect there. `connect` sets up each open tab (but Chrome's own pages,
-    /// such as `chrome://newtab/`) as a [`Tab`], so [`Browser::tabs`] lists
-    /// it; the first page Chrome lists is the main tab.
+    /// effect there. `connect` sets up each open tab as a [`Tab`], except
+    /// Chrome's own pages (such as `chrome://newtab/`) other than the main
+    /// tab's, and returns once they are set up, so that [`Browser::tabs`]
+    /// lists them; a tab that isn't set up (it closed meanwhile, say) is only
+    /// logged. The first page that Chrome lists is the main tab.
     ///
     /// The spawn-only builder fields — [`BrowserBuilder::executable`],
     /// [`BrowserBuilder::user_data_dir`], [`BrowserBuilder::downloads_dir`],
@@ -4323,9 +4325,8 @@ impl BrowserBuilder {
     /// with the reply's status and the start of its body);
     /// [`BrowserError::WsTimeout`] when that reply takes too long;
     /// [`ZendriverError::Transport`] when the WebSocket attach fails; and
-    /// [`ZendriverError::TabSetup`] when the main tab isn't set up: an
-    /// observer fails on its target, or the observers take longer than 5 s
-    /// each.
+    /// [`ZendriverError::TabSetup`] when the main tab isn't set up (see that
+    /// variant for when).
     ///
     /// # Examples
     ///
@@ -4640,10 +4641,12 @@ impl Browser {
         BrowserBuilder::new().connect(endpoint).await
     }
 
-    /// Handle for the tab that exists when Chrome launches.
+    /// Handle for the tab that exists when Chrome launches, or, on a browser
+    /// from [`BrowserBuilder::connect`], for the first tab that Chrome listed
+    /// then.
     ///
-    /// The main tab is registered eagerly at launch time and is the same
-    /// [`Tab`] across every clone of this [`Browser`].
+    /// The main tab is set up before `launch` or `connect` returns, and is
+    /// the same [`Tab`] across every clone of this [`Browser`].
     ///
     /// # Examples
     ///
@@ -4812,10 +4815,11 @@ impl Browser {
     /// Internally:
     /// 1. Sends `Target.createTarget { url: "about:blank" }` at browser
     ///    scope (no session_id) — the response includes the new `targetId`.
-    /// 2. Waits up to 5s for a [`Tab`] whose [`Tab::target_id`] matches to
-    ///    appear in the internal tabs registry. The tab registrar adds it
-    ///    when the `Target.attachedToTarget` event arrives, and wakes the
-    ///    wait then.
+    /// 2. Waits for a [`Tab`] whose [`Tab::target_id`] matches to appear in
+    ///    the internal tabs registry. The tab registrar adds it once the
+    ///    observer chain has run on the target that auto-attach attached. The
+    ///    wait ends at once if the target is detached first, and otherwise
+    ///    after 5 s for each observer in the chain, plus 5 s.
     /// 3. Returns the matching [`Tab`] on success.
     ///
     /// # Background tabs
@@ -4841,9 +4845,8 @@ impl Browser {
     ///
     /// # Errors
     ///
-    /// Returns [`ZendriverError::TabSetup`] if the new tab isn't set up:
-    /// an observer fails on its target, or the observers take longer than
-    /// 5 s each.
+    /// Returns [`ZendriverError::TabSetup`] if the new tab isn't set up (see
+    /// that variant for when); the new target is then closed.
     ///
     /// # Examples
     ///
@@ -4942,7 +4945,8 @@ impl Browser {
     /// Order is unspecified (the registry is a [`HashMap`] keyed by
     /// `sessionId`). Includes the main tab plus any tabs opened via
     /// [`Browser::new_tab`] or by page scripts (e.g. `window.open`) that
-    /// auto-attach has wired into the registrar.
+    /// auto-attach has wired into the registrar, and on a browser from
+    /// [`BrowserBuilder::connect`], the tabs that were open when it connected.
     ///
     /// # Examples
     ///
@@ -9517,10 +9521,10 @@ mod tests {
             closes.is_empty(),
             "connect() must not close the user's tabs; closed: {closes:?}",
         );
-        // Each of the user's tabs is set up as a tab, the first as the main
-        // one.
+        // Each of the user's tabs is set up as a tab by the time connect
+        // returns, the first as the main one.
         assert_eq!(inner.main_tab.get().unwrap().target_id(), "T1");
-        wait_for_tabs(&inner, 3).await;
+        assert_eq!(inner.tabs.read().await.len(), 3);
         inner.conn.shutdown();
     }
 
