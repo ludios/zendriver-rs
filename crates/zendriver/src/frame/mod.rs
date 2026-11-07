@@ -17,6 +17,7 @@
 //! # Ok(()) }
 //! ```
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -86,6 +87,12 @@ pub(crate) struct FrameInner {
     /// [`Frame::ensure_isolated_world`], so that its later calls skip the
     /// rejected id. `None` until then.
     pub(crate) rebound_frame_id: Mutex<Option<String>>,
+    /// Set by [`lifecycle`] when Chrome reports this frame detached
+    /// (`Page.frameDetached`). Then [`Frame::ensure_isolated_world`] fails
+    /// with [`ZendriverError::FrameNotFound`] instead of rebinding this
+    /// handle to another frame. Best effort: the subscriber can miss the
+    /// event (see the [`lifecycle`] module docs).
+    pub(crate) detached: AtomicBool,
     /// Weak ref to the owning tab. Upgraded by
     /// [`Frame::tab_for_synthesize`] when the query layer needs to wrap
     /// a `RemoteRef` in an `Element` (the `Element` stores an owned
@@ -119,6 +126,7 @@ impl Frame {
                 name,
                 session,
                 rebound_frame_id: Mutex::new(None),
+                detached: AtomicBool::new(false),
                 tab,
             }),
         }
@@ -620,7 +628,9 @@ impl Frame {
     /// for `srcdoc` iframes under `--headless=new`, with no `frameDetached`
     /// in between), it rejects the recorded id with "No frame for given id
     /// found". Then this finds the live id in the frame tree, remembers it
-    /// for later calls, and retries with it.
+    /// for later calls, and retries with it. Unless Chrome reported the
+    /// frame detached: then the frame is gone, and a frame found in the
+    /// tree would be another one.
     pub(crate) async fn ensure_isolated_world(&self) -> Result<i64> {
         let rebound = self.inner.rebound_frame_id.lock().await.clone();
         let frame_id = rebound.as_deref().unwrap_or(&self.inner.frame_id);
@@ -631,6 +641,12 @@ impl Frame {
                 ..
             }) if message.contains("No frame for given id") => {}
             other => return other,
+        }
+        if self.inner.detached.load(Ordering::Relaxed) {
+            return Err(ZendriverError::FrameNotFound(format!(
+                "frame {} was detached",
+                self.inner.frame_id
+            )));
         }
         let live = self.discover_current_frame_id().await?;
         let ctx = self.create_isolated_world(&live).await?;
@@ -1355,6 +1371,32 @@ mod tests {
         mock.reply(id_world, json!({ "executionContextId": 4 }))
             .await;
         assert_eq!(fut.await.unwrap().unwrap(), 4);
+        conn.shutdown();
+    }
+
+    /// A frame that Chrome reported detached is gone: recovery must fail
+    /// instead of walking the tree, where the lone child it would bind is
+    /// another frame.
+    #[tokio::test]
+    async fn a_detached_frame_is_not_rebound() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let frame = stale_frame(sess, None, "");
+        frame.inner.detached.store(true, Ordering::Relaxed);
+
+        let fut = tokio::spawn({
+            let f = frame.clone();
+            async move { f.ensure_isolated_world().await }
+        });
+        let id_world = next_cmd(&mut mock, "Page.createIsolatedWorld").await;
+        mock.reply_err(id_world, -32602, "No frame for given id found")
+            .await;
+
+        match fut.await.unwrap() {
+            Err(ZendriverError::FrameNotFound(m)) => assert!(m.contains("detached"), "{m}"),
+            other => panic!("expected FrameNotFound, got: {other:?}"),
+        }
+        assert_eq!(mock.try_recv_cmd(), None, "no frame-tree walk");
         conn.shutdown();
     }
 

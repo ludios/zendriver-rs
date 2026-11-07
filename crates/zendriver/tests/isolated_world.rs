@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use zendriver::{Browser, Frame, Tab};
+use zendriver::{Browser, Frame, Tab, ZendriverError};
 use zendriver_testkit::axum::Router;
 use zendriver_testkit::axum::response::Html;
 use zendriver_testkit::axum::routing::get;
@@ -78,6 +78,8 @@ const HOOKS_JS: &str = r#"<script>
 ///   `window.clicked`, and an iframe of `/hooked-child`.
 /// - `/hooked-child`: a page with [`HOOKS_JS`], a `#child-button` that sets
 ///   `window.clicked`, and the global `childGlobal = "child"`.
+/// - `/two-frames`: iframes `#a` and `#b` of the canned `/plain`, titled `A`
+///   and `B`.
 async fn server() -> FixtureServer {
     let iframes = r#"<iframe src="/frame-child"></iframe>"#.repeat(IFRAMES);
     let many_frames = format!(
@@ -95,8 +97,12 @@ async fn server() -> FixtureServer {
 <button id="child-button" onclick="window.clicked = true">Child button</button>
 <script>window.childGlobal = 'child';</script>"#
     );
+    let two_frames = r#"<!doctype html><title>Two frames</title>
+<iframe id="a" src="/plain?title=A"></iframe><iframe id="b" src="/plain?title=B"></iframe>"#
+        .to_string();
     let routes = Router::new()
         .route("/many-frames", get(|| async { Html(many_frames) }))
+        .route("/two-frames", get(|| async { Html(two_frames) }))
         .route("/hooked", get(|| async { Html(hooked) }))
         .route("/hooked-child", get(|| async { Html(hooked_child) }));
     FixtureServer::start_with(routes).await
@@ -341,6 +347,42 @@ async fn an_iframe_element_evaluates_in_its_own_frames_worlds() {
         .unwrap();
     assert!(clicked, "the click must reach the iframe's page");
     assert_eq!(calls, Vec::<String>::new(), "page hooks in the iframe");
+
+    browser.close().await;
+}
+
+/// A `Frame` handle of a removed iframe must fail, rather than run in the
+/// sibling iframe that is left.
+#[tokio::test]
+async fn a_removed_frames_handle_does_not_reach_its_sibling() {
+    let server = server().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/two-frames")).await;
+    assert_eventually(Duration::from_secs(10), "iframe A registers", || async {
+        tab.frame_by_url("title=A").await.unwrap().is_some()
+    })
+    .await;
+    let frame_a = tab.frame_by_url("title=A").await.unwrap().unwrap();
+    let title: String = frame_a.evaluate("document.title").await.unwrap();
+    assert_eq!(title, "A");
+
+    eval(&tab, "document.getElementById('a').remove()").await;
+    assert_eventually(Duration::from_secs(10), "iframe A detaches", || async {
+        tab.frame_by_url("title=A").await.unwrap().is_none()
+    })
+    .await;
+
+    let evaluated = frame_a.evaluate::<String>("document.title").await;
+    assert!(
+        matches!(evaluated, Err(ZendriverError::FrameNotFound(_))),
+        "Frame::evaluate: {evaluated:?}"
+    );
+    let found = frame_a.find().css("title").one().await;
+    assert!(
+        matches!(found, Err(ZendriverError::FrameNotFound(_))),
+        "Frame::find: {found:?}"
+    );
 
     browser.close().await;
 }

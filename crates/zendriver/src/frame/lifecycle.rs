@@ -26,7 +26,8 @@
 //!    - `Page.frameNavigated` — update the existing entry's URL in
 //!      place (and backfill the frame `name` the attach event could not
 //!      carry); insert a fresh [`crate::Frame`] if no entry exists.
-//!    - `Page.frameDetached` — remove the entry from the registry.
+//!    - `Page.frameDetached` — remove the entry from the registry, and mark
+//!      it detached (see `FrameInner::detached`).
 //!
 //! ## Nothing in an arm may await a CDP round-trip
 //!
@@ -46,6 +47,7 @@
 //! same token, so nothing outlives it waiting out a CDP budget.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -303,7 +305,9 @@ pub(crate) async fn run(
                 }
             }
             Some(ev) = detached.next() => {
-                frames.write().await.remove(&ev.frame_id);
+                if let Some(frame) = frames.write().await.remove(&ev.frame_id) {
+                    frame.inner.detached.store(true, Ordering::Relaxed);
+                }
             }
             else => {
                 trace!("frame::lifecycle: all event streams closed, exiting");
@@ -680,6 +684,25 @@ mod tests {
     /// longer exists, with nothing logged. Hence the 500ms budget: it is an
     /// order of magnitude below the probe timeout, so a pass cannot be the
     /// probe giving up.
+    /// A detach marks the removed frame, so a handle that a caller still
+    /// holds stops rebinding itself to another frame.
+    #[tokio::test]
+    async fn a_detach_marks_the_removed_frame() {
+        let (mock, conn, frames, cancel) = start().await;
+        attach(&mock, "F1", "P").await;
+        let map = wait_for(&frames, |m| m.contains_key("F1")).await;
+        let held = map["F1"].clone();
+        assert!(!held.inner.detached.load(Ordering::Relaxed));
+
+        mock.emit_event_for_session("Page.frameDetached", json!({ "frameId": "F1" }), SESSION)
+            .await;
+        wait_for(&frames, |m| !m.contains_key("F1")).await;
+        assert!(held.inner.detached.load(Ordering::Relaxed));
+
+        cancel.cancel();
+        conn.shutdown();
+    }
+
     #[tokio::test]
     async fn events_are_processed_while_a_frame_tree_probe_is_outstanding() {
         let (mut mock, conn, frames, cancel) = start().await;
