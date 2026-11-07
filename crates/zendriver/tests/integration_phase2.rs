@@ -12,7 +12,7 @@ use zendriver_testkit::axum::Router;
 use zendriver_testkit::axum::http::header::CONTENT_SECURITY_POLICY;
 use zendriver_testkit::axum::response::Html;
 use zendriver_testkit::axum::routing::get;
-use zendriver_testkit::{FixtureServer, PINNED_HARDWARE, eval, launch_for_test, load};
+use zendriver_testkit::{FixtureServer, PINNED_HARDWARE, SITE_A, eval, launch_for_test, load};
 
 async fn fixture_with_html(html: &str) -> MockServer {
     let mock = MockServer::start().await;
@@ -51,6 +51,7 @@ async fn spoofed_profile_hides_navigator_webdriver_via_flag() {
 /// through DevTools, which CSP doesn't restrict. The page's own script stays
 /// blocked, which shows that the policy is in force.
 #[tokio::test]
+#[serial]
 async fn spoofed_bootstrap_installs_under_a_csp_that_forbids_every_script() {
     let page = Router::new().route(
         "/strict-csp",
@@ -79,6 +80,28 @@ async fn spoofed_bootstrap_installs_under_a_csp_that_forbids_every_script() {
         json!(["before", 1]),
         "[title, deviceMemory]: the CSP must block the page's script, and the \
          bootstrap must still report PINNED_HARDWARE's deviceMemory"
+    );
+}
+
+/// Chrome defines `navigator.deviceMemory` only in secure contexts, so the
+/// `spoofed` bootstrap mustn't define it on a plain-HTTP page.
+#[tokio::test]
+#[serial]
+async fn spoofed_defines_no_device_memory_in_an_insecure_context() {
+    let server = FixtureServer::start().await;
+    let pinned: Persona = PINNED_HARDWARE.parse().expect("persona JSON");
+    let builder = Browser::builder()
+        .stealth(StealthProfile::spoofed())
+        .persona_overlay(pinned);
+    let browser = launch_for_test(builder).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/plain")).await;
+    let seen = eval(&tab, "[isSecureContext, 'deviceMemory' in navigator]").await;
+    browser.close().await;
+    assert_eq!(
+        seen,
+        json!([false, false]),
+        "[isSecureContext, has deviceMemory]"
     );
 }
 

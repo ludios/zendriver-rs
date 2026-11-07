@@ -168,8 +168,8 @@ fn resolved_platform(persona: &Persona, identity: &Fingerprint) -> Platform {
 }
 
 /// Emit the identity patches wrapped in `(function(fp){ ... })(fpJson)`,
-/// where `fp` holds the memory size they present: the `persona`'s if it
-/// pins one, else the `identity`'s.
+/// where `fp.memoryGb` is the memory size that `navigator.deviceMemory`
+/// presents: the `persona`'s if it pins one, else the `identity`'s.
 fn identity_iife(persona: &Persona, identity: &Fingerprint) -> String {
     let mem = persona.device_memory_gb.unwrap_or(identity.memory_gb);
     let fp_json = json!({ "memoryGb": mem });
