@@ -31,8 +31,11 @@ You can mix any persona source with any per-surface strategy independently.
 WebRTC isn't a surface, because Chrome handles it itself: every stealth
 profile except `off()` launches Chrome with
 `--webrtc-ip-handling-policy=disable_non_proxied_udp`. Chrome then gathers
-only the ICE candidates that go through the proxy (none if there is no
-proxy), so WebRTC can't reveal an IP address that the proxy hides.
+no candidate for the machine's own network interfaces, and reaches peers
+and TURN servers over UDP only through a proxy that supports UDP, and
+otherwise over TCP; with no TURN server, a page gets no candidate at all.
+A Chrome that `Browser::connect` attaches to has this policy only if it
+was started with that switch.
 
 ## The 5 strategies
 

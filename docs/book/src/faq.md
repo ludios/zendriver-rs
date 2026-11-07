@@ -157,8 +157,8 @@ There's no built-in detector. The pragmatic test:
 ## What's the difference between native and spoofed stealth?
 
 - **`StealthProfile::native()`** — changes only what Chrome can be told
-  at launch or over CDP: UA scrub, launch flags (including a screen and
-  a mouse for headless Chrome), Emulation overrides. It runs no JS in the
+  at launch or over CDP: UA scrub, launch flags (including a screen for
+  headless Chrome, and on Linux a mouse), Emulation overrides. It runs no JS in the
   page, so there's no patched function for a
   `Function.prototype.toString` check to catch. The default, and the
   first choice for bot-protected sites too.

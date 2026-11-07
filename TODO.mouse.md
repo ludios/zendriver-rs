@@ -15,7 +15,8 @@ This plan makes zendriver's realistic mouse moves move like a hand: `Element::cl
 - `move_realistic` also waits for Chrome's reply to each `Input.dispatchMouseEvent` before it starts the next wait. Chrome replies at the next frame boundary, and frames come every 16.7 ms (see "Chrome facts" below). So each step takes the longer of its sleep and the time to the next frame. A 600 px move is 60 steps with 6.67 ms sleeps, so it takes about 60 frames, ≈ 1.0 s, where `mouse_speed_px_per_ms` says 0.4 s. Replaying that schedule over raw CDP took 982 ms. Moves whose sleeps are longer than a frame (about 1,500 px and up) aren't slowed. The unit tests use a mocked connection and a paused clock, so they can't see any of this.
 - [`InputProfile::overshoot_rate`](crates/zendriver-stealth/src/input_profile.rs#L32) (0.20 in `spoofed`) is never read anywhere. The phase-3 design spec promised overshoot, but it was never built.
 - `click` and `hover` aim at the exact center of the element's bounding box.
-- No profile moves the mouse while the page is idle. Until 2026-11-07, `spoofed` stealth injected `patches/mouse.js`, which called the page's `mousemove`/`mouseover`/`mouseout` listeners on `document` with events built by `new MouseEvent(...)`. It was deleted because such events have `isTrusted === false`, which detectors score (brotector gives it its maximum score), and because its own `addEventListener` on `Document.prototype` gave it away.
+- No profile moves the mouse while the page is idle. Until 2026-11-07, `spoofed` stealth injected `patches/mouse.js`. It replaced `addEventListener` and `removeEventListener` on `Document.prototype`, and on about 8 page loads in 11 (`rnd(0, 10) > 2`, drawn separately for moves and for over/out), it called the page's function listeners on `document` with events built by `new MouseEvent(...)`: up to four `mousemove` events, each moving down and to the right, per `mousemove` listener, and two `mouseout`/`mouseover` pairs once the page had listeners for both. It stopped once the page removed any listener from `document`.
+  - It was deleted because events built that way have `isTrusted === false`, which Brotector reports as `Input.untrusted` with its maximum score of 1, and because Chrome defines `addEventListener` and `removeEventListener` only on `EventTarget.prototype`, so its own properties on `Document.prototype` gave it away.
 
 ## What I measured
 
@@ -185,12 +186,12 @@ The durations mix the model with how it's played back. ghost-cursor's are 16.7 m
   - **Don't patch `MouseEvent.prototype.screenX`/`screenY` instead.** That would replace native getters with JS functions, which is a worse tell.
   - Tags: `probe`.
 - [ ] **7. Add real idle moves** (decision 4), after items 1 and 2.
-  - **Gate:** the same as the deleted `mouse.js`'s: `spoofed` stealth, whatever the `InputProfile`. Record in the changelog that native/off stealth with a humanized `InputProfile` still gets no idle moves.
+  - **Gate:** the same as the deleted `mouse.js`'s: `spoofed` stealth, whatever the `InputProfile`. Say in the `StealthProfile::spoofed` rustdoc and the book's stealth chapter that native/off stealth with a humanized `InputProfile` still gets no idle moves (this fork keeps no changelog).
   - **Gesture ownership:** add a per-tab gesture lock.
     - A foreground gesture holds it for the whole gesture: a click's approach, press and release, and all of a drag. Today `click_at` releases `InputController`'s lock between those steps, and `mouse_drag` dispatches without it.
     - The idle task takes the gesture lock only when it's free, and gives it up between waypoints.
     - Callers set a "gesture waiting" flag before they wait for the lock, and the idle task stops at the next waypoint when it sees the flag. tokio's `Mutex` doesn't report waiters.
-  - **Trigger:** `mouse.js` started when the page added a `mousemove` listener on `document`, which also covers sensors that load late. A one-time wander after load would miss those. Options:
+  - **Trigger:** `mouse.js` started its moves when the page added a `mousemove` listener on `document` (on the page loads where its draw allowed moves). Starting on the listener also catches sensors that load late. A one-time wander after load would miss those. Options:
     - (a) Wander once after each document loads.
     - (b) Have Rust poll `DOMDebugger.getEventListeners` on `document` after load, and wander when a `mousemove` listener appears. The page can't see this.
 

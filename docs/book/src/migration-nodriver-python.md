@@ -93,8 +93,8 @@ The driver uses the same shadow-DOM walk approach as nodriver, runs a
 15%-from-left / 50%-from-top click at the iframe offset, and polls the
 `cf-turnstile-response` input for a non-empty value. Unlike nodriver,
 none of those are baked in — the markers and the click are caller data,
-and the click itself can be replaced outright. Pair with
-`StealthProfile::spoofed()` for the best bypass rate. See
+and the click itself can be replaced outright. Pair it with stealth (see
+[Stealth](./stealth.md#when-to-use-which) for which profile) and
 [Cloudflare](./cloudflare.md).
 
 [`zendriver-cloudflare`]: https://docs.rs/zendriver-cloudflare/

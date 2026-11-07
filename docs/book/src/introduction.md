@@ -4,8 +4,9 @@
 with a coherent stealth identity and explicit anti-detection controls,
 on by default. It drives a real Chrome instance over the [Chrome DevTools
 Protocol] (CDP) directly — no WebDriver shim, no Selenium grid, no JSON
-wire — and ships with anti-detection controls that pass mainstream
-fingerprint checks (e.g. [sannysoft]) out of the box.
+wire — and ships with anti-detection controls on by default: with them,
+headless Chrome 157 passed every check of [sannysoft] but the one that
+flags its software WebGL renderer.
 No automation stack can guarantee invisibility to a determined,
 adaptively-defended site — see [Stealth](./stealth.md) for what the
 patches actually cover and their limits.
@@ -24,8 +25,8 @@ borrow checker tracks instead of letting them drift across `await` points.
 
 - **Scraping sites that block headless browsers.** The default stealth
   profile hides `navigator.webdriver` and the headless User-Agent, and
-  gives headless Chrome a coherent screen and a mouse, all without
-  patching the page. Many Cloudflare
+  gives headless Chrome a coherent screen (and, on Linux, a mouse), all
+  without patching the page. Many Cloudflare
   Turnstile, PerimeterX, and DataDome challenges pass without manual
   headers; sites with more aggressive detection layers may still need
   the dedicated bypass features (see [Cloudflare](./cloudflare.md) /

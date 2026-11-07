@@ -208,8 +208,9 @@ produces one. It does not solve:
 - **Silent / invisible Turnstile.** There is no UI element to click and
   the verdict comes from passive fingerprinting. The loop returns
   `TokenAcquired` the moment the field is populated, but nothing here
-  makes Cloudflare populate it — that is stealth's job. Pair
-  `StealthProfile::spoofed()` with a clean residential IP.
+  makes Cloudflare populate it — that is stealth's job. Pair the stealth
+  profile (see [Stealth](./stealth.md#when-to-use-which) for which one)
+  with a clean residential IP.
 - **Cloudflare's full Pro / Enterprise managed challenge** (which can
   escalate to image puzzles or even hCaptcha).
 - **Bot Fight Mode soft blocks** that issue 403s without a UI.

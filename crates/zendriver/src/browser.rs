@@ -848,7 +848,8 @@ impl BrowserBuilder {
     /// Builder seeded with the default [`StealthProfile::native`] profile.
     ///
     /// Pass `.stealth(StealthProfile::off())` to opt out, or
-    /// `.stealth(StealthProfile::spoofed())` for the full anti-detection set.
+    /// `.stealth(StealthProfile::spoofed())` to also present another device's
+    /// values in the page (see [`StealthProfile::spoofed`] for its cost).
     /// Equivalent to [`Browser::builder`].
     ///
     /// # Examples
@@ -871,9 +872,9 @@ impl BrowserBuilder {
     /// headless Chrome has no input devices and its pages would see no
     /// pointer, Chrome also gets the Blink settings of a mouse (see
     /// [`StealthProfile::pointer_blink_settings`]), with the `native` or
-    /// `spoofed` stealth profile (`native` is the default). With `native`,
-    /// Chrome also gets a screen (`--screen-info`), and windows that fill its
-    /// work area (see [`StealthProfile::native`]).
+    /// `spoofed` stealth profile (`native` is the default). With either of
+    /// them, Chrome also gets a screen (`--screen-info`), and windows that
+    /// fill its work area (see [`StealthProfile::native`]).
     /// Pass `false` to launch a visible window (useful for local debugging).
     ///
     /// # Examples
@@ -1498,7 +1499,8 @@ impl BrowserBuilder {
     /// Pass [`StealthProfile::off`](zendriver_stealth::StealthProfile::off) to
     /// disable stealth entirely or
     /// [`StealthProfile::spoofed`](zendriver_stealth::StealthProfile::spoofed)
-    /// for the full anti-detection set.
+    /// to also present another device's values in the page, at the cost its
+    /// docs describe.
     ///
     /// # Examples
     ///
@@ -4314,7 +4316,10 @@ impl BrowserBuilder {
     /// [`BrowserBuilder::env`], [`BrowserBuilder::env_remove`], and any
     /// launch flags ([`BrowserBuilder::arg`] / headless / sandbox / channel /
     /// lang / user-agent) — are **ignored** on the connect path, since no
-    /// process is launched.
+    /// process is launched. So are the stealth profile's own launch flags
+    /// ([`StealthProfile::build_flags`]): the Chrome you connect to hides
+    /// `navigator.webdriver`, limits WebRTC to the proxy, and (in headless)
+    /// has the profile's screen only if it was started with them.
     ///
     /// # Errors
     ///
