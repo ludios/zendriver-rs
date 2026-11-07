@@ -473,9 +473,14 @@ impl MonitorBuilder {
     /// the `Network` domain, and return a live [`NetworkMonitor`].
     ///
     /// This returns only after Chrome has acknowledged `Network.enable`, and
-    /// the subscription is registered before that command is sent. So every
-    /// request that Chrome makes after this returns — for example, every
-    /// request of a navigation that the caller starts next — is observed.
+    /// the subscription is registered, and being drained, before that command
+    /// is sent. So activity that the caller starts after this returns — a
+    /// navigation, say — cannot begin before the monitor is watching: none of
+    /// its requests on this session is missed because of the monitor's own
+    /// setup. This says nothing about the requests of other sessions (an
+    /// out-of-process iframe's, a worker's), which this monitor never sees,
+    /// nor about requests that [`MonitorBuilder::url_pattern`] excludes, nor
+    /// about events lost at a [`NetworkDeliveryBoundary`].
     ///
     /// The correlator task runs until the monitor is dropped,
     /// [`NetworkMonitor::stop`] is called, or — **fail closed** — the
@@ -493,7 +498,7 @@ impl MonitorBuilder {
     ///
     /// Fails when `Network.enable` fails, in which case the task is cancelled:
     /// the connection is gone ([`crate::ZendriverError::Disconnected`] /
-    /// [`crate::ZendriverError::Transport`]), the command went unanswered
+    /// [`crate::ZendriverError::Transport`]), the call ran out its budget
     /// ([`crate::ZendriverError::CdpTimeout`]), or Chrome refused it
     /// ([`crate::ZendriverError::Cdp`]).
     pub async fn start(self) -> crate::Result<NetworkMonitor> {
@@ -583,11 +588,11 @@ type PartialExchange = (MonitoredRequest, Option<MonitoredResponse>);
 /// dropping the exchange. One stream preserves CDP's wire order — this mirrors
 /// [`crate::network_idle`].
 ///
-/// `events` riding [`SessionHandle::subscribe_accounted`] (rather than the
-/// plain `subscribe_raw`) is what makes delivery loss observable at all: a lag,
-/// reconnect, or disconnect is reported as an explicit [`AccountedRawEvent`]
-/// instead of vanishing. See [`NetworkDeliveryBoundary`] for how each case
-/// is handled.
+/// Because `events` comes from [`SessionHandle::subscribe_accounted`] (rather
+/// than the plain `subscribe_raw`), a lag, reconnect, or disconnect is reported
+/// as an explicit [`AccountedRawEvent`] instead of vanishing; that is what makes
+/// delivery loss observable at all. See [`NetworkDeliveryBoundary`] for how
+/// each case is handled.
 async fn run_monitor(
     session: SessionHandle,
     mut events: impl Stream<Item = AccountedRawEvent> + Send + Unpin + 'static,
@@ -1325,8 +1330,9 @@ mod tests {
     /// Spawn a monitor over a fresh mock session and return the live monitor
     /// plus the mock (to emit events) and connection (to shut down).
     ///
-    /// Any event the test emits afterwards is observed: `start()` subscribes
-    /// before it sends `Network.enable`, and returns only once that command
+    /// An event of `SID` that the test emits after this returns reaches the
+    /// correlator: `start()` subscribes before it sends `Network.enable`, and
+    /// returns only once that command
     /// is answered — which [`start_answering_enable`] does, since the mock
     /// never answers on its own.
     async fn spawn_monitor(
@@ -2409,7 +2415,7 @@ mod tests {
     }
 
     /// When Chrome refuses `Network.enable`, `start()` fails with that
-    /// refusal instead of returning a monitor that would never yield.
+    /// refusal instead of hiding that its setup failed.
     #[tokio::test]
     async fn start_fails_when_network_enable_is_refused() {
         let (mut mock, conn) = MockConnection::pair();
@@ -2428,8 +2434,9 @@ mod tests {
         );
     }
 
-    /// So does starting a monitor on a connection that is already shut down:
-    /// its `Network.enable` can't be sent.
+    /// Starting a monitor on a connection that is already shut down fails
+    /// too: its `Network.enable` is answered with the shutdown error (whether
+    /// or not the command reached the socket first).
     #[tokio::test]
     async fn start_fails_after_a_shutdown() {
         let (_mock, conn) = MockConnection::pair();

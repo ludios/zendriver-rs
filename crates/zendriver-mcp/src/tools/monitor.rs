@@ -6,8 +6,9 @@
 //! spawns a *drain task* that owns that stream. The task pulls events, converts
 //! each `zendriver::NetworkEvent` into the wire-level [`MonitorEvent`], and
 //! pushes them into a per-handle bounded ring ([`MonitorBuffer`], capped at
-//! [`MONITOR_BUFFER_CAP`]). The handle is returned synchronously; the task runs
-//! until cancelled.
+//! [`MONITOR_BUFFER_CAP`]). The handle is returned once the monitor is live
+//! (`start()` awaits Chrome's acknowledgement of `Network.enable`); the task
+//! runs until cancelled.
 //!
 //! `browser_monitor_read` drains the ring (up to `max`) and reports the running
 //! `dropped` count (events evicted while the ring was full), then resets it.
@@ -108,9 +109,9 @@ pub struct StartOutput {
 ///
 /// Resolves the current tab, builds the lib-side monitor stream, spawns the
 /// drain task, and registers the resulting [`MonitorState`] under a fresh
-/// handle. Returns once the monitor is live — that is, once Chrome has
-/// acknowledged its `Network.enable` — so a navigation that the agent starts
-/// after this call is fully observed; events accumulate in the background.
+/// handle. Returns once Chrome has acknowledged the monitor's `Network.enable`,
+/// so a navigation that the agent starts after this call cannot begin before
+/// the monitor is watching; events accumulate in the background.
 pub async fn start(
     state: Arc<Mutex<SessionState>>,
     input: StartInput,
