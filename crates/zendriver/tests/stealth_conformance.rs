@@ -77,7 +77,6 @@ const INVARIANTS: &[(&str, &str)] = &[
         const getter = (proto, name) => Object.getOwnPropertyDescriptor(proto, name)?.get;
         const functions = {
           'Function.prototype.toString': Function.prototype.toString,
-          'permissions.query': navigator.permissions.query,
           'HTMLCanvasElement.prototype.toDataURL': HTMLCanvasElement.prototype.toDataURL,
           'CanvasRenderingContext2D.prototype.getImageData':
             CanvasRenderingContext2D.prototype.getImageData,
@@ -88,7 +87,6 @@ const INVARIANTS: &[(&str, &str)] = &[
           'Element.prototype.getClientRects': Element.prototype.getClientRects,
           'HTMLMediaElement.prototype.canPlayType': HTMLMediaElement.prototype.canPlayType,
           'Navigator.prototype.platform getter': getter(Navigator.prototype, 'platform'),
-          'Navigator.prototype.plugins getter': getter(Navigator.prototype, 'plugins'),
           'HTMLImageElement.prototype.naturalWidth getter':
             getter(HTMLImageElement.prototype, 'naturalWidth'),
         };
@@ -225,16 +223,6 @@ const KNOWN_BUGS: &[(&str, &[&str], &str)] = &[
         "blank_canvas_reads_zeros",
         SPOOFED,
         "P1 Stealth: canvas farbling turns transparent pixels into (1,1,1,0) (ST #2)",
-    ),
-    (
-        "notification_permission_states_are_valid",
-        SPOOFED,
-        "P1 Stealth: permissions.js returns 'default' (ST #8)",
-    ),
-    (
-        "plugins_are_a_plugin_array_of_5",
-        SPOOFED,
-        "P1 Stealth: plugins.js needs 5 entries and a real PluginArray (ST #9)",
     ),
     (
         "client_rects_are_a_dom_rect_list",

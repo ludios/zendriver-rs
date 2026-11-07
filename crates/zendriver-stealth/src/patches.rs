@@ -18,9 +18,6 @@ use crate::{Fingerprint, GpuProfile, Persona, Platform, Seed, UserAgentMetadata}
 const NATIVE: &str = include_str!("patches/_native.js");
 
 // --- Identity patches (run inside the fp IIFE) ---------------------------
-const PLUGINS: &str = include_str!("patches/plugins.js");
-const CHROME: &str = include_str!("patches/chrome.js");
-const PERMISSIONS: &str = include_str!("patches/permissions.js");
 const CODECS: &str = include_str!("patches/codecs.js");
 const NAVIGATOR_PROPS: &str = include_str!("patches/navigator_props.js");
 const USER_AGENT_DATA: &str = include_str!("patches/user_agent_data.js");
@@ -239,7 +236,7 @@ fn identity_iife(persona: &Persona, identity: &Fingerprint) -> String {
     });
 
     format!(
-        "(function(fp){{\n{PLUGINS}\n{CHROME}\n{PERMISSIONS}\n{CODECS}\n{NAVIGATOR_PROPS}\n{USER_AGENT_DATA}\n{BROKEN_IMAGE}\n}})({fp_json});",
+        "(function(fp){{\n{CODECS}\n{NAVIGATOR_PROPS}\n{USER_AGENT_DATA}\n{BROKEN_IMAGE}\n}})({fp_json});",
     )
 }
 
@@ -684,15 +681,9 @@ mod tests {
     #[test]
     fn bootstrap_includes_every_patch() {
         let s = bootstrap_script(&Persona::default(), &mock_identity());
-        assert!(s.contains("PluginArray"), "plugins patch missing");
-        assert!(s.contains("window.chrome"), "chrome patch missing");
         assert!(
             s.contains("UNMASKED_VENDOR_WEBGL") || s.contains("37445"),
             "webgl patch missing"
-        );
-        assert!(
-            s.contains("Notification.permission"),
-            "permissions patch missing"
         );
         assert!(s.contains("canPlayType"), "codecs patch missing");
         assert!(
@@ -1289,12 +1280,6 @@ mod tests {
         // Only the webgl block is dropped — identity IIFE + other surfaces
         // are byte-for-byte what `bootstrap_script` would emit.
         let s = bootstrap_script_native_webgl(&Persona::default(), &mock_identity());
-        assert!(s.contains("PluginArray"), "plugins patch missing");
-        assert!(s.contains("window.chrome"), "chrome patch missing");
-        assert!(
-            s.contains("Notification.permission"),
-            "permissions patch missing"
-        );
         assert!(s.contains("canPlayType"), "codecs patch missing");
         assert!(
             s.contains("hardwareConcurrency"),
@@ -1943,25 +1928,30 @@ mod tests {
     #[test]
     fn identity_patches_route_through_masking_helpers() {
         let s = bootstrap_script(&Persona::default(), &mock_identity());
-        assert!(
-            s.contains("__zdGetter(Navigator.prototype, 'plugins'"),
-            "plugins getter"
-        );
-        assert!(
-            s.contains("__zdReplace"),
-            "permissions/codecs methods routed"
-        );
+        assert!(s.contains("__zdReplace"), "codecs methods routed");
         assert!(s.contains("__zdMark"), "value-fn members marked");
     }
 
     /// `(needle, why)`: what the bootstrap must not contain, because Chrome
     /// itself already gives the page the right value. A JS patch there could
     /// only add a detectable replacement of Chrome's own function.
-    const LEFT_TO_CHROME: &[(&str, &str)] = &[(
-        "webdriver",
-        "the launch flag --disable-blink-features=AutomationControlled makes \
-         Chrome's own navigator.webdriver false",
-    )];
+    const LEFT_TO_CHROME: &[(&str, &str)] = &[
+        (
+            "webdriver",
+            "the launch flag --disable-blink-features=AutomationControlled makes \
+             Chrome's own navigator.webdriver false",
+        ),
+        (
+            "plugins",
+            "Chrome's headless mode has the same 5 PDF plugins as a headed Chrome",
+        ),
+        ("window.chrome", "Chrome's headless mode has window.chrome"),
+        (
+            "permissions",
+            "Chrome's headless mode makes Notification.permission and \
+             permissions.query agree",
+        ),
+    ];
 
     #[test]
     fn bootstrap_leaves_alone_what_chrome_sets_natively() {

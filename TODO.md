@@ -179,8 +179,6 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
 - [ ] **`fonts.js` bugs:** `measureText` isn't deterministic; `fonts.check` keeps only the last word of the family name. *(ST #5, #6)*
   - Also, real Chrome's `document.fonts.check()` is true for any local font, even one that doesn't exist (seen in Chrome 156 and 157), while the persona allow-list answers false for every family not on it. So the allow-list is itself a deviation, which fixing the parsing leaves in place.
 - [ ] **`innerHeight` is smaller than `clientHeight`.** Only under the spoofed profiles. *(ST #7)*
-- [ ] **`permissions.js` returns `'default'`.** It should be `'prompt'`. *(ST #8, R6)*
-- [ ] **`plugins.js`:** needs 5 entries and a real `PluginArray`. *(ST #9, R6)*
 - [ ] **`userAgentData`:** the object is rebuilt on every access, and `getHighEntropyValues` ignores the requested hints. *(ST #10)*
 - [ ] **`getClientRects()` returns an `Array`,** not a `DOMRectList`. *(ST #11)*
 - [ ] **Masked functions are constructible** in the spoofed patches: each is an ordinary `function`, with an own `prototype` (rebrowser's `nativeTampering` checks for one). *(ST #12)*
