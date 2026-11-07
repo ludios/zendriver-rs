@@ -108,7 +108,9 @@ pub struct StartOutput {
 ///
 /// Resolves the current tab, builds the lib-side monitor stream, spawns the
 /// drain task, and registers the resulting [`MonitorState`] under a fresh
-/// handle. Returns immediately — events accumulate in the background.
+/// handle. Returns once the monitor is live — that is, once Chrome has
+/// acknowledged its `Network.enable` — so a navigation that the agent starts
+/// after this call is fully observed; events accumulate in the background.
 pub async fn start(
     state: Arc<Mutex<SessionState>>,
     input: StartInput,

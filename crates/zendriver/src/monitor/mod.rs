@@ -469,11 +469,17 @@ impl MonitorBuilder {
         self
     }
 
-    /// Spawn the correlator task and return a live [`NetworkMonitor`].
+    /// Subscribe to the session's events, enable the `Network` domain, and
+    /// spawn the correlator task; return a live [`NetworkMonitor`].
     ///
-    /// The task subscribes to the session's loss-accounted CDP event stream
-    /// and runs until the monitor is dropped, [`NetworkMonitor::stop`] is
-    /// called, or — **fail closed** — the underlying transport reports
+    /// This returns only after Chrome has acknowledged `Network.enable`, and
+    /// the subscription is registered before that command is sent. So every
+    /// request that Chrome makes after this returns — for example, every
+    /// request of a navigation that the caller starts next — is observed.
+    ///
+    /// The correlator task runs until the monitor is dropped,
+    /// [`NetworkMonitor::stop`] is called, or — **fail closed** — the
+    /// underlying transport reports
     /// [`NetworkDeliveryBoundary::Disconnected`] or
     /// [`NetworkDeliveryBoundary::Shutdown`]. In those two cases the task
     /// emits that boundary event and then ends; the stream returns `None` on
@@ -485,14 +491,28 @@ impl MonitorBuilder {
     ///
     /// # Errors
     ///
-    /// Currently infallible, but returns [`crate::Result`] so future setup
-    /// (e.g. an explicit `Network.enable` round-trip) can surface errors
-    /// without an API break.
+    /// Fails when `Network.enable` fails, in which case no task is spawned:
+    /// the connection is gone ([`crate::ZendriverError::Disconnected`] /
+    /// [`crate::ZendriverError::Transport`]), the command went unanswered
+    /// ([`crate::ZendriverError::CdpTimeout`]), or Chrome refused it
+    /// ([`crate::ZendriverError::Cdp`]).
     pub async fn start(self) -> crate::Result<NetworkMonitor> {
+        // Subscribe BEFORE sending `Network.enable`: the accounted bus is a
+        // `broadcast` receiver that only sees frames sent after it registers,
+        // so an event that Chrome fires between `enable`'s reply and a later
+        // registration would be lost. And await the reply before returning:
+        // until Chrome has enabled the domain, it reports no requests, so a
+        // navigation that the caller starts right after this would otherwise
+        // begin unobserved.
+        let events = self.session.subscribe_accounted();
+        self.session
+            .call("Network.enable", serde_json::json!({}))
+            .await?;
         let (tx, rx) = mpsc::channel(CHANNEL_CAP);
         let cancel = CancellationToken::new();
         let task = tokio::spawn(run_monitor(
             self.session,
+            events,
             self.url_pattern,
             self.stream_bodies,
             tx,
@@ -545,9 +565,11 @@ impl Stream for NetworkMonitor {
 /// `responseReceived` arrives. Completed on `loadingFinished` / `loadingFailed`.
 type PartialExchange = (MonitoredRequest, Option<MonitoredResponse>);
 
-/// The correlator task. Drives a single loss-accounted CDP event subscription,
-/// dispatching by `method` and correlating `requestId`s into completed
-/// [`NetworkExchange`]s plus WebSocket / EventSource notifications.
+/// The correlator task. Drives `events` — the session's loss-accounted CDP
+/// event subscription, which [`MonitorBuilder::start`] registered before it
+/// sent `Network.enable` — dispatching by `method` and correlating
+/// `requestId`s into completed [`NetworkExchange`]s plus WebSocket /
+/// EventSource notifications.
 ///
 /// A single subscription (rather than several typed subscriptions in a
 /// `tokio::select!`) is deliberate: `select!` picks a ready arm at random and
@@ -555,13 +577,14 @@ type PartialExchange = (MonitoredRequest, Option<MonitoredResponse>);
 /// dropping the exchange. One stream preserves CDP's wire order — this mirrors
 /// [`crate::network_idle`].
 ///
-/// Riding [`SessionHandle::subscribe_accounted`] (rather than the plain
-/// `subscribe_raw`) is what makes delivery loss observable at all: a lag,
+/// `events` riding [`SessionHandle::subscribe_accounted`] (rather than the
+/// plain `subscribe_raw`) is what makes delivery loss observable at all: a lag,
 /// reconnect, or disconnect is reported as an explicit [`AccountedRawEvent`]
 /// instead of vanishing. See [`NetworkDeliveryBoundary`] for how each case
 /// is handled.
 async fn run_monitor(
     session: SessionHandle,
+    mut events: impl Stream<Item = AccountedRawEvent> + Send + Unpin + 'static,
     filter: Option<UrlMatcher>,
     stream_bodies: bool,
     tx: mpsc::Sender<NetworkEvent>,
@@ -576,17 +599,6 @@ async fn run_monitor(
     // Log-dedup only, and deliberately separate: an unexpected error does not
     // disable streaming, so it must not share the gate above.
     let warned_stream_error = Arc::new(AtomicBool::new(false));
-    // Subscribe to the accounted event stream BEFORE issuing `Network.enable`:
-    // the accounted bus is a `broadcast` receiver that only sees frames sent
-    // after it registers, so any event Chrome fires between `enable`'s reply
-    // and our registration would be lost. Subscribing first plugs that race
-    // (and gives tests a deterministic `expect_cmd("Network.enable")` sync
-    // point — see `network_idle.rs`, which mirrors this ordering).
-    //
-    // ONE subscription, dispatched by method — preserves CDP wire order; a
-    // typed `select!` could reorder `loadingFinished` ahead of the matching
-    // `requestWillBeSent` and drop the exchange.
-    let mut events = session.subscribe_accounted();
     let mut partial: HashMap<String, PartialExchange> = HashMap::new();
     // requestId → url, kept so frame/close/SSE events (which omit the URL) can
     // still be matched against `filter`.
@@ -605,20 +617,6 @@ async fn run_monitor(
     // bound either — no accumulated bytes live here, just the fact that
     // streaming was already turned on for this id.
     let mut streaming: HashSet<String> = HashSet::new();
-
-    // Fire-and-forget `Network.enable` so the monitor works on its own even if
-    // nothing else enabled the domain. We don't await the reply: the mock test
-    // harness never replies, and our subscription above is already live either
-    // way. A failure (e.g. session torn down) just means no events arrive.
-    let enable_session = session.clone();
-    tokio::spawn(async move {
-        if let Err(e) = enable_session
-            .call("Network.enable", serde_json::json!({}))
-            .await
-        {
-            warn!(error = %e, "network monitor: Network.enable failed; events may be inactive");
-        }
-    });
 
     loop {
         tokio::select! {
@@ -992,9 +990,8 @@ const JSON_RPC_METHOD_NOT_FOUND: i32 = -32601;
 const JSON_RPC_INVALID_PARAMS: i32 = -32602;
 
 /// Enable `Network.streamResourceContent` for `request_id` in a spawned
-/// task, mirroring the correlator's existing fire-and-forget
-/// `Network.enable` call: the CDP round-trip must not block the main
-/// dispatch loop from processing the next event in wire order.
+/// task: the CDP round-trip must not block the main dispatch loop from
+/// processing the next event in wire order.
 ///
 /// On success, any `bufferedData` (bytes Chrome already had before the
 /// enable call landed) is emitted as the first [`NetworkEvent::HttpData`]
@@ -1190,9 +1187,11 @@ mod tests {
     use std::time::Duration;
 
     use serde_json::json;
+    use zendriver_transport::TransportError;
     use zendriver_transport::testing::MockConnection;
 
     use super::*;
+    use crate::ZendriverError;
 
     const SID: &str = "S1";
 
@@ -1320,14 +1319,10 @@ mod tests {
     /// Spawn a monitor over a fresh mock session and return the live monitor
     /// plus the mock (to emit events) and connection (to shut down).
     ///
-    /// Crucially, this awaits the correlator's fire-and-forget
-    /// `Network.enable` command before returning. `subscribe_accounted` reads
-    /// a `broadcast` receiver that only sees frames sent after it registers,
-    /// and the correlator subscribes *before* issuing `Network.enable` — so
-    /// once that command lands the subscription is guaranteed live, and any
-    /// event the test emits afterwards is observed. This mirrors the
-    /// `network_idle` harness's `expect_cmd("Network.enable")`
-    /// synchronization.
+    /// Any event the test emits afterwards is observed: `start()` subscribes
+    /// before it sends `Network.enable`, and returns only once that command
+    /// is answered — which [`start_answering_enable`] does, since the mock
+    /// never answers on its own.
     async fn spawn_monitor(
         filter: Option<UrlMatcher>,
     ) -> (
@@ -1340,8 +1335,7 @@ mod tests {
 
     /// Like [`spawn_monitor`], but over a caller-supplied `(MockConnection,
     /// Connection)` pair — lets a test force a deterministic `Lagged`
-    /// boundary via [`MockConnection::pair_with_accounted_capacity`] while
-    /// still getting the same `Network.enable` synchronization.
+    /// boundary via [`MockConnection::pair_with_accounted_capacity`].
     async fn spawn_monitor_with(
         pair: (MockConnection, zendriver_transport::Connection),
         filter: Option<UrlMatcher>,
@@ -1356,11 +1350,22 @@ mod tests {
         if let Some(f) = filter {
             builder = builder.url_pattern(f);
         }
-        let monitor = builder.start().await.unwrap();
-        // Synchronize: the correlator subscribed before sending this.
-        let id = mock.expect_cmd("Network.enable").await;
-        mock.reply(id, json!({})).await;
+        let monitor = start_answering_enable(builder, &mut mock).await;
         (monitor, mock, conn)
+    }
+
+    /// Run `builder.start()` to completion, answering the `Network.enable`
+    /// that it sends on `mock` and waits for. Returns the started monitor.
+    async fn start_answering_enable(
+        builder: MonitorBuilder,
+        mock: &mut MockConnection,
+    ) -> NetworkMonitor {
+        let answer = async {
+            let id = mock.expect_cmd("Network.enable").await;
+            mock.reply(id, json!({})).await;
+        };
+        let (started, ()) = tokio::join!(builder.start(), answer);
+        started.unwrap()
     }
 
     /// Await the next emitted event, failing if none arrives within 2s. The
@@ -1582,9 +1587,7 @@ mod tests {
         if let Some(f) = filter {
             builder = builder.url_pattern(f);
         }
-        let monitor = builder.start().await.unwrap();
-        let id = mock.expect_cmd("Network.enable").await;
-        mock.reply(id, json!({})).await;
+        let monitor = start_answering_enable(builder, &mut mock).await;
         (monitor, mock, conn)
     }
 
@@ -2376,32 +2379,64 @@ mod tests {
         assert!(next.is_none(), "expected the stream to end, got {next:?}");
     }
 
-    /// A monitor started on a connection that is already shut down ends at
-    /// once, with the `Shutdown` boundary, rather than waiting forever: its
-    /// task subscribes only after `start()` returns, so this also covers a
-    /// shutdown that comes right after `start()`.
+    /// `start()` returns only once Chrome has answered `Network.enable`, with
+    /// the subscription already live: a navigation that the caller starts
+    /// after `start()` returns can't outrun the domain being enabled, and
+    /// the first request that Chrome then reports is observed.
     #[tokio::test]
-    async fn a_monitor_started_after_a_shutdown_ends() {
-        let (_mock, conn) = MockConnection::pair();
-        let session = SessionHandle::new(conn.clone(), "S1");
-        conn.shutdown();
-        // Let the actor stop, and so end its generation.
-        let gone = conn
-            .call_raw("Runtime.evaluate", serde_json::json!({}), None)
-            .await;
-        assert!(gone.is_err(), "{gone:?}");
+    async fn start_returns_only_after_network_enable_is_answered() {
+        let (mut mock, conn) = MockConnection::pair();
+        let session = SessionHandle::new(conn, SID);
+        let mut start = tokio::spawn(MonitorBuilder::new(session).start());
+        let id = mock.expect_cmd("Network.enable").await;
+        // The command is out but unanswered, so `start()` must still be pending.
+        let early = tokio::time::timeout(Duration::from_millis(100), &mut start).await;
+        assert!(
+            early.is_err(),
+            "start() finished before Network.enable was answered"
+        );
 
-        let mut monitor = MonitorBuilder::new(session).start().await.unwrap();
-        match next_event(&mut monitor).await {
-            NetworkEvent::DeliveryBoundary(NetworkDeliveryBoundary::Shutdown { generation }) => {
-                assert_eq!(generation, 1);
-            }
-            other => panic!("expected DeliveryBoundary::Shutdown, got {other:?}"),
-        }
-        let next = tokio::time::timeout(Duration::from_secs(2), monitor.next())
-            .await
-            .expect("monitor stream did not end within 2s after Shutdown");
-        assert!(next.is_none(), "expected the stream to end, got {next:?}");
+        mock.reply(id, json!({})).await;
+        let mut monitor = start.await.unwrap().unwrap();
+        emit_request(&mut mock, "1").await;
+        settle_by_completing(&mut monitor, &mock, "1").await;
+    }
+
+    /// When Chrome refuses `Network.enable`, `start()` fails with that
+    /// refusal instead of returning a monitor that would never yield.
+    #[tokio::test]
+    async fn start_fails_when_network_enable_is_refused() {
+        let (mut mock, conn) = MockConnection::pair();
+        let session = SessionHandle::new(conn, SID);
+        let refuse = async {
+            let id = mock.expect_cmd("Network.enable").await;
+            mock.reply_err(id, -32000, "Not allowed").await;
+        };
+        let (started, ()) = tokio::join!(MonitorBuilder::new(session).start(), refuse);
+        let Err(err) = started else {
+            panic!("start() succeeded despite the refused Network.enable");
+        };
+        assert!(
+            matches!(err, ZendriverError::Cdp { code: -32000, .. }),
+            "{err:?}"
+        );
+    }
+
+    /// So does starting a monitor on a connection that is already shut down:
+    /// its `Network.enable` can't be sent.
+    #[tokio::test]
+    async fn start_fails_after_a_shutdown() {
+        let (_mock, conn) = MockConnection::pair();
+        let session = SessionHandle::new(conn.clone(), SID);
+        conn.shutdown();
+
+        let Err(err) = MonitorBuilder::new(session).start().await else {
+            panic!("start() succeeded on a shut-down connection");
+        };
+        assert!(
+            matches!(&err, ZendriverError::Transport(t) if matches!(**t, TransportError::Shutdown)),
+            "{err:?}"
+        );
     }
 
     // `MockConnection::pair()` spawns the connection actor, which requires a

@@ -8,8 +8,10 @@ zendriver = { version = "0.1", features = ["monitor"] }
 ```
 
 [`tab.monitor()`] returns a [`MonitorBuilder`]; set an optional URL filter,
-then `.start().await?` spawns the correlator task and hands back a
-[`NetworkMonitor`] — a [`Stream`] of [`NetworkEvent`]:
+then `.start().await?` enables the `Network` domain, spawns the correlator
+task, and hands back a [`NetworkMonitor`] — a [`Stream`] of [`NetworkEvent`].
+It returns only once Chrome has acknowledged `Network.enable`, so a
+navigation started after it returns is fully observed:
 
 ```rust,ignore
 use futures::StreamExt;
