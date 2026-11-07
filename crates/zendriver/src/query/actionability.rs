@@ -30,12 +30,13 @@
 //! tests are `#[ignore]`d, so they run only in the scheduled
 //! `nightly-ignored-tests` lane, which carries `continue-on-error: true`.
 //!
-//! `tests/actionability.rs` runs `check_enabled` on every way to disable a
-//! control.
+//! `tests/actionability.rs` runs `check_enabled` on each case that its doc
+//! lists, and checks that a click waits for its control to be enabled.
 //!
-//! `check_stable` / `check_receives_pointer` have no live fixture at all.
-//! Widening either means writing the fixture that would catch the mistake;
-//! do not assume one is waiting.
+//! `check_stable` has no live fixture at all, and `check_receives_pointer`
+//! has only `tests/element_world_regressions.rs`'s click inside an iframe,
+//! where nothing covers the element. Widening either means writing the
+//! fixture that would catch the mistake; do not assume one is waiting.
 
 use std::time::Duration;
 
@@ -311,20 +312,30 @@ pub(crate) async fn check_stable(el: &Element) -> Result<bool> {
     Ok(res.get("value").and_then(|v| v.as_bool()).unwrap_or(false))
 }
 
-/// `true` iff the element is not disabled: it doesn't match CSS
-/// `:disabled` AND its `aria-disabled` is not `'true'`. `:disabled` is
-/// Chrome's own answer, so it also covers a control inside a disabled
-/// `<fieldset>` (outside its first `<legend>`) and an `<option>` in a
-/// disabled `<optgroup>`, which `el.disabled` reads as false. Elements that
-/// can't be disabled are enabled.
+/// `true` iff the element is not disabled. Disabled means any of:
+///
+/// - The element or an ancestor matches CSS `:disabled`, which is Chrome's
+///   own answer. Besides a control's own `disabled` attribute, it covers a
+///   control inside a disabled `<fieldset>` (outside that fieldset's first
+///   `<legend>`) and an `<option>` in a disabled `<optgroup>`. A disabled
+///   `<fieldset>` ancestor alone doesn't count, so that a control in its
+///   first `<legend>` stays enabled; an ancestor control (a `<span>` inside a
+///   disabled `<button>`) does.
+/// - The element or an ancestor has `aria-disabled="true"`, in any case.
+/// - The element's `disabled` property is `true`. `:disabled` ignores that
+///   property on a custom element that isn't form-associated.
+///
+/// The ancestor walk stops at the element's shadow root.
 pub(crate) async fn check_enabled(el: &Element) -> Result<bool> {
+    // `Element.prototype.closest`, not `el.closest`: a form's named control
+    // (`<input name="closest">`) hides the form's own method.
     let js = r#"
         function(el) {
             if (!el) return false;
-            if (el.matches && el.matches(':disabled')) return false;
-            const ariaDisabled = el.getAttribute && el.getAttribute('aria-disabled');
-            if (ariaDisabled === 'true') return false;
-            return true;
+            if (el.nodeType !== 1) return true;
+            if (el.disabled === true) return false;
+            const selector = ':disabled:not(fieldset), [aria-disabled="true" i]';
+            return Element.prototype.closest.call(el, selector) === null;
         }
     "#;
     let res = el.call_on_main(js, json!([])).await?;

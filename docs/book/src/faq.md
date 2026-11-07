@@ -35,6 +35,10 @@ Common causes:
   or zero bounding box, or scrolling can't bring it into the viewport
   (e.g. `left: -9999px`). Use `tab.find().css("...").visible_only(true)` to
   skip the first kind during the query.
+- **Disabled** — the element or an ancestor matches `:disabled` (a
+  disabled `<fieldset>` disables the controls outside its first
+  `<legend>`) or has `aria-disabled="true"`, or the element's `disabled`
+  property is `true`. The gate waits for the page to enable it.
 - **Hit-test failure** — a modal overlay sits above the element. Close
   the overlay first, or pass `ClickOptions { force: true, ..default() }`
   to bypass the check.

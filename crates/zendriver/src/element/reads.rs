@@ -322,10 +322,19 @@ impl Element {
 
     /// Returns `true` iff the element is not disabled.
     ///
-    /// Disabled means matching CSS `:disabled` (which also covers a
-    /// control inside a disabled `<fieldset>` and an `<option>` in a
-    /// disabled `<optgroup>`) or having `aria-disabled="true"`. Elements
-    /// that can't be disabled are enabled.
+    /// The element is disabled when any of these holds:
+    ///
+    /// - It or an ancestor other than a `<fieldset>` matches CSS
+    ///   `:disabled`. So a control inside a disabled `<fieldset>` is
+    ///   disabled unless it is inside that fieldset's first `<legend>`, and
+    ///   so is an `<option>` in a disabled `<optgroup>` and a `<span>`
+    ///   inside a disabled `<button>`.
+    /// - It or an ancestor has `aria-disabled="true"`, in any case.
+    /// - Its `disabled` property is `true`. This covers a custom element
+    ///   that isn't form-associated, which `:disabled` ignores.
+    ///
+    /// The ancestor walk stops at the element's shadow root. An element for
+    /// which none of these holds is enabled.
     ///
     /// # Examples
     ///
