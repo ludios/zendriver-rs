@@ -445,16 +445,27 @@ impl TargetObserver for StealthObserver {
         // and a real machine never pairs the persona's count with the host's
         // tier. Chrome only has the override from 153 on, so a Chrome without
         // it reports the host's tier.
-        if self.profile.kind() == ProfileKind::Spoofed {
+        //
+        // Chrome rejects a count outside 1 to `i32::MAX`, which would fail the
+        // page's setup; the page then reports the host's count and tier.
+        let cores = self.fingerprint.cpu_count;
+        let reportable = i32::try_from(cores).is_ok_and(|n| n > 0);
+        if self.profile.kind() == ProfileKind::Spoofed && !reportable {
+            tracing::warn!(
+                cpu_count = cores,
+                "stealth: Chrome can't report this CPU count; the page reports the host's"
+            );
+        }
+        if self.profile.kind() == ProfileKind::Spoofed && reportable {
             session
                 .call(
                     "Emulation.setHardwareConcurrencyOverride",
-                    json!({ "hardwareConcurrency": self.fingerprint.cpu_count }),
+                    json!({ "hardwareConcurrency": cores }),
                 )
                 .await?;
             let apple_silicon = self.fingerprint.platform == Platform::MacIntel
                 && user_agent_metadata.architecture == "arm";
-            let tier = cpu_performance_tier(self.fingerprint.cpu_count, apple_silicon);
+            let tier = cpu_performance_tier(cores, apple_silicon);
             let reply = session
                 .call(
                     "Emulation.setCPUPerformanceOverride",
@@ -1460,17 +1471,20 @@ mod persona_reaches_cdp_tests {
             })
     }
 
-    /// `Persona::timezone` is the caller's explicit pin and must win over the
-    /// fingerprint's. The two fixtures are deliberately different real zones:
-    /// a persona value equal to the fingerprint's would be satisfied by the
-    /// bug, which sent the fingerprint's unconditionally.
+    /// The CPU-count override takes the persona's count, else the
+    /// fingerprint's, and is left out for a count that Chrome rejects.
     #[tokio::test]
     async fn spoofed_overrides_the_cpu_count_with_the_personas_else_the_fingerprints() {
         let fp = Fingerprint {
             cpu_count: 6,
             ..bare_fingerprint()
         };
-        for (pinned, expected) in [(Some(12), 12), (None, 6), (Some(0), 6)] {
+        for (pinned, expected) in [
+            (Some(12), Some(12)),
+            (None, Some(6)),
+            (Some(0), None),
+            (Some(u32::MAX), None),
+        ] {
             let persona = Persona {
                 hardware_concurrency: pinned,
                 ..Persona::default()
@@ -1481,6 +1495,19 @@ mod persona_reaches_cdp_tests {
                 persona,
             ))
             .await;
+            let Some(expected) = expected else {
+                let methods = method_names(&frames);
+                for absent in [
+                    "Emulation.setHardwareConcurrencyOverride",
+                    "Emulation.setCPUPerformanceOverride",
+                ] {
+                    assert!(
+                        !methods.iter().any(|m| m == absent),
+                        "persona hardware_concurrency {pinned:?}: sent {absent}"
+                    );
+                }
+                continue;
+            };
             assert_eq!(
                 params(&frames, "Emulation.setHardwareConcurrencyOverride")["hardwareConcurrency"]
                     .as_u64(),
@@ -1573,6 +1600,10 @@ mod persona_reaches_cdp_tests {
         );
     }
 
+    /// `Persona::timezone` is the caller's explicit pin and must win over the
+    /// fingerprint's. The two fixtures are deliberately different real zones:
+    /// a persona value equal to the fingerprint's would be satisfied by the
+    /// bug, which sent the fingerprint's unconditionally.
     #[tokio::test]
     async fn persona_timezone_wins_over_the_fingerprints_in_the_cdp_override() {
         let fp = Fingerprint {

@@ -230,10 +230,11 @@ impl Fingerprint {
     /// Fold a [`Persona`](crate::Persona)'s explicitly-set fields into this
     /// fingerprint.
     ///
-    /// Four axes exist on both types — `timezone`, `locale`, `languages`,
-    /// `screen` — and four separate consumers read them: the CDP
-    /// `Emulation.set*Override` calls, the `Accept-Language` header, the JS
-    /// patches, and (for the screen) the launch switches of
+    /// Five axes exist on both types — `timezone`, `locale`, `languages`,
+    /// `screen`, and the CPU count (`hardware_concurrency` on the persona,
+    /// `cpu_count` here) — and three separate consumers read them: the CDP
+    /// `Emulation.set*Override` calls, the `Accept-Language` header, and
+    /// (for the screen) the launch switches of
     /// [`StealthObserver::headless_flags`](crate::StealthObserver::headless_flags).
     /// Merging once, at the single point where a persona and a
     /// fingerprint meet
@@ -265,14 +266,8 @@ impl Fingerprint {
         if let Some(screen) = persona.screen {
             self.screen = Some(screen);
         }
-        // Chrome rejects a count of 0, which would fail the page's setup.
-        match persona.hardware_concurrency {
-            Some(0) => tracing::warn!(
-                cpu_count = self.cpu_count,
-                "persona hardware_concurrency 0 ignored: Chrome reports at least 1"
-            ),
-            Some(n) => self.cpu_count = n,
-            None => {}
+        if let Some(cpu_count) = persona.hardware_concurrency {
+            self.cpu_count = cpu_count;
         }
     }
 
