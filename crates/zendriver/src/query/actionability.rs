@@ -30,9 +30,12 @@
 //! tests are `#[ignore]`d, so they run only in the scheduled
 //! `nightly-ignored-tests` lane, which carries `continue-on-error: true`.
 //!
-//! `check_stable` / `check_enabled` / `check_receives_pointer` have no live
-//! fixture at all. Widening any of those means writing the fixture that
-//! would catch the mistake; do not assume one is waiting.
+//! `tests/actionability.rs` runs `check_enabled` on every way to disable a
+//! control.
+//!
+//! `check_stable` / `check_receives_pointer` have no live fixture at all.
+//! Widening either means writing the fixture that would catch the mistake;
+//! do not assume one is waiting.
 
 use std::time::Duration;
 
@@ -311,16 +314,17 @@ pub(crate) async fn check_stable(el: &Element) -> Result<bool> {
     Ok(res.get("value").and_then(|v| v.as_bool()).unwrap_or(false))
 }
 
-/// `true` iff the element is not disabled: native `el.disabled` is
-/// false-ish AND `aria-disabled` is not `'true'`. Non-form elements
-/// (which have no `disabled` property) are considered enabled.
+/// `true` iff the element is not disabled: it doesn't match CSS
+/// `:disabled` AND its `aria-disabled` is not `'true'`. `:disabled` is
+/// Chrome's own answer, so it also covers a control inside a disabled
+/// `<fieldset>` (outside its first `<legend>`) and an `<option>` in a
+/// disabled `<optgroup>`, which `el.disabled` reads as false. Elements that
+/// can't be disabled are enabled.
 pub(crate) async fn check_enabled(el: &Element) -> Result<bool> {
     let js = r#"
         function(el) {
             if (!el) return false;
-            // `disabled === false` for form controls; `undefined` for non-form elements
-            // (which we treat as enabled).
-            if (el.disabled === true) return false;
+            if (el.matches && el.matches(':disabled')) return false;
             const ariaDisabled = el.getAttribute && el.getAttribute('aria-disabled');
             if (ariaDisabled === 'true') return false;
             return true;

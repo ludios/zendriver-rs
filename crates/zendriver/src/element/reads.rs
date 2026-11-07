@@ -322,8 +322,10 @@ impl Element {
 
     /// Returns `true` iff the element is not disabled.
     ///
-    /// Native `el.disabled` is false-ish AND `aria-disabled` is not
-    /// `'true'`. Non-form elements are considered enabled.
+    /// Disabled means matching CSS `:disabled` (which also covers a
+    /// control inside a disabled `<fieldset>` and an `<option>` in a
+    /// disabled `<optgroup>`) or having `aria-disabled="true"`. Elements
+    /// that can't be disabled are enabled.
     ///
     /// # Examples
     ///
