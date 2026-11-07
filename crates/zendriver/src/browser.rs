@@ -2654,6 +2654,9 @@ impl TargetObserver for TabRegistrar {
                         .clone()
                         .filter(|id| browser.default_context_id.as_ref() != Some(id)),
                 );
+                // Network on, acknowledged, before the tab is registered — and
+                // so before `new_tab` returns it: see `Tab::enable_network`.
+                tab.enable_network().await?;
 
                 // Before the target runs (the observer chain resumes it
                 // after this), so the page's first request is intercepted.
@@ -3453,6 +3456,11 @@ pub(crate) async fn finish_connect(
         .await
         .insert(session_id, inner.main_tab.clone());
     registrar.set_browser(Arc::downgrade(&inner));
+
+    // Network on, acknowledged, before the caller gets the browser: see
+    // `Tab::enable_network`. (The registrar does the same for every later
+    // tab.)
+    inner.main_tab.enable_network().await?;
 
     // The main tab's tracker blocking and proxy credentials, in force
     // before the caller gets the browser. (The registrar starts them for
@@ -4896,7 +4904,7 @@ impl Browser {
     /// # What is NOT restored (deferred)
     ///
     /// This is the scoped v1. It does **not** replay per-feature domain arming
-    /// (`Network.enable`, active `Fetch` interception rules, `DOMStorage.enable`,
+    /// (active `Fetch` interception rules, `DOMStorage.enable`,
     /// download behavior, …) that individual features turned on before the
     /// drop — re-arm those yourself after reconnecting. The browser's own
     /// options (stealth, tracker blocking, proxy credentials) are applied to
@@ -6980,6 +6988,7 @@ mod tests {
         )
         .await;
 
+        answer_network_enable(&mut mock).await;
         let release_id = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             mock.expect_cmd("Runtime.runIfWaitingForDebugger"),
@@ -7048,6 +7057,7 @@ mod tests {
         )
         .await;
 
+        answer_network_enable(&mut mock).await;
         // The install sends `Fetch.enable { handleAuthRequests: true }`.
         let enable_id = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -7250,6 +7260,7 @@ mod tests {
         )
         .await;
 
+        answer_network_enable(&mut mock).await;
         // Actor releases the debugger after the observer returns Ok.
         let release_id = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -7331,6 +7342,7 @@ mod tests {
         )
         .await;
 
+        answer_network_enable(&mut mock).await;
         let release_id = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             mock.expect_cmd("Runtime.runIfWaitingForDebugger"),
@@ -8122,6 +8134,7 @@ mod tests {
         let id = mock.expect_cmd("Target.attachToTarget").await;
         assert_eq!(mock.last_sent()["params"]["targetId"], "T1");
         mock.reply(id, json!({ "sessionId": "S1" })).await;
+        answer_network_enable(&mut mock).await;
 
         let inner = fut.await.unwrap().unwrap();
 
@@ -8149,6 +8162,28 @@ mod tests {
         let id = mock.expect_cmd("Target.getBrowserContexts").await;
         let contexts = json!({ "browserContextIds": [], "defaultBrowserContextId": "CTX_DEFAULT" });
         mock.reply(id, contexts).await;
+    }
+
+    /// Answer the `Network.enable` of a tab being built, which its builder
+    /// awaits before it hands the tab out, within 5s. Returns the `targetId`
+    /// of every `Target.closeTarget` sent before it, so a test of the sweep
+    /// can see what was closed.
+    async fn answer_network_enable(
+        mock: &mut zendriver_transport::testing::MockConnection,
+    ) -> Vec<serde_json::Value> {
+        let mut closes = Vec::new();
+        loop {
+            let Some((method, id)) = mock.recv_cmd_timeout(Duration::from_secs(5)).await else {
+                panic!("no Network.enable within 5s; closed before that: {closes:?}");
+            };
+            if method == "Target.closeTarget" {
+                closes.push(mock.last_sent()["params"]["targetId"].clone());
+            }
+            if method == "Network.enable" {
+                mock.reply(id, json!({})).await;
+                return closes;
+            }
+        }
     }
 
     /// A connected (non-owning) [`Browser`] has `owns_process == false`, and
@@ -8193,6 +8228,7 @@ mod tests {
         .await;
         let id = mock.expect_cmd("Target.attachToTarget").await;
         mock.reply(id, json!({ "sessionId": "S1" })).await;
+        answer_network_enable(&mut mock).await;
 
         let inner = fut.await.unwrap().unwrap();
         assert!(!inner.owns_process);
@@ -8468,6 +8504,7 @@ mod tests {
         .await;
         let id = mock.expect_cmd("Target.attachToTarget").await;
         mock.reply(id, json!({ "sessionId": "S1" })).await;
+        answer_network_enable(&mut mock).await;
 
         let inner = guarded.await.unwrap().expect("handshake should succeed");
         assert!(inner.tabs.read().await.contains_key("S1"));
@@ -8517,6 +8554,7 @@ mod tests {
         .await;
         let id = mock.expect_cmd("Target.attachToTarget").await;
         mock.reply(id, json!({ "sessionId": "S1" })).await;
+        answer_network_enable(&mut mock).await;
 
         let inner = fut.await.unwrap().unwrap();
         (mock, Browser { inner })
@@ -8740,12 +8778,13 @@ mod tests {
         .await;
         let id = mock.expect_cmd("Target.attachToTarget").await;
         mock.reply(id, json!({ "sessionId": "S1" })).await;
+        answer_network_enable(&mut mock).await;
         let inner = fut.await.unwrap().unwrap();
 
         Browser { inner }.close().await.unwrap();
 
         // Drain everything still queued from the handshake (tab setup emits
-        // e.g. `Network.enable`) and assert the quit is not among it.
+        // e.g. `Page.enable`) and assert the quit is not among it.
         let mut sent = Vec::new();
         while let Some((method, _id)) = mock.try_recv_cmd() {
             sent.push(method);
@@ -8811,6 +8850,7 @@ mod tests {
             "the non-chosen page target must be swept",
         );
         mock.reply(id, json!({ "success": true })).await;
+        answer_network_enable(&mut mock).await;
 
         let inner = fut.await.unwrap().unwrap();
         assert!(inner.tabs.read().await.contains_key("S1"));
@@ -8870,6 +8910,9 @@ mod tests {
                 .recv_cmd_timeout(std::time::Duration::from_secs(60))
                 .await
                 .expect("registrar never finished the attach");
+            if method == "Network.enable" {
+                mock.reply(id, json!({})).await;
+            }
             if method == "Runtime.runIfWaitingForDebugger" || method == "Target.detachFromTarget" {
                 break (method, id);
             }
@@ -8905,12 +8948,24 @@ mod tests {
         let (path_tx, path_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            tokio_tungstenite::accept_hdr_async(stream, move |req: &Request, resp: Response| {
-                let _ = path_tx.send(req.uri().path().to_string());
-                Ok(resp)
-            })
+            let mut ws = tokio_tungstenite::accept_hdr_async(
+                stream,
+                move |req: &Request, resp: Response| {
+                    let _ = path_tx.send(req.uri().path().to_string());
+                    Ok(resp)
+                },
+            )
             .await
-            .unwrap()
+            .unwrap();
+            // Answer every command on this socket: the main tab's
+            // `Network.enable` goes over it, and `finish_connect` awaits it.
+            use futures::{SinkExt, StreamExt};
+            use tokio_tungstenite::tungstenite::Message;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let reply = json!({ "id": command["id"], "result": {} }).to_string();
+                ws.send(Message::text(reply)).await.unwrap();
+            }
         });
 
         let input_profile = zendriver_stealth::InputProfile::native();
@@ -9004,13 +9059,13 @@ mod tests {
 
         // Bounded for the same reason: sweeping the worker (or the page we just
         // attached to) would block on a reply that never comes.
+        let mut closes = answer_network_enable(&mut mock).await;
         let inner = timeout(Duration::from_secs(5), fut)
             .await
             .expect("finish_connect must not block sweeping a non-page target")
             .unwrap()
             .unwrap();
 
-        let mut closes = Vec::new();
         while let Some((method, _)) = mock.try_recv_cmd() {
             if method == "Target.closeTarget" {
                 closes.push(mock.last_sent()["params"]["targetId"].clone());
@@ -9069,13 +9124,13 @@ mod tests {
 
         // Bounded: a sweep here would block on a `closeTarget` reply the mock
         // never sends, so a regression must fail cleanly rather than hang.
+        let mut closes = answer_network_enable(&mut mock).await;
         let inner = timeout(Duration::from_secs(5), fut)
             .await
             .expect("finish_connect must not block sweeping tabs it does not own")
             .unwrap()
             .unwrap();
 
-        let mut closes = Vec::new();
         while let Some((method, _)) = mock.try_recv_cmd() {
             if method == "Target.closeTarget" {
                 closes.push(mock.last_sent()["params"]["targetId"].clone());

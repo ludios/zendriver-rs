@@ -304,9 +304,9 @@ pub(crate) struct TabInner {
     /// lives in, from its `TargetInfo`; `None` for the default context.
     pub(crate) browser_context_id: Option<String>,
     /// Per-Tab in-flight network request tracker. Constructed in
-    /// [`Tab::new`] alongside a background task (spawned via
-    /// [`crate::network_idle::InFlightTracker::run`]) that subscribes to
-    /// `Network.*` events and maintains the set. Consulted by
+    /// [`Tab::new`] alongside a subscription to the session's events and a
+    /// background task ([`crate::network_idle::InFlightTracker::run`]) that
+    /// maintains the set from the `Network.*` events in it. Consulted by
     /// [`Tab::wait_for_idle`] / [`Tab::wait_for_idle_with`] for Playwright
     /// `networkidle` semantics.
     pub(crate) network_tracker: Arc<crate::network_idle::InFlightTracker>,
@@ -360,9 +360,9 @@ pub(crate) struct TabInner {
 impl Drop for TabInner {
     fn drop(&mut self) {
         // Signal the spawned `InFlightTracker::run` task to exit. The task
-        // selects on this token alongside the four `Network.*` subscriber
-        // streams; cancellation unblocks the select even if no events are
-        // arriving. Without this the task would leak per Tab on shutdown.
+        // selects on this token alongside the session's event stream;
+        // cancellation unblocks the select even if no events are arriving.
+        // Without this the task would leak per Tab on shutdown.
         self.network_cancel.cancel();
         // Signal the spawned `frame::lifecycle::run` task to exit. Same
         // posture as `network_cancel` above — the task selects on this
@@ -439,6 +439,9 @@ impl Tab {
     /// - `browser_context_id`: the isolated `BrowserContext` the target is
     ///   in, or `None` for the default one (see
     ///   `BrowserInner::default_context_id`).
+    ///
+    /// The caller must await [`Tab::enable_network`] before it hands the tab
+    /// out; see there.
     pub(crate) fn new(
         session: SessionHandle,
         browser: std::sync::Weak<crate::browser::BrowserInner>,
@@ -446,23 +449,24 @@ impl Tab {
         target_id: String,
         browser_context_id: Option<String>,
     ) -> Self {
-        // Build the per-Tab network tracker + spawn its background subscriber
-        // task. The task calls `Network.enable` once, then maintains the
-        // in-flight set in response to `Network.requestWillBeSent` (insert)
-        // and `loadingFailed` / `loadingFinished` (remove) events arriving on
-        // this tab's session — `responseReceived` (headers only) is
-        // deliberately not terminal. `wait_for_idle` reads from the same
-        // `network_tracker` Arc.
+        // Build the per-Tab network tracker + spawn its background task,
+        // which maintains the in-flight set in response to
+        // `Network.requestWillBeSent` (insert) and `loadingFailed` /
+        // `loadingFinished` (remove) events arriving on this tab's session —
+        // `responseReceived` (headers only) is deliberately not terminal.
+        // `wait_for_idle` reads from the same `network_tracker` Arc. The
+        // subscription is registered here, not in the task, so that it exists
+        // when this returns: an event that arrives after that is seen whether
+        // or not the task has run yet. (`Network.enable` itself is
+        // `enable_network`'s job.)
         let network_tracker = crate::network_idle::InFlightTracker::new();
         let network_cancel = tokio_util::sync::CancellationToken::new();
-        tokio::spawn({
-            let tracker = network_tracker.clone();
-            let session_for_task = session.clone();
-            let cancel_for_task = network_cancel.clone();
-            async move {
-                tracker.run(session_for_task, cancel_for_task).await;
-            }
-        });
+        let network_events = session.connection().subscribe_raw();
+        tokio::spawn(network_tracker.clone().run(
+            session.session_id().map(str::to_string),
+            network_events,
+            network_cancel.clone(),
+        ));
 
         // Build the per-Tab frames registry + spawn the lifecycle
         // subscriber. The task calls `Page.enable` once, then mutates the
@@ -515,6 +519,24 @@ impl Tab {
         });
 
         Self { inner }
+    }
+
+    /// Enable the `Network` domain on this tab's session, and return once
+    /// Chrome has acknowledged that. Every path that hands out a tab awaits
+    /// this first: the browser's registrar, for every target Chrome attaches,
+    /// and `finish_connect`, for the main tab. So, for a tab that a caller
+    /// holds, Chrome reports the `Network.*` events of the tab's session, and
+    /// the in-flight tracker behind `wait_for_idle` (whose subscription
+    /// [`Tab::new`] registered), `expect_request` / `expect_response`, and
+    /// `monitor` rely on that without a round-trip of their own.
+    ///
+    /// Returns the call's error as is, so that the registrar can report it as
+    /// an observer failure.
+    pub(crate) async fn enable_network(&self) -> Result<(), zendriver_transport::CallError> {
+        self.session()
+            .call("Network.enable", serde_json::json!({}))
+            .await?;
+        Ok(())
     }
 
     /// Test-only constructor: [`Tab::new_for_test_in`] with no owning
@@ -2997,8 +3019,9 @@ impl Tab {
     /// The subscriber task is spawned synchronously inside this call —
     /// the subscription is live by the time you receive the
     /// `RequestExpectation`, so a trigger action issued immediately
-    /// after cannot race past us. `Network.enable` is already on per-Tab
-    /// via the P4 in-flight tracker; this call does not re-enable.
+    /// after cannot race past us. The `Network` domain is on for every tab
+    /// before the tab is handed out (see `Tab::enable_network`); this call
+    /// does not re-enable it.
     ///
     /// Gated by the `expect` cargo feature.
     #[must_use]
@@ -3032,8 +3055,9 @@ impl Tab {
     /// The subscriber task is spawned synchronously inside this call —
     /// the subscription is live by the time you receive the
     /// `ResponseExpectation`, so a trigger action issued immediately after
-    /// cannot race past us. `Network.enable` is already on per-Tab via the
-    /// P4 in-flight tracker; this call does not re-enable.
+    /// cannot race past us. The `Network` domain is on for every tab before
+    /// the tab is handed out (see `Tab::enable_network`); this call does not
+    /// re-enable it.
     ///
     /// Gated by the `expect` cargo feature.
     #[must_use]
@@ -4278,20 +4302,9 @@ mod tests {
     /// resolves" without flaking on a loaded CI machine.
     #[tokio::test]
     async fn wait_for_idle_resolves_after_quiet_window_post_completion() {
-        let (mut mock, conn) = MockConnection::pair();
+        let (mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         let tab = Tab::new_for_test(sess);
-
-        // Synchronize: wait until the background tracker task has run far
-        // enough to issue `Network.enable`. Once that command lands in the
-        // mock's outbound queue, the subscriptions are already registered
-        // (created in `InFlightTracker::run` before the enable spawn) — so
-        // any subsequent `emit_event_for_session` will be routed to them.
-        let id_enable =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
-                .await
-                .expect("tracker did not send Network.enable within 2s");
-        mock.reply(id_enable, json!({})).await;
 
         // Insert via requestWillBeSent.
         mock.emit_event_for_session(
@@ -4374,15 +4387,9 @@ mod tests {
     /// bound.
     #[tokio::test]
     async fn wait_for_idle_does_not_return_early_if_new_request_arrives_in_quiet_window() {
-        let (mut mock, conn) = MockConnection::pair();
+        let (mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         let tab = Tab::new_for_test(sess);
-
-        let id_enable =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
-                .await
-                .expect("tracker did not send Network.enable within 2s");
-        mock.reply(id_enable, json!({})).await;
 
         // Insert R1 and wait for the tracker to observe it before
         // starting wait_for_idle (mirrors the sibling test).
@@ -4502,15 +4509,9 @@ mod tests {
     /// notifier arm and reset `quiet_start`.
     #[tokio::test]
     async fn wait_for_idle_burst_inside_tick_resets_quiet_window() {
-        let (mut mock, conn) = MockConnection::pair();
+        let (mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         let tab = Tab::new_for_test(sess);
-
-        let id_enable =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
-                .await
-                .expect("tracker did not send Network.enable within 2s");
-        mock.reply(id_enable, json!({})).await;
 
         // Start with the set already at 0 — wait_for_idle should accumulate
         // a quiet window from T0. The inner `wait_for_idle_with` timeout is
@@ -4578,15 +4579,9 @@ mod tests {
     /// so the quiet window can elapse and the call resolves.
     #[tokio::test]
     async fn wait_for_idle_opts_evicts_stuck_request_past_max_inflight_age() {
-        let (mut mock, conn) = MockConnection::pair();
+        let (mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         let tab = Tab::new_for_test(sess);
-
-        let id_enable =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
-                .await
-                .expect("tracker did not send Network.enable within 2s");
-        mock.reply(id_enable, json!({})).await;
 
         // Insert a request and NEVER emit a terminal event for it.
         mock.emit_event_for_session(
@@ -4651,14 +4646,8 @@ mod tests {
     async fn tab_with_a_request_in_flight(
         pair: (MockConnection, Connection),
     ) -> (Tab, MockConnection, Connection) {
-        let (mut mock, conn) = pair;
+        let (mock, conn) = pair;
         let tab = Tab::new_for_test(SessionHandle::new(conn.clone(), "S1"));
-
-        let id_enable =
-            tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
-                .await
-                .expect("tracker did not send Network.enable within 2s");
-        mock.reply(id_enable, json!({})).await;
 
         mock.emit_event_for_session(
             "Network.requestWillBeSent",

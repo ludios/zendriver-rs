@@ -6,10 +6,12 @@
 //!
 //! ## Wiring
 //!
-//! Each [`crate::Tab`] owns one tracker. At construction time, the tab
-//! spawns a background task that:
-//! 1. Sends `Network.enable` once on the tab's session.
-//! 2. Subscribes to three lifecycle events Chrome emits per request:
+//! Each [`crate::Tab`] owns one tracker. [`crate::Tab::new`] subscribes to
+//! the events of the tab's connection and spawns a background task over that
+//! subscription, so that the subscription exists as soon as the tab does;
+//! `Tab::enable_network`, awaited before the tab is handed out, enables the
+//! `Network` domain. The task:
+//! 1. Watches three lifecycle events Chrome emits per request:
 //!    - `Network.requestWillBeSent` — insert `requestId` into the set.
 //!    - `Network.loadingFinished` / `Network.loadingFailed` — remove
 //!      `requestId` from the set.
@@ -26,7 +28,7 @@
 //!    [`IdleOptions::max_inflight_age`] evicts it, so `wait_for_idle` on such a
 //!    page waits up to that age instead of resolving at header-arrival. Lower
 //!    `max_inflight_age` if a streaming page must be considered idle sooner.
-//! 3. Notifies the [`tokio::sync::Notify`] on every membership change so
+//! 2. Notifies the [`tokio::sync::Notify`] on every membership change so
 //!    waiters can wake instantly rather than poll on a fixed interval.
 //!
 //! The task runs until the supplied [`CancellationToken`] fires — typically
@@ -44,12 +46,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use serde::Deserialize;
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
-use tracing::{trace, warn};
-use zendriver_transport::SessionHandle;
+use tracing::trace;
+use zendriver_transport::RawEvent;
 
 /// Controls how [`crate::Tab::wait_for_idle_opts`] reacts when it notices —
 /// during its own wait window — that the underlying CDP event stream lost
@@ -141,11 +143,14 @@ impl InFlightTracker {
 
     /// Drive the tracker until `cancel` fires.
     ///
-    /// Calls `Network.enable` once on `session`, then loops over the merged
-    /// stream of `Network.requestWillBeSent` (insert) and the two terminal
-    /// events (`loadingFailed`, `loadingFinished` — both remove). Notifies
-    /// the [`Notify`] on every membership change so `wait_for_idle` waiters
-    /// wake immediately.
+    /// `events` is a subscription to the events of the tab's connection,
+    /// which [`crate::Tab::new`] registers before it spawns this, so that no
+    /// event is missed between the two; `session_id` is the tab's session
+    /// (`None` for a root session), whose events are the ones kept. Loops
+    /// over `Network.requestWillBeSent` (insert) and the two terminal events
+    /// (`loadingFailed`, `loadingFinished` — both remove). Notifies the
+    /// [`Notify`] on every membership change so `wait_for_idle` waiters wake
+    /// immediately.
     ///
     /// # Why `responseReceived` does not clear an entry
     ///
@@ -161,49 +166,19 @@ impl InFlightTracker {
     /// beacon, an abandoned long-poll — is covered by
     /// [`crate::IdleOptions::max_inflight_age`], not by relaxing what counts
     /// as "done" here.
-    ///
-    /// `Network.enable` failure is logged + ignored — the tracker still runs
-    /// (events from a previously-enabled domain may still arrive). Calls into
-    /// `wait_for_idle` would resolve trivially on an empty set; this matches
-    /// the "best-effort observability" contract: never block the caller on
-    /// our subscription bookkeeping.
-    pub(crate) async fn run(self: Arc<Self>, session: SessionHandle, cancel: CancellationToken) {
-        // Subscribe to the connection's raw event stream BEFORE awaiting
-        // `Network.enable` for two reasons:
-        // 1. Production correctness — Chrome can fire events between
-        //    `Network.enable`'s reply and our subscription registration.
-        //    Subscribing first plugs that race.
-        // 2. Test ergonomics — the `MockConnection` flow never replies to
-        //    the synthetic `Network.enable` call (no test wants to babysit
-        //    background subscription bookkeeping). If we awaited the call
-        //    first the task would block before any subscription existed,
-        //    and events emitted by the test would be dropped on the floor.
-        //
-        // We use a single raw subscription and dispatch on `method` rather
-        // than three typed subscriptions in `tokio::select!`. The select!
-        // form picks a ready arm at random, which can deliver
-        // `loadingFinished` to the handler before the matching
-        // `requestWillBeSent` — the REMOVE then runs against an empty
-        // set, the later INSERT installs the id, and the request leaks
-        // forever. One stream means CDP's wire order is preserved.
-        let session_id = session.session_id().map(str::to_string);
-        let mut events = session.connection().subscribe_raw();
-
-        // Fire-and-forget `Network.enable`. We don't await the response
-        // because the mock test harness never replies; the production
-        // connection actor does reply, but our subscriber stream above is
-        // ready either way. If the call errors (e.g. session torn down)
-        // we log and continue — subscriptions will simply receive nothing.
-        let enable_session = session.clone();
-        tokio::spawn(async move {
-            if let Err(e) = enable_session
-                .call("Network.enable", serde_json::json!({}))
-                .await
-            {
-                warn!(error = %e, "InFlightTracker: Network.enable failed; events may be inactive");
-            }
-        });
-
+    pub(crate) async fn run(
+        self: Arc<Self>,
+        session_id: Option<String>,
+        mut events: impl Stream<Item = RawEvent> + Send + Unpin + 'static,
+        cancel: CancellationToken,
+    ) {
+        // One raw subscription, dispatched on `method`, rather than three
+        // typed subscriptions in `tokio::select!`. The select! form picks a
+        // ready arm at random, which can deliver `loadingFinished` to the
+        // handler before the matching `requestWillBeSent` — the REMOVE then
+        // runs against an empty set, the later INSERT installs the id, and
+        // the request leaks forever. One stream means CDP's wire order is
+        // preserved.
         loop {
             tokio::select! {
                 () = cancel.cancelled() => {
@@ -266,23 +241,15 @@ mod tests {
     /// removal, but not on `responseReceived`.
     #[tokio::test]
     async fn response_received_does_not_clear_in_flight_only_loading_finished_does() {
-        let (mut mock, conn) = MockConnection::pair();
-        let session = SessionHandle::new(conn.clone(), "S1");
+        let (mock, conn) = MockConnection::pair();
         let tracker = InFlightTracker::new();
         let cancel = CancellationToken::new();
-
-        let task = tokio::spawn({
-            let t = tracker.clone();
-            let s = session.clone();
-            let c = cancel.clone();
-            async move {
-                t.run(s, c).await;
-            }
-        });
-
-        // Tracker calls Network.enable first.
-        let id = mock.expect_cmd("Network.enable").await;
-        mock.reply(id, json!({})).await;
+        let events = conn.subscribe_raw();
+        let task = tokio::spawn(
+            tracker
+                .clone()
+                .run(Some("S1".into()), events, cancel.clone()),
+        );
 
         // Insert via requestWillBeSent.
         mock.emit_event_for_session(

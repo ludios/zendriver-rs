@@ -7,8 +7,8 @@
 //! the first match, and exits the moment the caller drops the expectation, so
 //! it never outlives the `expect_response` that created it.
 //!
-//! `Network.enable` is already on for every Tab via the per-Tab in-flight
-//! network tracker, so this module does not re-enable the domain.
+//! The `Network` domain is on for every Tab before the tab is handed out
+//! (`Tab::enable_network`), so this module does not re-enable it.
 
 use std::collections::HashMap;
 use std::future::Future;

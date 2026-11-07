@@ -112,10 +112,8 @@ struct NavigatedFrameInner {
 /// constructed [`Frame`] so its `tab_for_synthesize` upgrade can return
 /// the owning `Tab`.
 ///
-/// Same fire-and-forget posture as
-/// [`crate::network_idle::InFlightTracker::run`] for the `Page.enable`
-/// call: failure is logged + ignored so the subscriber keeps running on a
-/// previously-enabled Page domain.
+/// The `Page.enable` call is fire-and-forget: failure is logged + ignored
+/// so the subscriber keeps running on a previously-enabled Page domain.
 pub(crate) async fn run(
     session: SessionHandle,
     frames: Arc<RwLock<HashMap<String, Frame>>>,
@@ -126,11 +124,10 @@ pub(crate) async fn run(
     let mut detached = session.subscribe::<FrameDetachedEvent>("Page.frameDetached");
     let mut navigated = session.subscribe::<FrameNavigatedEvent>("Page.frameNavigated");
 
-    // Fire-and-forget `Page.enable`. Same rationale as
-    // `InFlightTracker::run`: the mock harness never replies to this
+    // Fire-and-forget `Page.enable`: the mock harness never replies to this
     // call, and in production the subscribe streams above are already
-    // registered, so awaiting the response would only serialize the
-    // first arriving event behind the enable round-trip.
+    // registered, so awaiting the response would only serialize the first
+    // arriving event behind the enable round-trip.
     //
     // Cancellation-aware for the same reason the sweep is: an unanswered
     // call sits on the transport's default budget
