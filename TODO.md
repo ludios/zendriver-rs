@@ -89,8 +89,10 @@ Also for this round:
   - After lost events during a back, forward or reload, the tracker waits for the next stop (a lost stop means a 30 s timeout).
   - The probe's `Runtime.evaluate` blocks while a JavaScript dialog is open, so `wait_for_load` after lost events can run to its timeout then.
   - After `Connection::reconnect`, a flat-session tracker's session id is stale, so it can only time out (a per-tab socket survives a reconnect).
+  - ~~A clean `Connection::shutdown()` (e.g. `Tab::close`, dropping a `connect`ed `Browser`) emits nothing on the accounted bus, so a wait runs to its timeout.~~ Done 2026-11-06 (`ad6b75888`): the new `AccountedRawEvent::Shutdown` ends the waits; a monitor ends with a `Shutdown` boundary since `3c55ccf72`.
   - **A crashed tab.** After `Page.crash`, the tab's session answers no renderer command, even after `Page.reload` (which returns, and in about half the runs brings the target back to its URL within 4 s; in the others its URL stays empty for over 10 s). `wait_for_load` after reloading a crashed tab times out or returns early. Chrome sends `Page.frameStartedLoading` / `frameStoppedLoading` from the browser process (`PageHandler::DidChangeFrameLoadingState`); `Inspector.targetCrashed` didn't arrive on the tab's session. Test: `reload_of_a_crashed_tab_needs_no_renderer` in `navigation_waits.rs`.
   - Cost: an armed tracker is a task filtering every event on its connection until the next wait or navigation; on the flat-session fallback that's tabs × events. The reviewers suggested one tracker per tab instead, created in the registrar before the target resumes; it needs a way to order the caller's arming against events in flight (e.g. the accounted stream's sequence numbers). Also, `probe_complete` sends `Page.enable` every time.
+- [x] **Tests for `expect_navigation`:** submitting a form with Enter; `goto` → `wait_for_idle` → click a link → wait. Done 2026-11-06 (`d7a5b597b`): `expect_navigation_waits_for_the_page_a_form_submits_to` and `expect_navigation_waits_for_the_page_a_link_leads_to` in `navigation_waits.rs`.
 
 ### Broken outright
 - [ ] **MCP shutdown leaves Chrome running after a SIGKILL.** *(R, MCP #6)* SIGTERM works over both transports (`chrome_exits_on_sigterm_over_*`).
@@ -148,11 +150,14 @@ Also for this round:
   - Interception: dropping the last `Interceptor` and rule handles closes the command queue while an answer task (which holds only a weak sender) is pending, so `Mux::close` disables `Fetch` before a rejected `Fetch.fulfillRequest`'s fallback `Fetch.failRequest` runs (reproduced with `MockConnection` by a reviewer).
   - Simplification: in `load_tracker.rs` and `navigation.rs`, `changes` ends at `Disconnected` / `Shutdown` with `take_while`, so the `filter_map` arms for those variants are dead; the two `changes` adapters are near-copies.
 - [ ] **`get_all_urls(true)` fails on SVG `href`.** *(TAB #4)* Test `chrome` with the SVG sprite fixture.
+- [x] **A wait that starts after its flat session detached runs until its timeout.** Done 2026-11-07 (`07727d301`): the connection records each detached session, and a subscription that starts after the detach yields `Shutdown` at once and ends.
 - [ ] **A flat session's stream that loses its detach in a `Lagged` gap never ends.** (A subscription that starts after the detach ends at once since `07727d301`.) The expect waits and Strict idle end on the `Lagged` anyway, but a monitor keeps going, and the interceptor's `recover()` gets "session not found" from `Fetch.disable` / `Fetch.enable`, logs it, and keeps its entries, so `interceptor.subscribe(...)` streams never end. On the shared socket every tab's traffic fills each session's lag window, which makes this likelier (and a `Lagged` caused only by other tabs' events makes the interceptor release this tab's held pauses).
   - Unverified: an OOPIF's session may be dropped with its page's session without a detach of its own, so its waits wouldn't end.
 - [ ] **Cookies, left open:**
   - `for_url` without the public suffix list: a cookie partitioned under a public suffix with a dot (a page at `github.io` itself) is returned for that suffix's subdomains. `psl` is in the tree (via `zendriver-datadome`) but not in the default build.
   - From review: `only_isolated_tab_jars_name_their_context` reads the jar's `Debug`; `tab_cookies_write_into_the_tabs_context` can't tell the tab's connection from the browser's.
+  - ~~The `deleted_by` test helper waits only 200 ms for the `setCookies` it then answers.~~ Done 2026-11-01 (`011ba137a`).
+  - ~~`is_secure` sits below its caller.~~ Done 2026-11-01 (`793fb67bd`).
 
 ### Browser lifecycle
 - [ ] **`connect()` patches pre-existing tabs (contrary to its docs) and builds the fingerprint from an empty executable path.** *(BR #3, #4)* Test `chrome`.
@@ -221,11 +226,14 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
 
 Each item needs a test; `unit` is fine where no browser is involved.
 
-- [ ] **Browser:** *(BR #8–#10, #12)*
+- [ ] **Browser:** *(BR #7–#12)*
+  - ~~`poll_initial_targets` can pick a non-page target as the main tab~~ Done 2026-11-07 (`72916aea4`): the poll waits until a page target is listed, and the main tab is always that page.
   - the geo overlay overrides an explicit persona timezone
   - `BrowserContext` `Drop` panics outside a tokio runtime (`unit`)
-  - `connect()` ignores tracker blocking (it honors `proxy_auth` since `bc8a71f74`)
+  - `connect()` ignores tracker blocking and ~~`proxy_auth`~~ (`proxy_auth` done 2026-11-06 in `bc8a71f74`)
+  - ~~`reconnect()` leaks interception actors~~ Done 2026-11-06 (`e8e6e5aa7`, `907f3a7f2`): the per-session handle map is gone (each tab holds its own `Interceptor`), and `reconnect` shuts the old tabs' own sockets.
   - a target that detaches during the registrar stays registered forever
+- [x] **Browser:** a normal `close()` logs an ERROR "ws read failed". *(R)* Done 2026-11-06 (`7cbbbe72a`): `Browser::close` shuts the tabs' own sockets down before `Browser.close`. Test: `close_logs_no_warning_or_error` in `browser_close.rs`.
 - [ ] **Tab:** *(TAB #6–#9, #11, #12)*
   - the cached `main_frame()` URL never updates (also FI out-of-scope note)
   - `wait_for_idle_opts` can lose a wake-up
@@ -242,7 +250,8 @@ Each item needs a test; `unit` is fine where no browser is involved.
   - frame registry never seeded
   - modifier keys missing `location`
   - `overshoot_rate` unused
-- [ ] **Query:** *(QE #12–#14)*
+- [ ] **Query:** *(QE #11–#14)*
+  - ~~`g`/`y` regex flags skip matches~~ Done 2026-11-06 (`d459e8f1b`): each test resets the RegExp's `lastIndex` first. Test: `query_text_regex.rs`.
   - element-scoped `.xpath("//…")` searches the whole document
   - `<fieldset disabled>` not treated as disabled
   - polling gives up on transient navigation errors
