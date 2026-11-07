@@ -72,10 +72,43 @@ const PENDING_SWEEP_DISPATCH_INTERVAL: u64 = 256;
 /// Dropping the sender early is invisible to the caller (it is already gone);
 /// a late reply for a swept id lands on the existing "response for unknown id"
 /// branch, exactly as it already does when a caller drops mid-flight.
-fn sweep_pending(pending: &mut HashMap<u64, oneshot::Sender<Result<Value, CdpRpcError>>>) -> usize {
+fn sweep_pending(pending: &mut HashMap<u64, PendingCall>) -> usize {
     let before = pending.len();
-    pending.retain(|_id, reply| !reply.is_closed());
+    pending.retain(|_id, call| !call.reply.is_closed());
     before - pending.len()
+}
+
+/// A command sent to Chrome and not yet answered.
+struct PendingCall {
+    /// The session the command was sent on; `None` for the root session.
+    session_id: Option<String>,
+    /// Where the answer goes.
+    reply: oneshot::Sender<Result<Value, CdpRpcError>>,
+}
+
+/// Fail every pending command of the session `session_id`, which Chrome has
+/// detached: Chrome never answers a command of a detached session. Each gets
+/// the [`crate::connection::SESSION_DETACHED_CODE`] sentinel. Returns how
+/// many were failed.
+fn fail_detached_session_pendings(
+    pending: &mut HashMap<u64, PendingCall>,
+    session_id: &str,
+) -> usize {
+    let detached: Vec<u64> = pending
+        .iter()
+        .filter(|(_id, call)| call.session_id.as_deref() == Some(session_id))
+        .map(|(id, _call)| *id)
+        .collect();
+    for id in &detached {
+        if let Some(call) = pending.remove(id) {
+            let _ = call.reply.send(Err(CdpRpcError {
+                code: crate::connection::SESSION_DETACHED_CODE,
+                message: "session detached by Chrome".into(),
+                data: None,
+            }));
+        }
+    }
+    detached.len()
 }
 
 /// Accounted-bus plumbing for one actor run: the second, opt-in broadcast
@@ -161,7 +194,7 @@ pub(crate) async fn run_actor<S>(
         + futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
         + Unpin,
 {
-    let mut pending: HashMap<u64, oneshot::Sender<Result<Value, CdpRpcError>>> = HashMap::new();
+    let mut pending: HashMap<u64, PendingCall> = HashMap::new();
     let mut next_id: u64 = 1;
     // Per-generation monotonic counter for `AccountedRawEvent::Event::sequence`.
     // Reset to 1 on every actor run (a fresh call to `run_actor`, i.e. every
@@ -227,7 +260,13 @@ pub(crate) async fn run_actor<S>(
                             drain_code = crate::connection::DISCONNECTED_CODE;
                             break;
                         }
-                        pending.insert(id, cmd.reply);
+                        pending.insert(
+                            id,
+                            PendingCall {
+                                session_id: cmd.session_id,
+                                reply: cmd.reply,
+                            },
+                        );
                         dispatched_since_sweep += 1;
                         if dispatched_since_sweep >= PENDING_SWEEP_DISPATCH_INTERVAL {
                             dispatched_since_sweep = 0;
@@ -289,12 +328,12 @@ pub(crate) async fn run_actor<S>(
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<CdpInbound>(&text) {
                             Ok(CdpInbound::Response { id, result, error, .. }) => {
-                                match pending.remove(&id) { Some(reply) => {
+                                match pending.remove(&id) { Some(call) => {
                                     let res = match error {
                                         Some(e) => Err(e),
                                         None    => Ok(result.unwrap_or(Value::Null)),
                                     };
-                                    let _ = reply.send(res);
+                                    let _ = call.reply.send(res);
                                 } _ => {
                                     warn!(id, "response for unknown id (caller dropped?)");
                                 }}
@@ -328,9 +367,24 @@ pub(crate) async fn run_actor<S>(
                                             "bad Target.attachedToTarget payload: {e}"
                                         ),
                                     }
-                                } else if method == "Target.detachedFromTarget"
-                                    && !observers.is_empty()
-                                {
+                                } else if method == "Target.detachedFromTarget" {
+                                    if let Ok(ev) =
+                                        serde_json::from_value::<TargetDetached>(params.clone())
+                                    {
+                                        let failed =
+                                            fail_detached_session_pendings(&mut pending, &ev.session_id);
+                                        if failed > 0 {
+                                            debug!(
+                                                session_id = %ev.session_id,
+                                                failed,
+                                                "failed the pending commands of a detached session"
+                                            );
+                                        }
+                                    } else {
+                                        warn!("bad Target.detachedFromTarget payload");
+                                    }
+                                }
+                                if method == "Target.detachedFromTarget" && !observers.is_empty() {
                                     if let Ok(ev) =
                                         serde_json::from_value::<TargetDetached>(params.clone())
                                     {
@@ -382,8 +436,6 @@ pub(crate) async fn run_actor<S>(
                                                 }
                                             });
                                         }
-                                    } else {
-                                        warn!("bad Target.detachedFromTarget payload");
                                     }
                                 }
                                 let ev = RawEvent { method, params, session_id };
@@ -457,8 +509,8 @@ pub(crate) async fn run_actor<S>(
     } else {
         "connection shut down"
     };
-    for (_id, reply) in pending.drain() {
-        let _ = reply.send(Err(CdpRpcError {
+    for (_id, call) in pending.drain() {
+        let _ = call.reply.send(Err(CdpRpcError {
             code: drain_code,
             message: message.into(),
             data: None,
@@ -878,6 +930,83 @@ mod tests {
         actor_handle.await.unwrap();
     }
 
+    /// `Target.detachedFromTarget` fails the pending commands of the detached
+    /// session, and only those: another session's and the root session's
+    /// stay pending (and drain at the shutdown as usual).
+    #[tokio::test]
+    async fn target_detached_fails_the_pendings_of_that_session_only() {
+        let (ws, test_tx, mut test_rx) = duplex_pair();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<OutboundCmd>(8);
+        let (event_tx, _event_rx) = broadcast::channel::<RawEvent>(EVENT_BUS_CAPACITY);
+        let shutdown = CancellationToken::new();
+        let actor_handle = tokio::spawn(run_actor(
+            ws,
+            cmd_rx,
+            event_tx,
+            AccountedBus {
+                tx: broadcast::channel::<AccountedRawEvent>(EVENT_BUS_CAPACITY).0,
+                generation: 1,
+            },
+            shutdown.clone(),
+            Vec::new(),
+            Weak::new(),
+        ));
+
+        let mut replies = Vec::new();
+        for session_id in [Some("S1"), Some("S2"), None] {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            cmd_tx
+                .send(OutboundCmd {
+                    method: "Page.navigate".into(),
+                    params: json!({}),
+                    session_id: session_id.map(str::to_string),
+                    reply: reply_tx,
+                })
+                .await
+                .unwrap();
+            replies.push(reply_rx);
+        }
+        // Each command on the socket means its pending entry exists.
+        for _ in 0..3 {
+            test_rx
+                .recv()
+                .await
+                .expect("the command must reach the socket");
+        }
+
+        test_tx
+            .send(Ok(Message::text(
+                json!({
+                    "method": "Target.detachedFromTarget",
+                    "params": { "sessionId": "S1", "targetId": "T1" },
+                })
+                .to_string(),
+            )))
+            .await
+            .unwrap();
+
+        let mut on_s1 = replies.remove(0);
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), &mut on_s1)
+            .await
+            .expect("S1's command must fail at the detach")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.code, crate::connection::SESSION_DETACHED_CODE);
+        for other in &mut replies {
+            assert!(
+                other.try_recv().is_err(),
+                "S2's and the root session's commands must stay pending"
+            );
+        }
+
+        shutdown.cancel();
+        for other in replies {
+            let err = other.await.unwrap().unwrap_err();
+            assert_eq!(err.code, crate::connection::SHUTDOWN_DRAIN_CODE);
+        }
+        actor_handle.await.unwrap();
+    }
+
     #[tokio::test]
     async fn unexpected_ws_close_frame_drains_pending_with_disconnected_code() {
         let (ws, test_tx, mut test_rx) = duplex_pair();
@@ -973,18 +1102,30 @@ mod tests {
 
     #[test]
     fn sweep_pending_drops_abandoned_callers_and_keeps_live_ones() {
-        let mut pending: HashMap<u64, oneshot::Sender<Result<Value, CdpRpcError>>> = HashMap::new();
+        let mut pending: HashMap<u64, PendingCall> = HashMap::new();
 
         // A caller still waiting on its reply.
         let (live_tx, _live_rx) = oneshot::channel();
-        pending.insert(1, live_tx);
+        pending.insert(
+            1,
+            PendingCall {
+                session_id: None,
+                reply: live_tx,
+            },
+        );
         // Two callers that hit their budget and walked away — their reply
         // receivers are gone, but the senders would otherwise sit here until
         // Chrome answered ids it may never answer.
         for id in [2u64, 3] {
             let (abandoned_tx, abandoned_rx) = oneshot::channel();
             drop(abandoned_rx);
-            pending.insert(id, abandoned_tx);
+            pending.insert(
+                id,
+                PendingCall {
+                    session_id: None,
+                    reply: abandoned_tx,
+                },
+            );
         }
 
         assert_eq!(sweep_pending(&mut pending), 2);

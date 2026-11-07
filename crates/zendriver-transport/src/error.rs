@@ -25,6 +25,14 @@ pub enum TransportError {
     #[error("connection shut down")]
     Shutdown,
 
+    /// Chrome detached the session that the command was sent on (the
+    /// session's target closed, or the session was detached) before
+    /// answering the command. Chrome never answers a command of a detached
+    /// session, so the actor fails such a command at the detach instead of
+    /// leaving it to its timeout.
+    #[error("session detached by Chrome")]
+    SessionDetached,
+
     /// The actor sent a reply but the oneshot receiver had already been
     /// dropped. Carries the originating command id for diagnostics.
     #[error("response channel dropped before reply (id={id})")]
@@ -109,6 +117,14 @@ mod tests {
     #[test]
     fn display_shutdown_is_stable() {
         assert_eq!(TransportError::Shutdown.to_string(), "connection shut down");
+    }
+
+    #[test]
+    fn display_session_detached_is_stable() {
+        assert_eq!(
+            TransportError::SessionDetached.to_string(),
+            "session detached by Chrome"
+        );
     }
 
     #[test]

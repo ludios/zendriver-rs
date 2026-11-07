@@ -96,6 +96,14 @@ pub(crate) const SHUTDOWN_DRAIN_CODE: i32 = -32001;
 /// unambiguous.
 pub(crate) const DISCONNECTED_CODE: i32 = -32002;
 
+/// Internal JSON-RPC code stamped onto the pendings of a session when Chrome
+/// detaches that session (`Target.detachedFromTarget`): Chrome never answers
+/// them, so the actor does. Mapped back to
+/// [`TransportError::SessionDetached`] by [`Connection::call_raw`]. Picked
+/// from the reserved internal JSON-RPC range (-32000 to -32099); Chrome never
+/// emits it, so a code-only check is unambiguous.
+pub(crate) const SESSION_DETACHED_CODE: i32 = -32003;
+
 /// Ceiling on a single [`Connection::redial`] — the TCP connect plus the
 /// WebSocket upgrade handshake.
 ///
@@ -383,12 +391,13 @@ impl Connection {
             match reply_rx.await {
                 Ok(Ok(v)) => Ok(v),
                 // Preserve the transport drain sentinels for drained pendings;
-                // everything else surfaces as a typed RPC error. Both sentinel
+                // everything else surfaces as a typed RPC error. The sentinel
                 // codes are reserved internally — Chrome never emits them — so
                 // a code-only check is unambiguous.
                 Ok(Err(rpc_err)) => Err(match rpc_err.code {
                     SHUTDOWN_DRAIN_CODE => CallError::Transport(TransportError::Shutdown),
                     DISCONNECTED_CODE => CallError::Transport(TransportError::Disconnected),
+                    SESSION_DETACHED_CODE => CallError::Transport(TransportError::SessionDetached),
                     _ => CallError::Rpc(rpc_err.code, rpc_err.message, rpc_err.data),
                 }),
                 // The command was accepted but the actor dropped our reply
@@ -1162,6 +1171,65 @@ mod tests {
             matches!(res, Err(CallError::Transport(TransportError::Shutdown))),
             "clean shutdown must map to TransportError::Shutdown, got {res:?}"
         );
+    }
+
+    /// A call of a session that Chrome detaches while the call is in flight
+    /// fails at the detach, as `SessionDetached`; a call of another session
+    /// is unaffected.
+    #[tokio::test]
+    async fn call_raw_fails_a_detached_sessions_call_as_session_detached() {
+        let (ws, inbound, mut outbound) = duplex_pair();
+        let conn = spawn_actor(ws);
+        let call_on_s1 = tokio::spawn({
+            let c = conn.clone();
+            async move {
+                c.call_raw("Page.navigate", json!({}), Some("S1".into()))
+                    .await
+            }
+        });
+        let mut call_on_s2 = tokio::spawn({
+            let c = conn.clone();
+            async move {
+                c.call_raw("Page.navigate", json!({}), Some("S2".into()))
+                    .await
+            }
+        });
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(5), outbound.recv())
+                .await
+                .expect("the in-flight command must reach the socket")
+                .expect("the driver must forward it");
+        }
+
+        inbound
+            .send(Ok(Message::text(
+                json!({
+                    "method": "Target.detachedFromTarget",
+                    "params": { "sessionId": "S1", "targetId": "T1" },
+                })
+                .to_string(),
+            )))
+            .await
+            .unwrap();
+
+        let res = tokio::time::timeout(Duration::from_secs(5), call_on_s1)
+            .await
+            .expect("the detached session's call must fail at the detach")
+            .unwrap();
+        assert!(
+            matches!(
+                res,
+                Err(CallError::Transport(TransportError::SessionDetached))
+            ),
+            "a detached session's call must map to TransportError::SessionDetached, got {res:?}"
+        );
+        let still_pending = tokio::time::timeout(Duration::from_millis(200), &mut call_on_s2).await;
+        assert!(
+            still_pending.is_err(),
+            "another session's call must stay pending"
+        );
+
+        conn.shutdown();
     }
 
     /// `expect_disconnect` changes only how a socket's death is logged: a
