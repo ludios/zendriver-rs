@@ -165,6 +165,7 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
   - `--disable-features=site-per-process` does nothing; the feature is called `SitePerProcess`. `--disable-site-isolation-trials` also works.
   - When `--disable-features` appears twice, Chrome keeps only the last. `build_flags` emits `PasswordManagerOnboarding,AutofillServerCommunication` and then the stealth line, so the first is dropped. The comment there says Chrome takes the union; it doesn't.
   - Merge every `--disable-features` (and `--enable-features`) into one argument.
+  - The same holds for `--disable-blink-features`: a caller's own (through `BrowserBuilder::arg`) replaces the profile's `--disable-blink-features=AutomationControlled`, which alone hides `navigator.webdriver` since `fc801bb3b` deleted webdriver.js. Merge it too.
   - Decide whether site isolation should really be off. The profile docs say it is, but turning it off now changes behaviour for every user: cross-site iframes would stop being OOPIFs.
   - Test `chrome`: count the `iframe` targets on `/iframe-cross-site`, as `cross_site_iframe_is_out_of_process_under_site_isolation` in the testkit's `fixtures.rs` does.
 - [ ] **JS-visible and HTTP identity come from different sources.** One identity source should feed JS, the UA, UA-CH and headers. *(ST #1, R6)*
@@ -177,6 +178,9 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
 - [ ] **Canvas farbling turns transparent pixels into `(1,1,1,0)`.** *(ST #2)*
 - [ ] **macOS UA-CH `platformVersion` / `architecture` describe an impossible machine.** *(ST #3)*
 - [ ] **`chrome_version(major)` invents a build number.** *(ST #4)* Test `unit`.
+  - Also, with that pin, `navigator.userAgentData.getHighEntropyValues(['uaFullVersion'])` reports the binary's full version, because the `userAgentMetadata` that the observer sends has no `fullVersion`. Seen by a reviewer of `904406eb9` with Chrome 157.
+- [ ] **Linux UA-CH `platformVersion` is `5.15.0`** in every profile's `userAgentMetadata` (`UserAgentMetadata::realistic`). Chrome reports an empty string on Linux (`GetPlatformVersion` in Chromium's `components/embedder_support/user_agent_utils.cc`; a reviewer saw it empty in Chrome 157), so the value is one no Linux Chrome sends. Test `unit`, and the probe.
+- [ ] **A screen narrower than 500 CSS px gets a 500-px window** under `native` and `spoofed` (headless Chrome's minimum window width): with `ScreenSpec::new(390, 844, 1.0)`, a reviewer of `9fce51453` saw `screen.width` 390 beside `outerWidth` and `innerWidth` 500 (Chrome 157). Reject such a screen in `headless_screen_switches`, or document the limit. Test `chrome`.
 - [ ] **`fonts.js` bugs:** `measureText` isn't deterministic; `fonts.check` keeps only the last word of the family name. *(ST #5, #6)*
   - Also, real Chrome's `document.fonts.check()` is true for any local font, even one that doesn't exist (seen in Chrome 156 and 157), while the persona allow-list answers false for every family not on it. So the allow-list is itself a deviation, which fixing the parsing leaves in place.
 - [ ] **`getClientRects()` returns an `Array`,** not a `DOMRectList`. *(ST #11)*
