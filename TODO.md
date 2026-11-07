@@ -174,18 +174,19 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
   - Test `chrome`: count the `iframe` targets on `/iframe-cross-site`, as `cross_site_iframe_is_out_of_process_under_site_isolation` in the testkit's `fixtures.rs` does.
 - [ ] **JS-visible and HTTP identity come from different sources.** One identity source should feed JS, the UA, UA-CH and headers. *(ST #1, R6)*
   - Under `spoof_windows` on Linux: UA says Windows but `navigator.platform` is Linux; page and worker disagree on platform; OS version is a Linux-style `5.15.0`; WebGL names Mesa.
-- [ ] **Worker GPU name and `deviceMemory` differ from the page under `spoofed`.** *(R6)*
+- [ ] **Worker GPU name and `deviceMemory` differ from the page under `spoofed`.** So does `hardwareConcurrency`: no stealth patch reaches a worker, and `KNOWN_DISAGREEMENTS` files all three under this item. *(R6)*
 - [ ] **Canvas farbling turns transparent pixels into `(1,1,1,0)`.** *(ST #2)*
 - [ ] **macOS UA-CH `platformVersion` / `architecture` describe an impossible machine.** *(ST #3)*
 - [ ] **`chrome_version(major)` invents a build number.** *(ST #4)* Test `unit`.
 - [ ] **`fonts.js` bugs:** `measureText` isn't deterministic; `fonts.check` keeps only the last word of the family name. *(ST #5, #6)*
-- [ ] **`innerHeight` is smaller than `clientHeight`.** *(ST #7)*
+  - Also, real Chrome's `document.fonts.check()` is true for any local font, even one that doesn't exist (seen in Chrome 156 and 157), while the persona allow-list answers false for every family not on it. So the allow-list is itself a deviation, which fixing the parsing leaves in place.
+- [ ] **`innerHeight` is smaller than `clientHeight`.** Only under the spoofed profiles. *(ST #7)*
 - [ ] **`permissions.js` returns `'default'`.** It should be `'prompt'`. *(ST #8, R6)*
 - [ ] **`plugins.js`:** needs 5 entries and a real `PluginArray`. *(ST #9, R6)*
 - [ ] **`userAgentData`:** the object is rebuilt on every access, and `getHighEntropyValues` ignores the requested hints. *(ST #10)*
 - [ ] **`getClientRects()` returns an `Array`,** not a `DOMRectList`. *(ST #11)*
 - [ ] **Masked functions are constructible** in the spoofed patches: each is an ordinary `function`, with an own `prototype` (rebrowser's `nativeTampering` checks for one). *(ST #12)*
-- [ ] **Own properties on instances** where Chrome has them on the prototype. *(ST #13)*
+- [ ] **Own properties on instances** where Chrome has them on the prototype. Only under the spoofed profiles. *(ST #13)*
 - [ ] **`broken_image.js`** reports 16 for every image with no `src`. *(ST #14)*
 - [ ] **Generative personas use Safari/Firefox UAs.** Filter to Chrome UAs only. *(ST #15)* Test `unit`.
 - [ ] **Generative network cache:** validate before writing, and key the cache by URL. *(ST #16)* Test `unit`.
