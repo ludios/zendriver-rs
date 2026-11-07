@@ -224,8 +224,9 @@ Each item needs a test; `unit` is fine where no browser is involved.
 - [ ] **Browser:** *(BR #8–#10, #12)*
   - the geo overlay overrides an explicit persona timezone
   - `BrowserContext` `Drop` panics outside a tokio runtime (`unit`)
-  - `connect()` ignores tracker blocking
+  - `connect()` ignores tracker blocking. It honors `proxy_auth` since `bc8a71f74`, but no test covers `proxy_auth` through `connect()`: every test in `proxy_auth.rs` launches Chrome.
   - a target that detaches during the registrar stays registered forever
+  - closing or dropping a `connect`ed `Browser` shuts down only the browser's own socket, so a `Tab` kept after that keeps its own socket, and its waits and monitors go on. *(Astra, from reading the code; not reproduced.)*
 - [ ] **Tab:** *(TAB #6–#9, #11, #12)*
   - the cached `main_frame()` URL never updates (also FI out-of-scope note)
   - `wait_for_idle_opts` can lose a wake-up
@@ -246,11 +247,14 @@ Each item needs a test; `unit` is fine where no browser is involved.
   - element-scoped `.xpath("//…")` searches the whole document
   - `<fieldset disabled>` not treated as disabled
   - polling gives up on transient navigation errors
+  - the `lastIndex` resets of `d459e8f1b` have one test, a tab-wide `g` query of elements without children. Nothing tests an element-scoped query (`build_text_regex_fn_body`), the narrowing to descendants (`regex_narrowing_js`: Astra removed its reset, and the test still passed), or the `y` flag.
 - [ ] **Monitor/expect/cookies:** *(MEC #9–#11)*
   - subscriber tasks outlive their expectations
   - `save_to` has a fixed 30 s total limit
   - `Cookie::expires` is `Some(-1.0)` for session cookies
-- [ ] **Transport/interception:** detach can run before attach finishes. *(TI #13)*
+- [ ] **Transport/interception:**
+  - detach can run before attach finishes *(TI #13)*
+  - the connection's record of detached sessions (`detached_sessions`, since `07727d301`) gains one session id per detach and never loses one, so it grows for the connection's whole life. Bound it, e.g. to the sessions that some `SessionHandle` still refers to.
 - [ ] **Fetcher/WAF:** *(FW #6–#10)*
   - zip symlink directory creation (`unit` with a crafted zip)
   - partial downloads left behind
