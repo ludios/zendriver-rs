@@ -465,9 +465,9 @@ pub fn describe_disagreements(disagreements: &Claims) -> String {
 const WORKER_UNPATCHED: &str =
     "P1 Stealth: worker GPU name and deviceMemory differ from the page under spoofed (R6)";
 
-/// The TODO item for the JS patches and the CDP overrides taking the
-/// identity from different sources: the UA, the headers and the (unpatched)
-/// worker say Windows, the page's `navigator` says Linux.
+/// The TODO item for the identity coming from different sources: the UA,
+/// the UA client hints and the headers say Windows, `navigator.platform` says
+/// Linux.
 const TWO_IDENTITIES: &str =
     "P1 Stealth: JS-visible and HTTP identity come from different sources (ST #1, R6)";
 
@@ -494,8 +494,6 @@ pub const KNOWN_DISAGREEMENTS: &[(&str, &[&str], &str)] = &[
     ),
     ("webgl", &["spoofed", "spoofed win32"], WORKER_UNPATCHED),
     ("os", &["spoofed win32"], TWO_IDENTITIES),
-    ("uaPlatform", &["spoofed win32"], TWO_IDENTITIES),
-    ("platformVersion", &["spoofed win32"], TWO_IDENTITIES),
 ];
 
 /// Check that the fields in `found` (from [`disagreements`]) are exactly

@@ -171,7 +171,10 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
   - Decide whether site isolation should really be off. The profile docs say it is, but turning it off now changes behaviour for every user: cross-site iframes would stop being OOPIFs.
   - Test `chrome`: count the `iframe` targets on `/iframe-cross-site`, as `cross_site_iframe_is_out_of_process_under_site_isolation` in the testkit's `fixtures.rs` does.
 - [ ] **JS-visible and HTTP identity come from different sources.** One identity source should feed JS, the UA, UA-CH and headers. *(ST #1, R6)*
-  - Under `spoof_windows` on Linux: UA says Windows but `navigator.platform` is Linux; page and worker disagree on platform; OS version is a Linux-style `5.15.0`; WebGL names Mesa.
+  - Under `spoof_windows` on Linux, the UA, the UA client hints and the headers say Windows, but `navigator.platform` says Linux in the page and in workers, and WebGL names Mesa.
+  - **The page's `navigator.platform`:** Chrome keeps the platform of `Emulation.setUserAgentOverride` in the page's settings. Every DevTools session's emulation agent rewrites that setting with its own platform (empty if it set none) when it's restored after a cross-process navigation and when it detaches. So the tab's own socket, a second session that sets no override, wipes the stealth session's: under `native().platform(Win32)`, `navigator.platform` is `Win32` on `about:blank` and `Linux x86_64` after the first navigation and in new tabs (Chrome 157, 2026-11-07). With one raw CDP session, it stays `Win32`. Fix it by sending the same override on every session zendriver opens on a page, or with flat sessions.
+  - **A dedicated worker's `navigator.platform`** is the host's (`NavigatorBase::platform`): no override reaches it.
+  - **WebGL:** the bootstrap picks the GPU tier for the persona's platform, which `Persona::system()` sets to the host's, so a profile's `platform(..)` pin doesn't reach it.
 - [ ] **Worker GPU name and `deviceMemory` differ from the page under `spoofed`.** So does `hardwareConcurrency`: no stealth patch reaches a worker, and `KNOWN_DISAGREEMENTS` files all three under this item. *(R6)*
 - [ ] **Canvas farbling turns transparent pixels into `(1,1,1,0)`.** *(ST #2)*
 - [ ] **macOS UA-CH `platformVersion` / `architecture` describe an impossible machine.** *(ST #3)*
@@ -179,7 +182,6 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
 - [ ] **`fonts.js` bugs:** `measureText` isn't deterministic; `fonts.check` keeps only the last word of the family name. *(ST #5, #6)*
   - Also, real Chrome's `document.fonts.check()` is true for any local font, even one that doesn't exist (seen in Chrome 156 and 157), while the persona allow-list answers false for every family not on it. So the allow-list is itself a deviation, which fixing the parsing leaves in place.
 - [ ] **`innerHeight` is smaller than `clientHeight`.** Only under the spoofed profiles. *(ST #7)*
-- [ ] **`userAgentData`:** the object is rebuilt on every access, and `getHighEntropyValues` ignores the requested hints. *(ST #10)*
 - [ ] **`getClientRects()` returns an `Array`,** not a `DOMRectList`. *(ST #11)*
 - [ ] **Masked functions are constructible** in the spoofed patches: each is an ordinary `function`, with an own `prototype` (rebrowser's `nativeTampering` checks for one). *(ST #12)*
 - [ ] **Own properties on instances** where Chrome has them on the prototype. Only under the spoofed profiles. *(ST #13)*

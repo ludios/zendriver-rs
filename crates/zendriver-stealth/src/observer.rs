@@ -272,8 +272,7 @@ impl StealthObserver {
     /// `languages` / `screen` are folded into `fingerprint` up front, and
     /// every consumer below — the
     /// `Emulation.set*Override` calls, the `Accept-Language` header, the
-    /// bootstrap script's geometry and `navigator.languages` patches, and
-    /// the launch switches of [`StealthObserver::headless_flags`] — then
+    /// bootstrap script's geometry patch, and the launch switches of [`StealthObserver::headless_flags`] — then
     /// reads that one merged value. An explicitly-set persona field wins over
     /// the fingerprint's; `None` inherits the fingerprint's.
     #[must_use]
@@ -403,13 +402,14 @@ impl TargetObserver for StealthObserver {
                     // (`Windows` / `macOS` / `Linux`) belongs to `userAgentMetadata.platform`,
                     // which is sent separately just below and derives it in `Fingerprint::new`.
                     //
-                    // Sending the CH spelling here made every session report a
-                    // `navigator.platform` no real browser emits. It was invisible under
-                    // `spoofed`, whose bootstrap re-patches `navigator.platform` from
-                    // `platformJs` and so happened to paper over it — but `Off`/`Native` have
-                    // no bootstrap (see `bootstrap` above), leaving `native` profiles
-                    // presenting `"macOS"` where Chrome reports `"MacIntel"`.
+                    // Sending the CH spelling here made pages report a `navigator.platform`
+                    // no real browser emits, e.g. `"macOS"` where Chrome reports `"MacIntel"`.
                     // Measured against a real Chrome build, not inferred.
+                    //
+                    // Unlike the other overrides, Chrome keeps this one in the page's
+                    // settings, which every DevTools session on the page rewrites with its
+                    // own platform (empty if it set none) when it is restored after a
+                    // cross-process navigation, and when it detaches.
                     "platform": self.fingerprint.platform.js_string(),
                     "userAgentMetadata": &user_agent_metadata,
                 }),
@@ -557,10 +557,8 @@ mod tests {
     /// The two sets are disjoint, so this asserts membership rather than a fixture literal and
     /// therefore catches the swap on whatever platform the test host happens to be.
     ///
-    /// Regression guarded: the top-level param was sent as `ch_platform()`, so every session
-    /// reported a `navigator.platform` no real browser emits. It was invisible under `spoofed`,
-    /// whose bootstrap re-patches the property from `platformJs`, but `Off`/`Native` have no
-    /// bootstrap — so `native` profiles shipped the bad value straight through.
+    /// Regression guarded: the top-level param was sent as `ch_platform()`, so pages reported
+    /// a `navigator.platform` no real browser emits.
     fn assert_platform_axes_not_swapped(sent: &serde_json::Value) {
         const JS_SPELLINGS: [&str; 3] = ["Win32", "MacIntel", "Linux x86_64"];
         const CH_SPELLINGS: [&str; 3] = ["Windows", "macOS", "Linux"];
@@ -1662,8 +1660,7 @@ mod persona_reaches_cdp_tests {
 
     /// An empty persona list is the absence of a value, not a value. Every
     /// other language consumer in the crate already reads it that way
-    /// (`lang::resolve_languages` and `lang::fingerprint_languages` both
-    /// filter it), so a merge that treated `Some(vec![])` as a pin let a
+    /// (`lang::fingerprint_languages` filters it), so a merge that treated `Some(vec![])` as a pin let a
     /// persona with no languages destroy a configured one and drop both
     /// surfaces back to the `en-US` default.
     #[tokio::test]

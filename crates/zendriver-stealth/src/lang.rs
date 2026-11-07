@@ -1,7 +1,7 @@
 //! Locale list -> header/JS derivations. Always available (no feature gate);
 //! the observer formats `Accept-Language` from these.
 
-use crate::{Fingerprint, Persona};
+use crate::Fingerprint;
 
 /// Format an ordered language list as an `Accept-Language` header value.
 ///
@@ -94,30 +94,6 @@ pub(crate) fn effective_locale(fp: &Fingerprint) -> Option<String> {
     configured_languages(fp)?.into_iter().next()
 }
 
-/// Resolve the effective language list at apply time, persona first.
-///
-/// Precedence: `persona.languages` -> `fingerprint.languages` ->
-/// derive from the primary locale (`persona.locale` before `fp.locale`) ->
-/// `["en-US", "en"]`.
-///
-/// For a fingerprint the persona has already been folded into, this agrees
-/// with [`fingerprint_languages`] by construction — the persona's values are
-/// on `fp` by then. It stays persona-first for the public
-/// [`bootstrap_script`](crate::patches::bootstrap_script) path, whose caller
-/// may hand it an unmerged pair.
-pub(crate) fn resolve_languages(persona: &Persona, fp: &Fingerprint) -> Vec<String> {
-    if let Some(langs) = persona.languages.as_ref().filter(|v| !v.is_empty()) {
-        return langs.clone();
-    }
-    if let Some(langs) = fp.languages.as_ref().filter(|v| !v.is_empty()) {
-        return langs.clone();
-    }
-    match persona.locale.as_deref().or(fp.locale.as_deref()) {
-        Some(locale) => derive_from_locale(locale),
-        None => default_languages(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,33 +120,27 @@ mod tests {
     }
 
     #[test]
-    fn resolve_precedence() {
-        let fp = bare_fingerprint();
-
-        // persona.languages wins
-        let p = crate::Persona {
-            languages: Some(vec!["es-ES".into(), "es".into()]),
-            ..Default::default()
+    fn fingerprint_languages_precedence() {
+        let languages_of = |languages: Option<&[&str]>, locale: Option<&str>| {
+            fingerprint_languages(&crate::Fingerprint {
+                languages: languages.map(v),
+                locale: locale.map(String::from),
+                ..bare_fingerprint()
+            })
         };
-        assert_eq!(super::resolve_languages(&p, &fp), vec!["es-ES", "es"]);
 
-        // derive from locale: the fr-FR regression (was hardcoded "en")
-        let p = crate::Persona {
-            locale: Some("fr-FR".into()),
-            ..Default::default()
-        };
-        assert_eq!(super::resolve_languages(&p, &fp), vec!["fr-FR", "fr"]);
-
-        // bare locale -> single entry
-        let p = crate::Persona {
-            locale: Some("en".into()),
-            ..Default::default()
-        };
-        assert_eq!(super::resolve_languages(&p, &fp), vec!["en"]);
-
-        // nothing set -> default
-        let p = crate::Persona::default();
-        assert_eq!(super::resolve_languages(&p, &fp), vec!["en-US", "en"]);
+        // The list wins over the locale.
+        assert_eq!(
+            languages_of(Some(&["es-ES", "es"]), Some("fr-FR")),
+            vec!["es-ES", "es"]
+        );
+        // A locale with a region adds its base language: the fr-FR
+        // regression (it was a hardcoded "en").
+        assert_eq!(languages_of(None, Some("fr-FR")), vec!["fr-FR", "fr"]);
+        // A bare locale stays one entry.
+        assert_eq!(languages_of(None, Some("en")), vec!["en"]);
+        // Nothing set: the default.
+        assert_eq!(languages_of(None, None), vec!["en-US", "en"]);
     }
 
     #[test]

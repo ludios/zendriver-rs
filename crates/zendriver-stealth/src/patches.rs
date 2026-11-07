@@ -1,8 +1,14 @@
 //! Bundles individual patches into a bootstrap script driven by a [`Persona`]
-//! (the surface-spoofing config) plus a [`Fingerprint`] (coherent UA / Chrome
-//! identity probed at launch).
+//! (the surface-spoofing config) plus a [`Fingerprint`] (the identity probed
+//! at launch).
 //!
-//! The 9 identity patches run inside a single IIFE called with a serialized
+//! The bootstrap patches only what Chrome can't be told over CDP or at
+//! launch: the UA, the UA client hints, `navigator.platform` and
+//! `navigator.languages` come from the observer's
+//! `Emulation.setUserAgentOverride` instead, so the page reads them from
+//! Chrome's own getters.
+//!
+//! The identity patches run inside a single IIFE called with a serialized
 //! fingerprint object — one `Page.addScriptToEvaluateOnNewDocument` round-trip
 //! covers them. The persona-driven surface patches (canvas/audio/clientRects
 //! noise, webgl/fonts/hardware value substitution, webrtc policy) are appended
@@ -12,7 +18,7 @@ use serde_json::json;
 
 use crate::persona::surface::{Strategy, Surface};
 use crate::persona::{FontSpec, HardwareSpec, SurfaceCfg, WebglSpec, WebgpuSpec, WebrtcSpec};
-use crate::{Fingerprint, GpuProfile, Persona, Platform, Seed, UserAgentMetadata};
+use crate::{Fingerprint, GpuProfile, Persona, Platform, Seed};
 
 // --- Native-function masking prelude (runs first, wraps everything) ------
 const NATIVE: &str = include_str!("patches/_native.js");
@@ -20,7 +26,6 @@ const NATIVE: &str = include_str!("patches/_native.js");
 // --- Identity patches (run inside the fp IIFE) ---------------------------
 const CODECS: &str = include_str!("patches/codecs.js");
 const NAVIGATOR_PROPS: &str = include_str!("patches/navigator_props.js");
-const USER_AGENT_DATA: &str = include_str!("patches/user_agent_data.js");
 const BROKEN_IMAGE: &str = include_str!("patches/broken_image.js");
 
 // --- Persona surface patches (appended after the identity IIFE) ----------
@@ -45,11 +50,9 @@ const SCREEN: &str = include_str!("patches/screen.js");
 
 /// Build the bootstrap script for the spoofed profile.
 ///
-/// `identity` supplies coherent UA-CH metadata and the *real* probed Chrome
-/// version; `persona` overrides simple identity fields (platform / hardware /
-/// locale) and drives the new fingerprint surfaces. Splitting the two keeps
-/// the UA coherent: when the persona changes platform we rebuild the UA-CH
-/// metadata against the real Chrome version instead of a stale fallback.
+/// `identity` supplies the hardware that `persona` doesn't pin; `persona`
+/// drives the fingerprint surfaces, and its platform picks the GPU that the
+/// WebGL and WebGPU patches present.
 ///
 /// The window/screen geometry is the one surface `identity` can drive on its
 /// own: `persona.screen` is used when set, and a persona that leaves it unset
@@ -195,49 +198,24 @@ fn bootstrap_script_impl(persona: &Persona, identity: &Fingerprint, spoof_webgl:
     format!("(function(){{\n{body}\n}})();")
 }
 
-/// The platform the page will claim: the persona's when it pins one, else the
-/// host's as probed. Both the identity IIFE and the WebGL profile resolve it
-/// this way — the GPU tier has to be judged against the OS the page claims,
-/// not the one the process runs on.
+/// The platform whose GPU the WebGL and WebGPU patches present: the
+/// persona's when it pins one, else the fingerprint's. The GPU tier has to be
+/// judged against the OS the page claims, not the one the process runs on.
 fn resolved_platform(persona: &Persona, identity: &Fingerprint) -> Platform {
     persona.platform.unwrap_or(identity.platform)
 }
 
-/// Emit the 9 identity patches wrapped in `(function(fp){ ... })(fpJson)`.
-/// Identity is resolved from `identity` with `persona` overrides applied,
-/// preserving UA coherence (see [`bootstrap_script`]).
+/// Emit the identity patches wrapped in `(function(fp){ ... })(fpJson)`,
+/// where `fp` holds the hardware they present: the `persona`'s where it pins
+/// it, else the `identity`'s.
 fn identity_iife(persona: &Persona, identity: &Fingerprint) -> String {
-    let platform = resolved_platform(persona, identity);
-
-    // If the persona changes the platform, rebuild UA-CH metadata coherently
-    // against the REAL probed Chrome version (never a fallback) so platform +
-    // platformVersion + brands all agree. Otherwise reuse the probed metadata.
-    let uam = if persona.platform.is_some_and(|p| p != identity.platform) {
-        UserAgentMetadata::realistic(platform, identity.chrome_major, &identity.chrome_full)
-    } else {
-        identity.ua_metadata.clone()
-    };
-
     let cpu = persona.hardware_concurrency.unwrap_or(identity.cpu_count);
     let mem = persona.device_memory_gb.unwrap_or(identity.memory_gb);
-    let languages = crate::lang::resolve_languages(persona, identity);
-
     let fp_json = json!({
-        "platformJs":      platform.js_string(),
-        "chPlatform":      platform.ch_platform(),
-        "platformVersion": uam.platform_version,
-        "cpuCount":        cpu,
-        "memoryGb":        mem,
-        "languages":       languages,
-        "architecture":    uam.architecture,
-        "bitness":         uam.bitness,
-        "brands":          uam.brands,
-        "fullVersionList": uam.full_version_list,
+        "cpuCount": cpu,
+        "memoryGb": mem,
     });
-
-    format!(
-        "(function(fp){{\n{CODECS}\n{NAVIGATOR_PROPS}\n{USER_AGENT_DATA}\n{BROKEN_IMAGE}\n}})({fp_json});",
-    )
+    format!("(function(fp){{\n{CODECS}\n{NAVIGATOR_PROPS}\n{BROKEN_IMAGE}\n}})({fp_json});")
 }
 
 /// JS source for the resolved seed token of a noise surface, or `None` when
@@ -690,7 +668,6 @@ mod tests {
             s.contains("hardwareConcurrency"),
             "navigator_props patch missing"
         );
-        assert!(s.contains("userAgentData"), "user_agent_data patch missing");
         assert!(s.contains("naturalWidth"), "broken_image patch missing");
     }
 
@@ -731,38 +708,10 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_substitutes_platform_js_string() {
-        let s = bootstrap_script(&Persona::default(), &mock_identity());
-        assert!(s.contains("\"MacIntel\""));
-    }
-
-    // --- Identity coherence ---------------------------------------------
-
-    #[test]
-    fn persona_platform_override_rebuilds_uam_with_real_chrome_version() {
-        // identity is mac/chrome120; persona overrides platform to Win32.
-        // The rebuilt UA-CH must use the REAL chrome version (120) and the
-        // Win32 platformVersion (15.0.0), not a fallback.
-        let persona = Persona {
-            platform: Some(Platform::Win32),
-            ..Persona::default()
-        };
-        let s = bootstrap_script(&persona, &mock_identity());
-        assert!(s.contains("\"Win32\""), "platformJs should be Win32");
-        assert!(
-            s.contains("15.0.0"),
-            "Win32 platformVersion should be present"
-        );
-        // chrome 120 brands carried through from the real identity.
-        assert!(s.contains("\"120\""), "real chrome major should survive");
-    }
-
-    #[test]
     fn persona_overrides_simple_identity_fields() {
         let persona = Persona {
             hardware_concurrency: Some(4),
             device_memory_gb: Some(16),
-            locale: Some("fr-FR".into()),
             ..Persona::default()
         };
         let s = bootstrap_script(&persona, &mock_identity());
@@ -770,7 +719,6 @@ mod tests {
         // deviceMemory is rendered into the fp json untouched here (the JS
         // clamps); persona value should appear.
         assert!(s.contains("\"memoryGb\":16"), "memory override missing");
-        assert!(s.contains("fr-FR"), "locale override missing");
     }
 
     // --- Surface strategy emission (new) --------------------------------
@@ -1285,7 +1233,6 @@ mod tests {
             s.contains("hardwareConcurrency"),
             "navigator_props patch missing"
         );
-        assert!(s.contains("userAgentData"), "user_agent_data patch missing");
         assert!(s.contains("naturalWidth"), "broken_image patch missing");
     }
 
@@ -1908,24 +1855,6 @@ mod tests {
     }
 
     #[test]
-    fn navigator_languages_derives_base_lang_not_en() {
-        let persona = Persona {
-            locale: Some("fr-FR".into()),
-            ..Default::default()
-        };
-        let identity = mock_identity(); // existing helper in this test module
-        let script = bootstrap_script(&persona, &identity);
-        assert!(
-            script.contains(r#"["fr-FR","fr"]"#) || script.contains(r#"["fr-FR", "fr"]"#),
-            "languages should derive base lang, not hardcode en: {script}"
-        );
-        assert!(
-            !script.contains(r#"["fr-FR","en"]"#),
-            "must not hardcode en"
-        );
-    }
-
-    #[test]
     fn identity_patches_route_through_masking_helpers() {
         let s = bootstrap_script(&Persona::default(), &mock_identity());
         assert!(s.contains("__zdReplace"), "codecs methods routed");
@@ -1950,6 +1879,21 @@ mod tests {
             "permissions",
             "Chrome's headless mode makes Notification.permission and \
              permissions.query agree",
+        ),
+        (
+            "userAgentData",
+            "the userAgentMetadata of the observer's Emulation.setUserAgentOverride \
+             drives Chrome's own navigator.userAgentData",
+        ),
+        (
+            "Navigator.prototype, 'platform'",
+            "the platform of the observer's Emulation.setUserAgentOverride drives \
+             Chrome's own navigator.platform",
+        ),
+        (
+            "Navigator.prototype, 'languages'",
+            "the acceptLanguage of the observer's Emulation.setUserAgentOverride \
+             drives Chrome's own navigator.languages",
         ),
     ];
 
