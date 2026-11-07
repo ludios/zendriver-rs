@@ -101,7 +101,6 @@ Also for this round:
 ## P1: wrong results
 
 ### Frames and elements
-- [ ] **`Frame::evaluate_main` / `content` run in the top-level page for same-origin iframes.** Pass the frame's main-world `contextId`. *(FI #1)* Test `chrome`.
 - [ ] **Stale-handle refresh of a frame element re-runs the selector on the top-level page.** Re-resolve inside the frame instead. *(QE #2)* Test `chrome`.
 - [ ] **`best_match` handles refresh to a different element.** *(QE #9)* Test `chrome`.
 - [ ] **OOPIF fixes.** A spike on 2026-10-31 found that OOPIFs are never attached, under every profile, and that every profile makes them (site isolation is on, see "Launch flags" under Stealth), so all of these are reachable. `Target.getTargets` lists the iframe target with `attached: false`, and `tab.frames()` / `frame_by_url` never see it.

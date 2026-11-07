@@ -14,7 +14,9 @@ use zendriver::{Browser, Frame, Tab};
 use zendriver_testkit::axum::Router;
 use zendriver_testkit::axum::response::Html;
 use zendriver_testkit::axum::routing::get;
-use zendriver_testkit::{FixtureServer, SITE_A, SITE_B, assert_eventually, launch_for_test, load};
+use zendriver_testkit::{
+    FixtureServer, SITE_A, SITE_B, assert_eventually, eval, launch_for_test, load,
+};
 
 /// How many same-origin iframes `/many-frames` embeds. The page's renderer
 /// process numbers its execution contexts from 1 as it creates them, and
@@ -134,5 +136,32 @@ async fn frame_find_reads_the_new_document_after_the_frame_navigates() {
     let heading = child.find().css("#heading").one().await.unwrap();
     assert_eq!(heading.inner_text().await.unwrap(), "Second");
 
+    browser.close().await;
+}
+
+/// `Frame::evaluate_main` and `Frame::content` on an iframe in the page's
+/// process run in the iframe's main world, not in the top-level page's, and
+/// `evaluate_main` runs a whole script there.
+#[tokio::test]
+async fn evaluate_main_runs_in_the_main_world_of_a_same_process_iframe() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/iframe-same-origin")).await;
+    let frame = only_child_frame(&tab).await;
+    // A global of the iframe's main world, which no isolated world sees.
+    eval(
+        &tab,
+        "document.getElementById('child').contentWindow.marker = 'the iframe'",
+    )
+    .await;
+
+    let read: String = frame
+        .evaluate_main("const suffix = '!'; window.marker + suffix")
+        .await
+        .unwrap();
+    assert_eq!(read, "the iframe!");
+    let html = frame.content().await.unwrap();
+    assert!(html.contains("child-button"), "{html}");
     browser.close().await;
 }

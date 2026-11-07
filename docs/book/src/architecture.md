@@ -169,6 +169,10 @@ scope. This means:
 
 For the main-world escape hatch, use `evaluate_main(...)`. It dispatches
 the same `Runtime.evaluate` but targets the page's default context.
+`Frame::evaluate_main` targets the frame's own main world, which
+zendriver finds without `Runtime.enable` (a well-known automation tell):
+`DOM.resolveNode` with no context id wraps the frame's document in that
+world, and V8 writes the world's context id into the returned object's id.
 
 Each frame has its own isolated world, and `tab.evaluate(...)` uses the
 main frame's. Every call asks Chrome for the world's context in the
