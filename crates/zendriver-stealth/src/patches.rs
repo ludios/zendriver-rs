@@ -10,10 +10,11 @@
 //! `Emulation.setHardwareConcurrencyOverride`, so the page reads them from
 //! Chrome's own getters.
 //!
-//! The identity patches run inside a single IIFE called with a serialized
-//! fingerprint object — one `Page.addScriptToEvaluateOnNewDocument` round-trip
-//! covers them. The persona-driven surface patches (canvas/audio/clientRects
-//! noise, webgl/fonts/hardware value substitution) are appended
+//! The identity patches run inside a single IIFE called with an object of
+//! the values they present — one `Page.addScriptToEvaluateOnNewDocument`
+//! round-trip covers them. The persona-driven surface patches
+//! (canvas/audio/clientRects noise, webgl/webgpu/fonts/hardware value
+//! substitution) are appended
 //! after, each emitted only when its resolved [`Strategy`] is not `Native`.
 
 use serde_json::json;
@@ -1759,7 +1760,8 @@ mod tests {
 
     /// `(needle, why)`: what the bootstrap must not contain, because Chrome
     /// itself already gives the page the right value. A JS patch there could
-    /// only add a detectable replacement of Chrome's own function.
+    /// only add a detectable difference from Chrome's own behavior. Each
+    /// needle is the form that a patch would install the surface in.
     const LEFT_TO_CHROME: &[(&str, &str)] = &[
         (
             "webdriver",
@@ -1767,12 +1769,12 @@ mod tests {
              Chrome's own navigator.webdriver false",
         ),
         (
-            "plugins",
+            "Navigator.prototype, 'plugins'",
             "Chrome's headless mode has the same 5 PDF plugins as a headed Chrome",
         ),
         ("window.chrome", "Chrome's headless mode has window.chrome"),
         (
-            "permissions",
+            "navigator.permissions",
             "Chrome's headless mode makes Notification.permission and \
              permissions.query agree",
         ),

@@ -462,8 +462,8 @@ pub fn describe_disagreements(disagreements: &Claims) -> String {
 /// The TODO item for workers, which no stealth patch reaches: they report
 /// the host's hardware and the real GPU (SwiftShader, since workers get no
 /// GPU).
-const WORKER_UNPATCHED: &str =
-    "P1 Stealth: worker GPU name and deviceMemory differ from the page under spoofed (R6)";
+const WORKER_UNPATCHED: &str = "P1 Stealth: worker GPU name, deviceMemory and hardwareConcurrency \
+                                differ from the page under spoofed (R6)";
 
 /// The TODO item for the identity coming from different sources: the UA,
 /// the UA client hints and the headers say Windows, `navigator.platform` says
@@ -480,7 +480,7 @@ pub const PINNED_HARDWARE: &str = r#"{"hardware_concurrency": 1, "device_memory_
 /// `(field, profiles, why)`: a field that disagrees under each of
 /// `profiles` because of an open bug, named by its TODO item. The profiles
 /// are `zendriver`'s `stealth_probe.rs` tests; `spoofed` and `spoofed win32`
-/// launch with [`PINNED_HARDWARE`]. Recorded on Linux with Chrome 156.
+/// launch with [`PINNED_HARDWARE`]. Recorded on Linux with Chrome 157.
 pub const KNOWN_DISAGREEMENTS: &[(&str, &[&str], &str)] = &[
     (
         "hardwareConcurrency",

@@ -1,5 +1,6 @@
-//! Locale list -> header/JS derivations. Always available (no feature gate);
-//! the observer formats `Accept-Language` from these.
+//! Locale list -> `Accept-Language` and locale-override derivations. Always
+//! available (no feature gate); the observer formats `Accept-Language` from
+//! these, and Chrome derives `navigator.languages` from that.
 
 use crate::Fingerprint;
 

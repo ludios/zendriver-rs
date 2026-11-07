@@ -25,7 +25,7 @@
 //! PR and executes `check_visible` for both kinds of caller: the opacity
 //! walk (through a slot and a shadow host), `content-visibility: auto`, and
 //! the gate's viewport clause. `tests/element_world_regressions.rs` covers
-//! the viewport clause in quirks mode and under a spoofed `innerHeight`.
+//! the viewport clause in quirks mode and under a page-shrunk `innerHeight`.
 //! `tests/find_visible_only.rs` covers `visible_only` with frames, but its
 //! tests are `#[ignore]`d, so they run only in the scheduled
 //! `nightly-ignored-tests` lane, which carries `continue-on-error: true`.
@@ -207,18 +207,14 @@ pub(crate) async fn check_visible(el: &Element, within: Within) -> Result<bool> 
                 // the box it must be compared against is the LAYOUT viewport. Two
                 // things about reading that box are load-bearing:
                 //
-                // 1. It must never come from `window.inner*`, which this world's
-                //    page can redefine, while `scroll_into_view` moves the
-                //    element with Chrome's real viewport. Under
-                //    `StealthProfile::spoofed()`, `zendriver-stealth`'s
-                //    `patches/screen.js` (since deleted) rewrote `window.inner*`
-                //    to the persona's screen size minus a chrome inset.
-                //    Measured with its 86px default: `innerHeight` 994 against a
-                //    real 1080. Comparing a real-geometry scroll against that
-                //    fabricated viewport leaves every element landing in the
-                //    inset band permanently "not visible", which broke `focus`
-                //    — and with it `type_text` / `press` / `type_keys` — on any
-                //    below-the-fold field.
+                // 1. It must never come from `window.inner*`, which a script
+                //    can redefine, while `scroll_into_view` moves the element
+                //    with Chrome's real viewport. Comparing a real-geometry
+                //    scroll against a smaller, fabricated `innerHeight` (994
+                //    against a real 1080, measured) leaves every element landing
+                //    in the band between them permanently "not visible", which
+                //    broke `focus` — and with it `type_text` / `press` /
+                //    `type_keys` — on any below-the-fold field.
                 //
                 // 2. WHICH element reports the layout viewport depends on the
                 //    rendering mode, and reading the wrong one fails silently.
@@ -523,10 +519,10 @@ mod tests {
     ///
     /// Two separate defects are pinned here, both of which shipped:
     ///
-    /// - Reading `window.inner*` at all. `StealthProfile::spoofed()`
-    ///   rewrites those, so they must not appear —
-    ///   not even as a trailing fallback. The predecessor of this test
-    ///   asserted only that `documentElement` came *first*, which a
+    /// - Reading `window.inner*` at all. A script can redefine those, so
+    ///   they must not appear — not even as a trailing fallback. The
+    ///   predecessor of this test asserted only that `documentElement` came
+    ///   *first*, which a
     ///   `documentElement.clientWidth || window.innerWidth` expression
     ///   satisfies while still reaching the spoofed value.
     /// - Reading `documentElement` unconditionally. In quirks mode that is

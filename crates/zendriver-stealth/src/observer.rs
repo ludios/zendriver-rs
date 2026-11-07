@@ -555,8 +555,8 @@ impl TargetObserver for StealthObserver {
         // a second, independent check of the profile kind.
         if !self.bootstrap.is_empty() {
             // Inject into the MAIN world (no `worldName`). The bootstrap's
-            // patches mutate globals such as `Function.prototype`, `screen`
-            // and `Navigator.prototype` — every isolated
+            // patches mutate globals such as `Function.prototype`, `Navigator.prototype`
+            // and `HTMLCanvasElement.prototype` — every isolated
             // world gets its own copy of these, so a patch applied in a
             // named/isolated world is invisible to the page's own scripts
             // (and to `evaluate_main`, the surface detection sites probe).
