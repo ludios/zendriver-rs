@@ -377,7 +377,6 @@ impl NavigationExpectation {
     ///     .await?;
     /// # Ok(()) }
     /// ```
-    #[must_use]
     pub fn timeout(mut self, dur: Duration) -> Self {
         self.timeout = dur;
         self.sleep = None;
