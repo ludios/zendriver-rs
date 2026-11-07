@@ -2,7 +2,7 @@
 
 This plan makes zendriver's realistic mouse moves move like a hand: `Element::click` and `hover`, `Tab::mouse_move` and `mouse_click`, and later the drags. It was written on 2026-11-07. Before writing it, I reviewed HumanMoveMouse, ghost-cursor, cursorflow, veilus-human-input and windmouse-rs, measured all of them with one harness, and probed Chrome 157 over raw CDP. The harness and the probe were in `/tmp/hmm-scripts/` and are not in the repo; "What I measured" gives the harness's inputs.
 
-**Order:** do the items in order. Item 1 (pacing) does not depend on the path model and can land first. Item 7 needs items 1 and 2.
+**Order:** items 0–8 in order. Item 0 comes first: it pins today's bug and measures native input. Item 1 doesn't depend on the path model. Item 5 waits for an answer to its open question. Item 7 needs items 1 and 2.
 
 **Rule:** the same as in [TODO.md](TODO.md). Every fix lands with a test that fails before the fix, and behaviour that depends on Chrome is tested against real Chrome.
 
@@ -98,7 +98,7 @@ The durations mix the model with how it's played back. ghost-cursor's are 16.7 m
 ## Chrome facts (Chrome 157, headless, raw CDP from Node)
 
 - **Waiting for each reply:** each `Input.dispatchMouseEvent` call returns at the next frame boundary (frames come every 16.7 ms). A sleep shorter than a frame before a dispatch therefore adds nothing. Each run of 60 moves took 971–984 ms: back to back, at an 8 ms cadence, and on today's 600 px schedule (a 6.67 ms sleep, then a wait for the reply).
-- **Not waiting for each reply:** the page sees `mousemove` events at our cadence. An 8 ms cadence gave 8.1 ms median gaps, and 2 ms gave 2.3 ms. Mostly one event arrived per dispatch: 50–58 events for 60 dispatches. Real hardware input may not look like this: Chrome aligns continuous input to frames and coalesces it ([Chrome's explanation](https://developer.chrome.com/blog/aligning-input-events/)).
+- **Not waiting for each reply:** the page sees `mousemove` events at our cadence. An 8 ms cadence gave 8.1 ms median gaps, and 2 ms gave 2.3 ms. Mostly one event arrived per dispatch: 50–58 events for 60 dispatches. Real hardware input may not look like this: Chrome aligns continuous input to frames and coalesces it ([Chrome's explanation](https://developer.chrome.com/blog/aligning-input-events/)). That's why item 0 also measures native input.
 - **Screen coordinates:** the events are trusted. At page scale 1, natively, `screenX = clientX + window.screenX` and `screenY = clientY + window.screenY + (outerHeight − innerHeight)`; in the probe the offsets were 10 and 97 = 10 + 87. These relations don't hold under a device-metrics scale other than 1. zendriver's `screen.js` sets `window.screenX` and `window.screenY` to 0 and spoofs the outer and inner sizes, but the coordinates Chrome puts in events won't follow those spoofs. That mismatch is unverified; item 6 checks it.
 - **Coalesced events:** `getCoalescedEvents()` exists only in secure contexts. A `pointermove` listener that called it threw on a `data:` URL and worked on 127.0.0.1. `zendriver-testkit`'s `*.test` sites are plain HTTP, so they aren't secure contexts either.
 - **zendriver's transport:** `SessionHandle::call` is an `async fn`, so it sends nothing until it is polled. To keep several dispatches in flight, poll them together.
@@ -106,73 +106,122 @@ The durations mix the model with how it's played back. ghost-cursor's are 16.7 m
 ## Decisions (settled 2026-11-07)
 
 1. **Port cursorflow's model** to `crates/zendriver/src/input/motion.rs`, on rand 0.9.
-   - Drop what we don't use: the multi-target `generate` and `merge`, the `Trajectory` column type, and screen clamping.
-   - Keep its statistical tests, and credit cursorflow (MIT) in the module's doc comment.
-   - Rejected: depending on `cursorflow = "=0.3.0"`. That would add rand 0.10 to the core crate, with nobody upstream to fix bugs. Also rejected: a smaller generator of our own, which would leave out the corrections and tremor.
-2. **Replace `InputProfile`'s mouse fields.** `mouse_speed_px_per_ms`, `jitter_amplitude_px` and `overshoot_rate` give way to the model's own settings: speed factor, precision, nervousness, overshoot tendency, maximum phases and arc direction. This is a breaking change to a public type.
-3. **Click where the cursor comes to rest.** That's a random point inside the box, like a person's, so the actionability gate hit-tests that point instead of the center.
-4. **Replace `patches/mouse.js` with real CDP moves.** A short idle wander through the new model produces trusted events, and then `mouse.js` is deleted.
+   - **Drop what we don't use:** the multi-target `generate` and `merge`, and the `Trajectory` column type. Keep clamping, but clamp to the viewport.
+   - **Keep its statistical tests.**
+   - **Licence:** keep cursorflow's whole MIT notice ("Copyright (c) 2026 xth24" plus the permission text) with the ported code, in the header of each ported file. Its upstream repo is gone, so take the text from the crates.io tarball of 0.3.0.
+   - **Normal draws:** cursorflow draws normals through rand_distr 0.6, which needs rand 0.10. On rand 0.9, write a Box-Muller normal (about five lines, as veilus does) instead of adding rand_distr 0.5 to the core crate. Log-normal draws are `exp(normal)`. The Beta draw is used only by `merge`, which we drop.
+   - **Rejected:** depending on `cursorflow = "=0.3.0"`, which would add rand 0.10 to the core crate with nobody upstream to fix bugs. Also rejected: a smaller generator of our own, which would leave out the corrections and tremor.
+2. **Replace `InputProfile`'s mouse fields.** `mouse_speed_px_per_ms`, `jitter_amplitude_px` and `overshoot_rate` give way to the model's own settings: speed factor, precision, nervousness, overshoot tendency, maximum phases, jerk smoothness and arc direction. This is a breaking change to a public type.
+3. **`click` and `hover` end where the cursor comes to rest.** That's a random point inside the element's box, like a person's, so the actionability gate hit-tests that point instead of the center.
+4. **Replace `patches/mouse.js` with real CDP moves,** under the same condition (`spoofed` stealth). Moves through the new model produce trusted events, and then `mouse.js` is deleted. Real moves reach real page handlers, unlike `mouse.js`'s direct calls to listeners, so item 7 sets the limits.
 
 ## Work items
 
-- [ ] **0. Pin today's timing in real Chrome.**
-  - Add a fixture page to `zendriver-testkit` that records `mousemove` and `pointermove`: `timeStamp`, client and screen coordinates, `isTrusted`, and the coalesced count.
-  - Add a test that runs `Tab::mouse_move` over 600 px with `spoofed`, and checks that the duration the page observes matches `mouse_speed_px_per_ms`.
-  - It should fail today by about 1 s, so name it `known_bug_*` and `#[ignore]` it until item 1 lands.
+- [ ] **0. Pin today's timing, and measure native input, in real Chrome.**
+  - **Fixture page:** add one to `zendriver-testkit` that records `mousemove` and `pointermove`: `timeStamp`, client and screen coordinates, `isTrusted`, and the coalesced count. Serve it from 127.0.0.1; `getCoalescedEvents()` doesn't exist on the plain-HTTP `*.test` sites.
+  - **Pinning test:** run `Tab::mouse_move` over 600 px with `spoofed`, and check that the duration the page observes matches `mouse_speed_px_per_ms` (0.4 s).
+    - Today it takes about 1.0 s, so name it `known_bug_*` and `#[ignore]` it until item 1 lands.
+    - Once item 2 lands, change its check to: the observed duration matches the generated path's last offset within one frame, and the gaps between events match the planned cadence.
+  - **Native input:** run headed Chrome under Xvfb, move the X pointer with `xdotool` (installed here), and record what the page sees: the gaps between events, and how many events each `pointermove` coalesces. That's how hardware-like input reaches a page through Chrome's frame alignment, and it decides item 1's cadence.
   - Tags: `chrome`.
 - [ ] **1. Pace moves in real time, without waiting for Chrome's replies.** In `move_realistic`:
-  - Dispatch each point at an absolute deadline (`tokio::time::sleep_until(start + offset)`), so that the sleeps' rounding errors don't add up.
-  - Keep the dispatched calls in flight in a `FuturesOrdered` that is polled alongside the sleep. Cap it at about 8 calls in flight, so a stalled renderer can't build a queue.
-  - Fail the move on the first error, and update `pointer_x`/`pointer_y` only after every call has succeeded.
-  - This makes item 0's test pass.
-  - Also check headed Chrome and a background tab, where frames are throttled and replies may arrive late.
+  - **Deadlines:** dispatch each point at an absolute deadline (`tokio::time::sleep_until(start + offset)`), so that the sleeps' rounding errors don't add up.
+  - **In-flight calls:** keep the dispatched calls in a `FuturesUnordered` of `(index, reply)` that is polled alongside the sleep, so an error surfaces as soon as it arrives. A `FuturesOrdered` would hold it behind an earlier reply that hasn't come yet.
+    - Cap it at about 8 calls in flight, so a stalled renderer can't build a queue.
+    - Fail the move on the first error.
+  - **Lateness:** when sends fall behind (the cap is reached, the renderer stalls, or the task wakes late), skip intermediate points whose deadline passed more than one interval ago, but always send the last point. Don't send the overdue points in a burst.
+  - **Cursor position:** keep `pointer_x`/`pointer_y` true to Chrome's cursor after a failure or a cancellation.
+    - Chrome handles the commands of a session in order, and a call that was already sent still runs after its future is dropped.
+    - So record the last point Chrome confirmed, and finish the calls already sent before the next gesture builds its path.
+  - **Cadence:** from item 0's native-input measurement.
+  - **Checks:** this makes item 0's test pass. Also check headed Chrome and a background tab, where frames are throttled and replies may arrive late. Test the lateness rule with a mocked reply that is delayed.
   - Tags: `chrome`, `unit`.
 - [ ] **2. Replace `input/bezier.rs` with the port of cursorflow's model** (decision 1).
-  - **Output:** a list of `(offset from the move's start, x, y)`.
-  - **Requirements:**
-    - Drop samples that don't move.
-    - Draw from `InputController`'s RNG, so seeded tests are deterministic.
-    - The target is the element's box for `click`/`hover`, and a point for `mouse_move`/`mouse_click`.
-    - `native()` keeps a near-instant path.
-  - **Unit tests (statistical and seeded):**
-    - The duration grows with distance and shrinks with target size.
-    - The speed peaks at 30–50% of each stroke.
-    - Overshoots happen as often as the setting says.
+  - **Output:** a list of `(offset from the move's start, x, y)` with `f64` coordinates.
+  - **Pixel grid:** round intermediate points to the device-pixel grid (1/`devicePixelRatio` CSS px), as a real mouse reports them. When the caller gave an exact point, the last sample is that point.
+  - **Targets:**
+    - For `click`/`hover`, the target is the element's box, intersected with the viewport.
+    - `mouse_move`/`mouse_click` aim at a point. For timing and landing error, give a point target an effective width of about 24 px; cursorflow's 1 px makes a 600 px move take about 1.9 s instead of 0.8 s. The final correction then ends exactly on the point.
+  - **Viewport:** clamp every sample to the viewport.
+  - **Repeats:** drop samples at the same position as the sample before them. A later return to an earlier position is fine, as when correcting an overshoot.
+  - **First move:** a tab's first move starts at a random point on the viewport's edge, where a real cursor enters the window. Today it starts at (0, 0), which `InputController::new` sets.
+  - **RNG:** draw from `InputController`'s RNG, so seeded tests are deterministic.
+  - **`native()`:** keeps a near-instant path.
+  - **Unit tests (statistical and seeded, asserting medians or shares over many seeds):**
+    - The median duration grows with distance and shrinks with target size.
+    - The median speed peak of primary strokes falls at 33–48% of the stroke. A single stroke may fall outside that range.
+    - The primary landing lands past the aim point as often as `overshoot_tendency` says (cursorflow's own test). Test how often the whole path passes the target separately, as a range.
     - The cursor comes to rest inside the target.
-    - No position repeats.
+    - No two consecutive samples share a position.
     - The same seed gives the same path.
   - Replace the `bezier_path_seed_42` snapshot.
   - Tags: `unit`.
-- [ ] **3. Click where the cursor comes to rest** (decision 3).
-  - Generate the path first, hit-test the point where it comes to rest in the actionability gate, and press and release there.
-  - Drop `ClickOptions`' "None clicks at the bbox center" wording.
-  - An explicit offset (`ClickOptions` with `Some((dx, dy))`) still lands exactly on that offset.
+- [ ] **3. `click` and `hover` end where the cursor comes to rest** (decision 3).
+  - **First fix `Element::bounding_box`.** It takes its origin from the content box's top-left corner (`DOM.getBoxModel`'s `content` quad), but its width and height from the border box (`model.width/height`). Its box is therefore shifted by the padding and border, and that already moves today's "center" off the center.
+  - **Order of steps:**
+    1. Gate on visible, stable and enabled.
+    2. Read the box.
+    3. Generate the path.
+    4. Hit-test the rest point. If it fails, draw a new path up to 5 times, then fall back to the center.
+    5. Move.
+    6. Hit-test the rest point again just before pressing, since `mousemove` handlers can change the page.
+    7. Press and release there.
+    
+    `hover` uses the same order, with its own check and no press.
+  - **Wording:** drop `ClickOptions`' "None clicks at the bbox center" wording.
+  - **Explicit offsets:** an offset (`ClickOptions` with `Some((dx, dy))`) still ends exactly on that offset.
+  - **Shadow roots:** the hit test doesn't descend into shadow roots, so an element inside one fails it. Fix it here, or file it in TODO.md.
   - Tags: `chrome`.
 - [ ] **4. Replace `InputProfile`'s mouse fields with the model's settings** (decision 2).
   - `native()` keeps a near-instant path; `spoofed()`/`coherent()` take cursorflow's defaults.
   - Regenerate the public-API baseline, and update the MCP coverage ledger.
   - Check whether zendriver-mcp's `InputProfile` options (in `state.rs`) need new fields.
-- [ ] **5. Move drags to the same model.** `Tab::mouse_drag` and `Element::mouse_drag` currently interpolate in a straight line over `steps`. Drags are slower and straighter than free moves, so reuse the model with a lower speed factor and higher precision rather than writing new code. Tags: `chrome`.
-- [ ] **6. Check mouse events' screen coordinates under the persona.**
-  - With stealth on, probe whether `e.screenX − e.clientX == window.screenX` and `e.screenY − e.clientY == window.screenY + (outerHeight − innerHeight)` hold.
-  - If they don't, add a `KNOWN_DISAGREEMENTS` row, then make the spoofed window geometry agree with what Chrome puts in events.
-  - Don't patch `MouseEvent.prototype.screenX`/`screenY` instead. That would replace native getters with JS functions, which is a worse tell.
-  - Tags: `probe`.
-- [ ] **7. Replace `patches/mouse.js` with a real idle wander** (decision 4), after items 1 and 2.
-  - With humanized input on, after a navigation's document loads, move the cursor through one to three random points in the viewport, using the new model.
-  - Take `InputController`'s lock for each move, so the wander can't interleave with a move the caller asks for. Stop the wander as soon as a caller's move is waiting.
-  - Then delete `mouse.js`, and its line in `patches.rs`.
-  - Open question for the implementer: what to hook. Candidates are `Page.loadEventFired` and the end of `goto`; it must also cover navigations the page starts itself.
-  - Check against a reese84/Incapsula fixture or site, which is what `mouse.js` was written for.
+  - Tick "`overshoot_rate` unused" in TODO.md (Frame/input).
+- [ ] **5. Realistic drags.**
+  - **Today's drags:** `Tab::mouse_drag(from, to, steps)` is documented as the raw, straight-line drag, kept faithful to nodriver. `Element::mouse_drag` and `browser_mouse`'s `drag` action use it, and `steps` of 0 or 1 makes a single hop.
+  - **Open question for the user:** either keep it unchanged and add a realistic drag beside it (`steps` keeps its meaning), or move `mouse_drag` itself to the model and decide what `steps` then means. The second changes a public contract and the MCP schema.
+  - **Overshoot:** a realistic drag uses the model with a lower speed factor and higher precision, and doesn't overshoot by default. Overshooting during a drag fires `dragenter`/`dragover` on neighbouring drop zones, or moves a slider past its value.
   - Tags: `chrome`.
-- [ ] **8. Update the docs and MCP descriptions.**
-  - The mdBook's `input.md` (it says "Bezier" on six lines), `quickstart.md:175` and `multi-tab.md:98`.
-  - The descriptions of `browser_click`, `browser_hover` and `browser_mouse` in [server.rs](crates/zendriver-mcp/src/server.rs), plus the schema snapshots if any input or output type changes.
-  - The rustdoc of `Element::click`/`hover`, `Tab::mouse_move`/`mouse_click`, and `InputProfile`.
+- [ ] **6. Check mouse events' screen coordinates under the persona.**
+  - **Probe:** with stealth on, at page scale 1, check whether `e.screenX − e.clientX == window.screenX` and `e.screenY − e.clientY == window.screenY + (outerHeight − innerHeight)` hold.
+  - **Control:** first run the same probe against unpatched Chrome with the same window and emulation settings, since scaling changes these relations natively.
+  - **If they disagree under stealth only:** add a `KNOWN_DISAGREEMENTS` row, then make the spoofed window geometry agree with what Chrome puts in events.
+  - **Don't patch `MouseEvent.prototype.screenX`/`screenY` instead.** That would replace native getters with JS functions, which is a worse tell.
+  - Tags: `probe`.
+- [ ] **7. Replace `patches/mouse.js` with real idle moves** (decision 4), after items 1 and 2.
+  - **Gate:** the same as `mouse.js`'s: `spoofed` stealth, whatever the `InputProfile`. Record in the changelog that native/off stealth with a humanized `InputProfile` still gets no idle moves.
+  - **Gesture ownership:** add a per-tab gesture lock.
+    - A foreground gesture holds it for the whole gesture: a click's approach, press and release, and all of a drag. Today `click_at` releases `InputController`'s lock between those steps, and `mouse_drag` dispatches without it.
+    - The idle task takes the gesture lock only when it's free, and gives it up between waypoints.
+    - Callers set a "gesture waiting" flag before they wait for the lock, and the idle task stops at the next waypoint when it sees the flag. tokio's `Mutex` doesn't report waiters.
+  - **Trigger:** `mouse.js` starts when the page adds a `mousemove` listener on `document`, which also covers sensors that load late. A one-time wander after load would miss those. Options:
+    - (a) Wander once after each document loads.
+    - (b) Have Rust poll `DOMDebugger.getEventListeners` on `document` after load, and wander when a `mousemove` listener appears. The page can't see this.
+    
+    Decide with a fixture that adds its listener late.
+  - **Lifetime:** at most one idle job per tab. Cancel it when the document changes, and when the tab or connection shuts down.
+  - **Side effects:** real moves hit real elements. They can open hover menus and tooltips, fire analytics, or cover the next click target.
+    - Pick waypoints whose hit test lands on non-interactive elements: no link, button, form control or ARIA role up the tree.
+    - Keep wanders short (one to three waypoints).
+    - Document the remaining risk in the rustdoc.
+  - **Test that fails first:** under `spoofed`, a fixture page records zero trusted `mousemove` events after load today, and at least one after this item (also for a listener added late).
+  - **Delete:** remove `mouse.js` and its line in `patches.rs`.
+  - **Check:** against a reese84/Incapsula fixture or site, which is what `mouse.js` was written for.
+  - Tags: `chrome`.
+- [ ] **8. Update the docs and MCP descriptions** (CLAUDE.md's three doc surfaces).
+  - **READMEs:** `README.md` (e.g. line 130) and `crates/zendriver-mcp/README.md`, or record why one doesn't apply.
+  - **mdBook:** `input.md` (it says "Bezier" on six lines), `quickstart.md:175`, `multi-tab.md:98` and `cloudflare.md:90`.
+  - **MCP:**
+    - The descriptions of `browser_click`, `browser_hover` and `browser_mouse` in [server.rs](crates/zendriver-mcp/src/server.rs).
+    - `MouseAction::Move`'s doc in `tools/mouse.rs:25`, which feeds `schema_snapshots__mouse_in.snap` and `schema_snapshots__mouse_action.snap`.
+    - The docs in `tools/actions.rs:252` and `:293`.
+  - **Rustdoc:**
+    - `Element::click`/`hover`/`click_fast`/`hover_fast`, and the `element/actions.rs` module docs.
+    - `ClickOptions::realistic`.
+    - `Tab::mouse_move`/`mouse_click`, both `mouse_drag`s, and `InputProfile`.
 - [ ] **9. (Optional, needs a person) Calibrate against a real hand.**
-  - Add a fixture page that asks a person to click a series of targets in headed Chrome, and records `pointermove` with `getCoalescedEvents()`. Serve it from 127.0.0.1, not a `data:` URL.
-  - Compare its distributions with the model's: duration against Fitts' index of difficulty, peak/mean speed, where the peak falls, how often moves overshoot, and the event cadence and coalescing.
-  - This also shows how a real 125 Hz or 1000 Hz mouse's events reach the page, which decides item 1's cadence.
+  - Add a fixture page that asks a person to click a series of targets in headed Chrome, and records `pointermove` with `getCoalescedEvents()`. Serve it from 127.0.0.1.
+  - Compare its distributions with the model's: duration against Fitts' index of difficulty, peak/mean speed, where the peak falls, and how often moves overshoot.
 
 ## Not pursuing
 
