@@ -43,7 +43,7 @@ Bugs from the 2026-10-31 AI review ([ai-code-reviews/](ai-code-reviews/README.md
 
 Decided on 2026-11-01 by an Astra–Fable consensus round (three rounds; both signed). The full record, with the signed text, is `ai-code-reviews/honeypot-visible-only-consult/` (`decision.md`; `brief.md` has the real-Chrome probe over 20 hiding patterns and the corpus data; `survey-summary.txt` is the live-site survey: of 25 off-page rendered inputs on 239 pages, 21 were Mailchimp honeypots, and the withdrawn geometry rule would have caught 12 and exempted 13 through an `overflow: hidden` body or wrapper, while the 4 non-Mailchimp ones were legitimate off-canvas search boxes). Implement `decision.md` as written; in short:
 - The filter and `is_visible` stay "rendered": no geometry, no level enum, no `is_on_page`. Rust default `visible_only(false)`, MCP default `true`.
-- New `Element::is_in_viewport()` (= `check_visible(Within::Viewport)`, no scroll), filling `browser_read.in_viewport` for the `all` / `geometry` / `visible_enabled` presets.
+- New `Element::is_in_viewport()` (= `check_visible(Within::Viewport)`, no scroll), filling `browser_element_state`'s `in_viewport` for the `all` / `geometry` / `visible_enabled` presets.
 - New `Element::wait_until_in_viewport_and_enabled(timeout)`: `scroll_into_view` + the TEXT_INPUT poll, no focus; `focus()` = that + focus. Library `set_value` / `clear` / `set_text` stay ungated, with rustdocs pointing at the new method as the opt-in gate. MCP `browser_set_value` (both modes), `browser_clear` (value mode) and `browser_type` with `clear_first` run it first unless `unchecked: true`; backspace-mode clear rejects `unchecked`.
 - `wait_actionable` re-scrolls before the next poll only after a failed visible check; no fast-fail.
 - `NotActionable` becomes a struct `{ timeout, reason, bbox, viewport }` with `NotActionableReason::{NotRendered, OutsideViewport, Disabled, Unstable, HitTestMissed { at, hit }}` and the display strings in `decision.md`. Breaking: regenerate the public-API baseline.
@@ -61,22 +61,22 @@ Also for this round:
 ## P0: security, hangs, and features that never work
 
 ### Interception
-- [ ] **Proxy auth, left open:**
-  - An isolated context without a proxy of its own uses the browser's proxy but gets none of `proxy_auth`'s credentials (giving them would need the context builder to record whether the context has its own proxy).
-  - A site's own HTTP auth has no helper (docs point to `modify_request` with an `Authorization` header).
+- [ ] **HTTP auth, left open:**
+  - Proxy auth: an isolated context without a proxy of its own uses the browser's proxy but gets none of `proxy_auth`'s credentials (giving them would need the context builder to record whether the context has its own proxy).
+  - A site's own HTTP auth (a 401 from the site, not a 407 from a proxy) has no helper, and no doc says how to answer it, e.g. by adding an `Authorization` header with `modify_request`.
 - [ ] **Interception: review findings left open** *(reviews of `222fe294b..907f3a7f2`, 2026-11-06)*
   - Lost events (`Lagged`): the recovery's `Fetch.disable` continues every paused request, those a block rule or a stream would have held included, and the backlog read after it holds pauses already continued (their releases then fail, with a warning). Lag on the accounted bus counts every event on the connection, not just this session's `Fetch` ones; the multiplexer stops reading while it waits on Chrome (`apply`, `recover`). Running those round trips beside the event loop would make lag rarer.
   - A stream layer's queue is unbounded (Chrome holds the requests anyway); the auth memory doesn't know which credentials answered, so new credentials for the same request and proxy within 60 s get `CancelAuth`.
   - Each intercepting tab subscribes to the accounted bus, which turns on the transport's per-event clone for it.
   - *Open from the reviews of `b965a0d09..777c35159`, `4dd5e05e0` and `b357bdb23` (2026-11-06):*
-    - An entry inserted while a request is already under way (paused at the Request stage, or sent before `insert` returned) doesn't get that request's Response pause: Chrome fixed its stages when it started. Documented as "a request sent from then on". Sending `interceptResponse` on every Request-stage continue, worked out (by resource type, as for a new URL since `94768fd1e`) from the list at answer time, would close it.
+    - An entry inserted while a request is already under way (paused at the Request stage, or sent before `insert` returned) doesn't get that request's Response pause: Chrome fixed its stages when it started. Documented as "a request sent from then on". Sending `interceptResponse` on every Request-stage continue, worked out (by resource type, as for a new URL since `94768fd1e`) from the list at answer time, would close it for a request still paused at the Request stage, but not for one already sent.
     - When Chrome refuses both an answer and the `failRequest` that follows it, the hold is dropped as answered, so a later `Fetch.disable` may release the request (if Chrome still had it). Keeping the hold would keep `Fetch` on for a request Chrome most likely no longer knows. *(Astra, `b965a0d09..777c35159`.)*
     - A `Fetch` pattern also pauses prefetches, which the multiplexer reads as `Other`, so a `Fetch` entry doesn't fit them and they're continued unchanged.
     - Registrar: two attaches of one target handled at once can still build two tabs; under the flat-session fallback, moving the registry key to the new session leaves the kept `Tab` on its old session, and `on_target_detached` removes by key.
     - A new tab with both proxy credentials and tracker blocking makes two `Fetch.enable` round trips before it runs.
     - MCP: `origin` is worked out by elimination (an entry not in `SessionState::rules` is `browser`); an owner tag on the core `Entry` would be firmer. `list_rules` shows the current tab only, while `remove_rule` / `clear_rules` reach every tab. `add_rule` returns an error if the listing after the insert fails (the rule stays in, its id unreported). `clear_rules` stops the handles one by one (a round trip each). `ResourceTypeName` / `PauseName` mirror core enums by hand. `hosts` isn't IDN-normalized; `respond` takes any status code; `modify_request` takes forbidden header names.
     - `docs/api-audit/interception-precedence.md` is the design record as agreed, not the API as built: its signatures leave out `Entry` / `UrlInfo` / `ActionKind`, and its `remove(tab.tracker_blocking())` needs an unwrap.
-  - MCP: `browser_tab_close` drops the rules of the tab it closes, but a tab that closes in another way (the page's `window.close()`, a crash) leaves its rules in `SessionState::rules` until `browser_intercept_clear_rules` or `browser_close`. They do nothing (their tab's list is gone), but `browser_intercept_remove_rule` still accepts their ids.
+  - MCP: `browser_tab_close` drops the rules of the tab it closes, but a tab that closes in another way (e.g. the page's `window.close()`) leaves its rules in `SessionState::rules` until `browser_intercept_clear_rules` or `browser_close`. They do nothing (their tab's list is gone), but `browser_intercept_remove_rule` still accepts their ids.
 - [ ] **Interception misses out-of-process iframes.** *(found 2026-11-01, reading Chromium)* A frame's requests go through the `Fetch` handlers of that frame's own agent host plus every browser target's (`content/browser/devtools/devtools_instrumentation.cc:2041`), so `Fetch` on a page session doesn't see an OOPIF's requests: tracker blocking, proxy auth and user rules all miss third-party iframes. Fix candidate: give each attached `iframe` session (the registrar's `iframe` arm) its own multiplexer with the library's layer. Test `chrome`: a cross-site iframe (`/iframe-cross-site`, with site isolation) whose tracker request is blocked.
 
 ### Navigation waiting (biggest real-world pain: R1)
@@ -88,13 +88,13 @@ Also for this round:
   - After lost events during a back, forward or reload, the tracker waits for the next stop (a lost stop means a 30 s timeout).
   - The probe's `Runtime.evaluate` blocks while a JavaScript dialog is open, so `wait_for_load` after lost events can run to its timeout then.
   - After `Connection::reconnect`, a flat-session tracker's session id is stale, so it can only time out (a per-tab socket survives a reconnect).
-  - **A crashed tab.** After `Page.crash`, the tab's session answers no renderer command, even after `Page.reload` (which returns, and in about half the runs brings the target back to its URL within 4 s; in the others its URL stays empty for over 10 s). `wait_for_load` after reloading a crashed tab times out or returns early. Chrome sends `Page.frameStartedLoading` / `frameStoppedLoading` from the browser process (`PageHandler::DidChangeFrameLoadingState`); `Inspector.targetCrashed` didn't arrive on the tab's session. Test: `reload_of_a_crashed_tab_needs_no_renderer` in `navigation_waits.rs`.
+  - **A crashed tab.** After `Page.crash`, the tab's session answers no renderer command, even after `Page.reload` (which returns, and in about half the runs brings the target back to its URL within 4 s; in the others its URL stays empty for over 10 s). `wait_for_load` after reloading a crashed tab times out or returns early. Chrome sends `Page.frameStartedLoading` / `frameStoppedLoading` from the browser process (`PageHandler::DidChangeFrameLoadingState`); `Inspector.targetCrashed` didn't arrive on the tab's session. The test `reload_of_a_crashed_tab_needs_no_renderer` in `navigation_waits.rs` checks only that `reload()` returns; no test calls `wait_for_load` after it.
   - Cost: an armed tracker is a task filtering every event on its connection until the next wait or navigation; on the flat-session fallback that's tabs × events. The reviewers suggested one tracker per tab instead, created in the registrar before the target resumes; it needs a way to order the caller's arming against events in flight (e.g. the accounted stream's sequence numbers). Also, `probe_complete` sends `Page.enable` every time.
 
 ### Broken outright
-- [ ] **MCP shutdown leaves Chrome running after a SIGKILL.** *(R, MCP #6)* SIGTERM works over both transports (`chrome_exits_on_sigterm_over_*`).
+- [ ] **MCP shutdown leaves Chrome running.** *(R, MCP #6)* After a SIGTERM, the server closes Chrome over both transports (`chrome_exits_on_sigterm_over_*`).
   - SIGKILL (`known_bug_chrome_exits_on_sigkill_over_*`) needs a guard on Chrome's side. Linux `PR_SET_PDEATHSIG` in a `pre_exec` is the simplest, but it fires when the *thread* that spawned Chrome exits, not the process: a launch from a `spawn_blocking` thread (which exits after 10 s idle) or a short-lived thread would kill Chrome early. A watchdog (a pipe Chrome's helper reads, or a tiny reaper process) avoids that. Either way it's a library change for every user, so decide whether it's opt-in.
-  - Over HTTP, a tool call holding a session's lock delays that session's cleanup (at most 20 s).
+  - Over HTTP, after a SIGTERM, a tool call that holds a session's lock delays that session's cleanup, and if it holds the lock for over 20 s, the server gives up on the cleanup and exits without having closed that session's Chrome.
   - From review: after the shutdown signal, other MCP tools still answer "browser not open" with a hint to call `browser_open`, which then refuses (the server exits within seconds).
 
 ---
@@ -119,7 +119,7 @@ Also for this round:
   Test `chrome` with the cross-site fixture: `launch_for_test(Browser::builder())`, then goto `server.url(SITE_A, "/iframe-cross-site")`.
 - [ ] **`set_value` / `clear` throw on `<select>` and non-input elements.** Pick the setter that matches the element's own prototype. *(QE #5)* Test `chrome`.
 - [ ] **`BoundingBox` mixes the content-box origin with the border-box size.** *(QE #6)*
-  - Test `chrome`: padded+bordered button; `elementFromPoint` at the computed centre hits it.
+  - Test `chrome`: padded+bordered button; compare the box with the border box that `getBoundingClientRect()` reports. (`elementFromPoint` at the computed centre isn't enough: with the bug, that point can still fall inside the button.)
 - [ ] **`check_stable` waits on `requestAnimationFrame` with no timeout.** Bound the wait. *(QE #10)* Test `chrome` with a background tab.
 
 ### Selectors
@@ -271,5 +271,5 @@ Each item needs a test; `unit` is fine where no browser is involved.
 
 ## Docs
 
-- [ ] **The README's first example and `examples/hello.rs` fail** because example.com was redesigned. *(R)* Point them at a stable target and add an examples smoke job (almost every example hits a live site, so that job needs stable targets first).
+- [ ] **The README's first example and `crates/zendriver/examples/hello.rs` fail** because example.com was redesigned. *(R)* Point them at a stable target and add an examples smoke job (almost every example hits a live site, so that job needs stable targets first).
 - [ ] **Any new public API** (the MCP HTML cap) needs the CLAUDE.md checklist: MCP tool or ledger entry, README tool count, rustdoc, mdBook.
