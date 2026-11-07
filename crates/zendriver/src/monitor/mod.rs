@@ -469,8 +469,8 @@ impl MonitorBuilder {
         self
     }
 
-    /// Subscribe to the session's events, enable the `Network` domain, and
-    /// spawn the correlator task; return a live [`NetworkMonitor`].
+    /// Subscribe to the session's events, spawn the correlator task, enable
+    /// the `Network` domain, and return a live [`NetworkMonitor`].
     ///
     /// This returns only after Chrome has acknowledged `Network.enable`, and
     /// the subscription is registered before that command is sent. So every
@@ -491,38 +491,44 @@ impl MonitorBuilder {
     ///
     /// # Errors
     ///
-    /// Fails when `Network.enable` fails, in which case no task is spawned:
+    /// Fails when `Network.enable` fails, in which case the task is cancelled:
     /// the connection is gone ([`crate::ZendriverError::Disconnected`] /
     /// [`crate::ZendriverError::Transport`]), the command went unanswered
     /// ([`crate::ZendriverError::CdpTimeout`]), or Chrome refused it
     /// ([`crate::ZendriverError::Cdp`]).
     pub async fn start(self) -> crate::Result<NetworkMonitor> {
-        // Subscribe BEFORE sending `Network.enable`: the accounted bus is a
+        // Subscribe, and spawn the task that drains the subscription, BEFORE
+        // sending `Network.enable`. Subscribing first: the accounted bus is a
         // `broadcast` receiver that only sees frames sent after it registers,
         // so an event that Chrome fires between `enable`'s reply and a later
-        // registration would be lost. And await the reply before returning:
-        // until Chrome has enabled the domain, it reports no requests, so a
-        // navigation that the caller starts right after this would otherwise
-        // begin unobserved.
+        // registration would be lost. Draining first: that bus is one bounded
+        // channel for the whole connection, so a subscription left unread
+        // while the reply is pending would fall behind the other sessions'
+        // events, and the monitor would begin with a `Lagged` boundary.
         let events = self.session.subscribe_accounted();
-        self.session
-            .call("Network.enable", serde_json::json!({}))
-            .await?;
         let (tx, rx) = mpsc::channel(CHANNEL_CAP);
         let cancel = CancellationToken::new();
         let task = tokio::spawn(run_monitor(
-            self.session,
+            self.session.clone(),
             events,
             self.url_pattern,
             self.stream_bodies,
             tx,
             cancel.clone(),
         ));
-        Ok(NetworkMonitor {
+        let monitor = NetworkMonitor {
             rx,
             cancel,
             _task: task,
-        })
+        };
+        // Await the reply before returning: until Chrome has enabled the
+        // domain, it reports no requests, so a navigation that the caller
+        // starts right after this would otherwise begin unobserved. On an
+        // error, dropping `monitor` cancels the task.
+        self.session
+            .call("Network.enable", serde_json::json!({}))
+            .await?;
+        Ok(monitor)
     }
 }
 
