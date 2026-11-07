@@ -2,8 +2,7 @@
 //!
 //! See the [Stealth chapter](https://turtiesocks.github.io/zendriver-rs/stealth.html)
 //! of the [zendriver-rs user guide](https://turtiesocks.github.io/zendriver-rs/)
-//! for profile trade-offs, the sannysoft test matrix, and platform-spoofing
-//! recipes.
+//! for profile trade-offs and platform-spoofing recipes.
 //!
 //! Three stealth modes, exposed via [`StealthProfile`]:
 //!
@@ -11,9 +10,10 @@
 //! - [`StealthProfile::native`] — launch flags (including a screen for
 //!   headless Chrome) + UA scrub + CDP `Emulation` overrides, with no JS
 //!   bootstrap; the default.
-//! - [`StealthProfile::spoofed`] — `native` plus a Navigator-prototype JS
-//!   bootstrap script that passes the [sannysoft][sannysoft] battery, except
-//!   that its screen comes from CDP `Emulation` and the bootstrap.
+//! - [`StealthProfile::spoofed`] — `native` plus a JS bootstrap script that
+//!   patches what Chrome can't be told over CDP or at launch (the WebGL and
+//!   WebGPU values, `navigator.deviceMemory`, noise on canvas, audio and
+//!   client rects, and more), for pages that must see another device.
 //!
 //! Most users go through `zendriver`'s `BrowserBuilder::stealth(...)`:
 //!
@@ -25,15 +25,13 @@
 //!     .locale("en-US")
 //!     .timezone("America/Los_Angeles");
 //!
-//! assert!(profile.bypass_csp_enabled());
+//! assert!(!profile.bypass_csp_enabled());
 //! assert!(!profile.build_flags().is_empty());
 //! ```
 //!
 //! The [`StealthObserver`] type plugs into `zendriver-transport`'s observer
 //! chain and applies the resolved [`Fingerprint`] / bootstrap to every newly
 //! attached page target before Chrome releases the debugger.
-//!
-//! [sannysoft]: https://bot.sannysoft.com/
 
 pub mod error;
 pub mod fingerprint;

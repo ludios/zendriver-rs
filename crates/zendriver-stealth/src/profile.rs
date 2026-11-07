@@ -189,13 +189,13 @@ impl StealthProfile {
     /// lie-detecting scripts (such as creepjs) can find, so use `spoofed`
     /// only when the page must see a device other than this one.
     ///
-    /// Sets [`bypass_csp`](Self::bypass_csp) on by default so the bootstrap
-    /// script can install on pages with strict CSP headers.
+    /// The bootstrap installs on pages whose Content Security Policy forbids
+    /// every script, without [`bypass_csp`](Self::bypass_csp).
     ///
     /// ```
     /// use zendriver_stealth::StealthProfile;
     /// let p = StealthProfile::spoofed();
-    /// assert!(p.bypass_csp_enabled());
+    /// assert!(!p.bypass_csp_enabled());
     /// ```
     #[must_use]
     pub fn spoofed() -> Self {
@@ -204,7 +204,7 @@ impl StealthProfile {
             extra_flags: Vec::new(),
             fingerprint_override: None,
             per_field: PerFieldOverride::default(),
-            bypass_csp: true, // default ON for spoofed; see spec assumption #2
+            bypass_csp: false,
             native_isolation: false,
             native_webgl: false,
             gpu_backend: crate::GpuBackend::Disabled,
@@ -350,8 +350,13 @@ impl StealthProfile {
         self.per_field.screen = Some(s);
         self
     }
-    /// Toggle `Page.setBypassCSP`. Default `true` for [`spoofed`](Self::spoofed),
-    /// `false` for [`native`](Self::native) / [`off`](Self::off).
+    /// Under [`spoofed`](Self::spoofed), send `Page.setBypassCSP`, so the
+    /// page's own Content Security Policy blocks nothing. Off by default, and
+    /// [`native`](Self::native) and [`off`](Self::off) never send it.
+    ///
+    /// The bootstrap doesn't need it: Chrome runs the bootstrap through
+    /// DevTools, which CSP doesn't restrict. And a page can detect it, by
+    /// loading a script that its policy forbids.
     #[must_use]
     pub fn bypass_csp(mut self, on: bool) -> Self {
         self.bypass_csp = on;
@@ -648,9 +653,8 @@ impl StealthProfile {
         }
     }
 
-    /// Whether `Page.setBypassCSP` will be sent for this profile. Defaults
-    /// to `true` for [`spoofed`](Self::spoofed) and `false` otherwise; the
-    /// [`bypass_csp`](Self::bypass_csp) setter toggles it explicitly.
+    /// Whether the [`bypass_csp`](Self::bypass_csp) opt-in is on. `false`
+    /// unless explicitly set.
     pub fn bypass_csp_enabled(&self) -> bool {
         self.bypass_csp
     }
@@ -731,9 +735,10 @@ mod profile_tests {
     }
 
     #[test]
-    fn spoofed_profile_default_bypass_csp_on() {
-        let p = StealthProfile::spoofed();
-        assert!(p.bypass_csp_enabled());
+    fn bypass_csp_off_by_default_on_every_profile() {
+        assert!(!StealthProfile::off().bypass_csp_enabled());
+        assert!(!StealthProfile::native().bypass_csp_enabled());
+        assert!(!StealthProfile::spoofed().bypass_csp_enabled());
     }
 
     #[test]

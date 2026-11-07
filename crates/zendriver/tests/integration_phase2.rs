@@ -2,11 +2,17 @@
 
 #![cfg(feature = "integration-tests")]
 
+use serde_json::json;
 use serial_test::serial;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zendriver::Browser;
 use zendriver::stealth::StealthProfile;
+use zendriver::{Browser, Persona};
+use zendriver_testkit::axum::Router;
+use zendriver_testkit::axum::http::header::CONTENT_SECURITY_POLICY;
+use zendriver_testkit::axum::response::Html;
+use zendriver_testkit::axum::routing::get;
+use zendriver_testkit::{FixtureServer, PINNED_HARDWARE, eval, launch_for_test, load};
 
 async fn fixture_with_html(html: &str) -> MockServer {
     let mock = MockServer::start().await;
@@ -38,6 +44,42 @@ async fn spoofed_profile_hides_navigator_webdriver_via_flag() {
         "spoofed profile hides webdriver via the AutomationControlled flag"
     );
     browser.close().await.unwrap();
+}
+
+/// Under `spoofed`, the bootstrap installs on a page whose Content Security
+/// Policy forbids every script, with no `Page.setBypassCSP`: Chrome runs it
+/// through DevTools, which CSP doesn't restrict. The page's own script stays
+/// blocked, which shows that the policy is in force.
+#[tokio::test]
+async fn spoofed_bootstrap_installs_under_a_csp_that_forbids_every_script() {
+    let page = Router::new().route(
+        "/strict-csp",
+        get(|| async {
+            (
+                [(CONTENT_SECURITY_POLICY, "default-src 'none'")],
+                Html(
+                    "<!doctype html><title>before</title>\
+                     <script>document.title = 'page script ran'</script>",
+                ),
+            )
+        }),
+    );
+    let server = FixtureServer::start_with(page).await;
+    let pinned: Persona = PINNED_HARDWARE.parse().expect("persona JSON");
+    let builder = Browser::builder()
+        .stealth(StealthProfile::spoofed())
+        .persona_overlay(pinned);
+    let browser = launch_for_test(builder).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url("127.0.0.1", "/strict-csp")).await;
+    let seen = eval(&tab, "[document.title, navigator.deviceMemory]").await;
+    browser.close().await;
+    assert_eq!(
+        seen,
+        json!(["before", 1]),
+        "[title, deviceMemory]: the CSP must block the page's script, and the \
+         bootstrap must still report PINNED_HARDWARE's deviceMemory"
+    );
 }
 
 #[tokio::test]

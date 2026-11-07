@@ -491,8 +491,8 @@ impl TargetObserver for StealthObserver {
                 .await?;
         }
 
-        // CSP bypass stays SPOOFED-only: it weakens the page's own security policy, which is
-        // only justified by the full identity bootstrap needing to run.
+        // An opt-in, and SPOOFED-only: it weakens the page's own security policy, and pages can
+        // detect it. The bootstrap doesn't need it (see `StealthProfile::bypass_csp`).
         if self.profile.kind() == ProfileKind::Spoofed && self.profile.bypass_csp_enabled() {
             session
                 .call("Page.setBypassCSP", json!({ "enabled": true }))
@@ -623,7 +623,6 @@ mod tests {
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
-            "Page.setBypassCSP",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
         ] {
@@ -703,7 +702,6 @@ mod tests {
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setLocaleOverride",
-            "Page.setBypassCSP",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
         ] {
@@ -790,7 +788,6 @@ mod tests {
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setLocaleOverride",
-            "Page.setBypassCSP",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
         ] {
@@ -860,7 +857,6 @@ mod tests {
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
-            "Page.setBypassCSP",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
         ] {
@@ -931,7 +927,6 @@ mod tests {
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
-            "Page.setBypassCSP",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
         ] {
@@ -1008,7 +1003,6 @@ mod tests {
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setGeolocationOverride",
-            "Page.setBypassCSP",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
         ] {
@@ -1083,7 +1077,6 @@ mod tests {
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
-            "Page.setBypassCSP",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
         ] {
@@ -1152,7 +1145,6 @@ mod tests {
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
-            "Page.setBypassCSP",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
         ] {
@@ -1655,6 +1647,21 @@ mod persona_reaches_cdp_tests {
                 !methods.iter().any(|m| m == absent),
                 "native sent {absent}: {methods:?}"
             );
+        }
+    }
+
+    /// `spoofed` sends `Page.setBypassCSP` only when asked to.
+    #[tokio::test]
+    async fn spoofed_bypasses_csp_only_when_asked() {
+        for (profile, expected) in [
+            (StealthProfile::spoofed(), false),
+            (StealthProfile::spoofed().bypass_csp(true), true),
+        ] {
+            let frames = drive_attach(StealthObserver::new(profile, bare_fingerprint())).await;
+            let sent = method_names(&frames)
+                .iter()
+                .any(|m| m == "Page.setBypassCSP");
+            assert_eq!(sent, expected, "Page.setBypassCSP sent");
         }
     }
 
