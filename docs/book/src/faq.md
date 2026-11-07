@@ -37,8 +37,9 @@ Common causes:
   skip the first kind during the query.
 - **Disabled** — the element or an ancestor matches `:disabled` (a
   disabled `<fieldset>` disables the controls outside its first
-  `<legend>`) or has `aria-disabled="true"`, or the element's `disabled`
-  property is `true`. The gate waits for the page to enable it.
+  `<legend>`) or has `aria-disabled="true"`, or the element is a custom
+  element with a `disabled` attribute. The gate waits for the page to
+  enable it.
 - **Hit-test failure** — a modal overlay sits above the element. Close
   the overlay first, or pass `ClickOptions { force: true, ..default() }`
   to bypass the check.

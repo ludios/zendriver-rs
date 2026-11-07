@@ -322,20 +322,30 @@ pub(crate) async fn check_stable(el: &Element) -> Result<bool> {
 ///   first `<legend>` stays enabled; an ancestor control (a `<span>` inside a
 ///   disabled `<button>`) does.
 /// - The element or an ancestor has `aria-disabled="true"`, in any case.
-/// - The element's `disabled` property is `true`. `:disabled` ignores that
-///   property on a custom element that isn't form-associated.
+/// - The element is an autonomous custom element (its name has a `-`) with
+///   a `disabled` attribute. `:disabled` ignores such an element unless it
+///   is form-associated, and its JavaScript `disabled` property, which the
+///   page defines, is invisible from zendriver's isolated world, where this
+///   check runs. Component libraries commonly reflect that property to the
+///   attribute.
 ///
 /// The ancestor walk stops at the element's shadow root.
 pub(crate) async fn check_enabled(el: &Element) -> Result<bool> {
     // `Element.prototype.closest`, not `el.closest`: a form's named control
-    // (`<input name="closest">`) hides the form's own method.
+    // (`<input name="closest">`) hides the form's own method, and its
+    // `localName`. The isolated world's `Element` is out of the page's
+    // reach.
     let js = r#"
         function(el) {
             if (!el) return false;
-            if (el.nodeType !== 1) return true;
-            if (el.disabled === true) return false;
+            if (!(el instanceof Element)) return true;
+            const proto = Element.prototype;
+            if (proto.matches.call(el, ':disabled')) return false;
+            const name = el.localName;
+            const custom = typeof name === 'string' && name.includes('-');
+            if (custom && proto.hasAttribute.call(el, 'disabled')) return false;
             const selector = ':disabled:not(fieldset), [aria-disabled="true" i]';
-            return Element.prototype.closest.call(el, selector) === null;
+            return proto.closest.call(el, selector) === null;
         }
     "#;
     let res = el.call_on_main(js, json!([])).await?;

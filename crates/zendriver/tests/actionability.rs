@@ -12,8 +12,8 @@ use zendriver_testkit::axum::response::Html;
 use zendriver_testkit::axum::routing::get;
 use zendriver_testkit::{FixtureServer, eval, launch_for_test, load};
 
-/// Elements that are disabled through their own attribute or property,
-/// through an ancestor (a `<fieldset>`, an `<optgroup>`, a `<button>`, an
+/// Elements that are disabled through their own attribute (a custom
+/// element's included), through an ancestor (a `<fieldset>`, an `<optgroup>`, a `<button>`, an
 /// `aria-disabled` container), or through `aria-disabled` in upper case;
 /// and enabled elements next to them, among them a control in a disabled
 /// fieldset's first `<legend>`, an element that isn't a control, and a
@@ -32,12 +32,13 @@ const DISABLED_PAGE: &str = r#"<!doctype html>
 </select>
 <button disabled><span id="in-button">In a disabled button</span></button>
 <div aria-disabled="true"><button id="in-aria-group">In an aria-disabled group</button></div>
-<my-switch id="custom">A custom element with a disabled property</my-switch>
+<my-switch id="custom" disabled>A custom element</my-switch>
+<my-switch id="custom-enabled">A custom element</my-switch>
 <form id="form"><input name="closest"></form>
 <div id="div">Not a control</div>
 <script>
 customElements.define('my-switch', class extends HTMLElement {
-  get disabled() { return true; }
+  get disabled() { return this.hasAttribute('disabled'); }
 });
 </script>"#;
 
@@ -66,6 +67,7 @@ async fn is_enabled_follows_the_disabled_states_of_html_and_aria() {
         ("in-button", false),
         ("in-aria-group", false),
         ("custom", false),
+        ("custom-enabled", true),
         ("form", true),
         ("div", true),
     ];

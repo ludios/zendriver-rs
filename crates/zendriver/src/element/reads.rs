@@ -330,8 +330,11 @@ impl Element {
     ///   so is an `<option>` in a disabled `<optgroup>` and a `<span>`
     ///   inside a disabled `<button>`.
     /// - It or an ancestor has `aria-disabled="true"`, in any case.
-    /// - Its `disabled` property is `true`. This covers a custom element
-    ///   that isn't form-associated, which `:disabled` ignores.
+    /// - It is a custom element (its name has a `-`) with a `disabled`
+    ///   attribute. `:disabled` ignores a custom element unless it is
+    ///   form-associated, and the check runs in zendriver's isolated world,
+    ///   which can't see a `disabled` property that the page's JavaScript
+    ///   defines; component libraries commonly reflect it to the attribute.
     ///
     /// The ancestor walk stops at the element's shadow root. An element for
     /// which none of these holds is enabled.
