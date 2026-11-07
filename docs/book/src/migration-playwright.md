@@ -172,9 +172,9 @@ let n: i32 = tab.evaluate("[1,2,3].length").await?;                  // sandboxe
 Playwright launches with the headless-Chrome `HeadlessChrome` UA, the
 `navigator.webdriver = true` tell, and no anti-detection patches.
 zendriver-rs defaults to `StealthProfile::native()` — the UA scrub plus
-launch-flag set passes most consumer-site detectors. For active
-fingerprint detection (`sannysoft`, etc), opt into
-`StealthProfile::spoofed()`. See [Stealth](./stealth.md).
+launch-flag set passes most consumer-site detectors. For pages that
+must see a device other than this one (another GPU, for example), opt
+into `StealthProfile::spoofed()`. See [Stealth](./stealth.md).
 
 ## What's not ported
 

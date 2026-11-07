@@ -114,7 +114,7 @@ Gated `cloudflare`. Sub-error returned wrapped in
 | `NoChallenge` | No Turnstile iframe was detected at call time. | Treat as success — the page was already cleared (cookie shortcut) or had no CF gate. |
 | `ClearanceTimeout` | Deadline elapsed without resolution. | The challenge may be silent / escalated; pair with `StealthProfile::spoofed`, or switch to a residential proxy. |
 | `Call(CallError)` | Underlying CDP call failed (typically the JS detection probe). | Inspect inner error. |
-| `JsError(String)` | The detection / clearance JS raised an exception. | The page may be CSP-strict; ensure stealth `bypass_csp(true)` (the default for `spoofed`). |
+| `JsError(String)` | The detection / clearance JS raised an exception. | The page may be CSP-strict; try `StealthProfile::spoofed().bypass_csp(true)`. |
 
 ## `FetcherError` variants
 

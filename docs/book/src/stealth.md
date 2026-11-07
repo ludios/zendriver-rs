@@ -1,7 +1,7 @@
 # Stealth
 
 zendriver-rs ships with three stealth profiles selecting different
-tradeoffs between launch overhead, detectability, and CSP compatibility.
+tradeoffs between what the page sees and how detectable the changes are.
 Pick the profile that matches your target site's detection layer; tweak
 the fingerprint with builder methods when you need to pin a specific
 identity.
@@ -16,8 +16,8 @@ over the specific tells that mainstream fingerprint checks probe for.
 | Profile     | Launch flags | UA scrub | Emulation overrides | JS bootstrap   | Bypass CSP | Use case                                     |
 |-------------|--------------|----------|---------------------|----------------|------------|----------------------------------------------|
 | `off()`     | none         | no       | no                  | none           | no         | Reproducing issues in vanilla Chrome.       |
-| `native()`  | yes          | yes      | yes                 | none           | no         | Most sites. Default recommendation.         |
-| `spoofed()` | yes          | yes      | yes                 | Navigator JS   | yes (on)   | Sites with active fingerprint detection.    |
+| `native()`  | yes          | yes      | yes                 | none           | no         | Most sites, bot-protected ones included. Default recommendation. |
+| `spoofed()` | yes          | yes      | yes                 | device values  | opt-in     | Pages that must see a device other than this one. |
 
 ### `StealthProfile::off()`
 
@@ -77,9 +77,12 @@ in the page:
   puts the page back at no pointer, until it navigates again.
 - **UA scrub** — strips the `HeadlessChrome` segment from the User-Agent
   string and the Sec-CH-UA brand list.
-- **Emulation overrides** —
-  `Emulation.setUserAgentOverride` /
-  `Emulation.setHardwareConcurrencyOverride` set a coherent identity.
+- **Emulation overrides** — `Emulation.setUserAgentOverride` sets the
+  User-Agent, the UA client hints (`navigator.userAgentData` and the
+  `Sec-CH-UA-*` headers), `navigator.platform`, and the
+  `Accept-Language` header and `navigator.languages`, so that Chrome's
+  own getters report one coherent identity. The timezone, locale and
+  geolocation overrides follow the profile and the persona.
 - **A screen for headless Chrome** — headless Chrome's own screen is
   800x600, with no taskbar. So when zendriver launches a headless
   Chrome, it passes `--screen-info` for a 1920x1080 screen with a
@@ -121,9 +124,14 @@ in the page:
   different screen.
 
 Since it runs no JS in the page, there's no patched function for a
-`Function.prototype.toString` check to catch.
-Passes most consumer site detectors. Doesn't pass [sannysoft]'s deeper
-Navigator-prototype checks.
+`Function.prototype.toString` check to catch. Chrome itself already has
+what bot detectors used to find missing in headless Chrome: the 5 PDF
+plugins in a real `PluginArray`, `window.chrome`, and a
+`Notification.permission` that agrees with `permissions.query`. On
+[sannysoft], headless Chrome 157 under `native()` passed every check but
+"WebGL Renderer", which flags its software renderer (SwiftShader); see
+[GPU backend](./gpu-backend.md) for running it on the host's real GPU
+instead.
 
 [sannysoft]: https://bot.sannysoft.com/
 
@@ -140,36 +148,52 @@ let browser = Browser::builder()
 # Ok(()) }
 ```
 
-`native()` plus Navigator-prototype JS patches injected via
-`Page.addScriptToEvaluateOnNewDocument`, except that its screen comes from `Emulation.setDeviceMetricsOverride` and a JS geometry patch instead of launch switches. Restores or overrides:
+`native()` plus what Chrome can't be told over CDP or at launch, patched
+in the page by a JS bootstrap that `Page.addScriptToEvaluateOnNewDocument`
+injects:
 
-- `navigator.webdriver` (deletes it so `'webdriver' in navigator` is
-  `false`).
-- `navigator.permissions.query({ name: "notifications" })` (returns
-  `"prompt"` instead of the headless-Chrome `"denied"`).
-- `navigator.plugins` + `navigator.mimeTypes` (returns plausible-length
-  arrays).
-- `navigator.chrome` (installs the runtime object headless Chrome
-  doesn't ship).
 - WebGL vendor / renderer, plus every other readable WebGL value,
   resolved from one capability tier (defaults to a captured Apple Metal
   device: `"Google Inc. (Apple)"` / `"ANGLE (Apple, ANGLE Metal
   Renderer: Apple M4 Pro, Unspecified Version)"`). The WebGPU adapter is
   derived from that same renderer string, so the two APIs never name
   different GPUs.
-- ChunkSplit + iframe-contentWindow guards so the patches survive
-  cross-realm escape attempts.
+- `navigator.deviceMemory`, which no CDP command overrides.
+- Noise on canvas, audio and client-rect readback, and the fonts and
+  hardware values, as the persona's surfaces say (see
+  [Fingerprint spoofing](./fingerprint.md)).
+- `HTMLMediaElement.canPlayType` for the proprietary codecs, and the size
+  of a broken image.
 
-Toggles `Page.setBypassCSP` **on by default** so the bootstrap script
-can install on pages with strict CSP headers. Pass
-`.bypass_csp(false)` to opt out when you want to test against a real
-CSP-restricted page.
+It also sends `Emulation.setHardwareConcurrencyOverride`, so Chrome's own
+`navigator.hardwareConcurrency` reports the persona's CPU count. A
+dedicated worker still reports the host's count and memory: no override
+or patch reaches it.
 
-Passes [sannysoft], [areyouheadless], and most active detectors. Pays
-a small per-navigation cost (the JS bootstrap runs on every new
+Everything else comes from Chrome itself, as under `native()`: the
+launch flags hide `navigator.webdriver` and stop WebRTC from gathering
+candidates that bypass a proxy; the Emulation overrides set the UA
+client hints, `navigator.platform` and `navigator.languages`; and the
+launch switches give headless Chrome a screen, window and viewport that
+agree. A JS replacement of any of those would only add a detectable
+difference from Chrome's own function.
+
+Each patch that `spoofed()` does install replaces a Chrome function with
+a JS one, and lie-detecting scripts such as creepjs find such
+replacements by how they differ from Chrome's: for example, a getter
+that doesn't throw for the wrong `this`, a function that can be called
+with `new`, or a `toString` that an iframe's own `Function.prototype`
+shows unmasked. So under such scripts, `spoofed()` is the more detectable
+profile.
+
+`Page.setBypassCSP` is off: the bootstrap installs even on a page whose
+Content Security Policy forbids every script, because Chrome runs it
+through DevTools. `.bypass_csp(true)` turns the bypass on, which a page
+can detect by loading a script that its policy forbids.
+
+On [sannysoft], headless Chrome 157 under `spoofed()` passed every check.
+Pays a small per-navigation cost (the JS bootstrap runs on every new
 document).
-
-[areyouheadless]: https://arh.antoinevastel.com/bots/areyouheadless
 
 ## Customizing the fingerprint
 
@@ -320,21 +344,22 @@ identity.
 
 ## When to use which
 
-- **Headless scraping of public sites** — start with `native()`. Most
-  sites don't actively probe Navigator prototypes; the cheaper profile
-  is plenty.
+- **Headless scraping of public sites** — `native()`.
 - **Sites with active bot detection** (Cloudflare, PerimeterX,
-  DataDome, Akamai) — use `spoofed()`. Pair with the `cloudflare`
-  Cargo feature when you specifically need Turnstile bypass — see
-  [Cloudflare](./cloudflare.md).
-- **Sites with strict CSP** — `spoofed()` defaults to
-  `bypass_csp = true`, which is normally what you want. If you're
-  *testing* a real CSP, override it with `.bypass_csp(false)` (and
-  expect the JS bootstrap to fail to install).
+  DataDome, Akamai) — start with `native()`, which gives such a site
+  nothing to catch in the page, and consider a
+  [real GPU](./gpu-backend.md) over headless Chrome's software renderer.
+  Pair it with the `cloudflare` Cargo feature when you specifically need
+  Turnstile bypass — see [Cloudflare](./cloudflare.md).
+- **Pages that must see a device other than this one** (another GPU,
+  memory size or canvas output) — `spoofed()`, accepting that its
+  patches are JS replacements that a lie-detecting script can find.
+- **Sites with strict CSP** — every profile works; the `spoofed()`
+  bootstrap needs no `bypass_csp`.
 - **Sites that check functions for tampering** (their
   `Function.prototype.toString` output, or their shape) — `native()`
   rather than `spoofed()`: `native()` replaces no function, while
-  `spoofed()` replaces `Function.prototype.toString` and dozens of
-  `navigator`, WebGL, canvas and other functions. zendriver's bootstrap
-  papers over the obvious differences, but a determined adversary will
-  still find drift.
+  `spoofed()` replaces `Function.prototype.toString` and many WebGL,
+  canvas and other functions. zendriver's bootstrap papers over the
+  obvious differences, but a determined adversary will still find
+  drift.

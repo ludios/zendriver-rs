@@ -151,18 +151,19 @@ There's no built-in detector. The pragmatic test:
 
 ## What's the difference between native and spoofed stealth?
 
-- **`StealthProfile::native()`** — patches only what fingerprinters see
-  at the protocol level: UA scrub, launch flags (including a screen for
-  headless Chrome), Emulation overrides. It runs no JS in the page, so
-  there's no patched function for a `Function.prototype.toString` check
-  to catch. Passes most consumer sites.
-- **`StealthProfile::spoofed()`** — `native()` plus Navigator-prototype
-  JS patches injected via `Page.addScriptToEvaluateOnNewDocument`, except
-  that its screen comes from `Emulation.setDeviceMetricsOverride` and a JS geometry patch instead of launch switches.
-  Restores `navigator.webdriver` to undefined, fixes `navigator.plugins`
-  / `chrome` runtime / WebGL vendor, etc. Required to pass `sannysoft`
-  and other active detectors. Pays a small per-navigation cost (script
-  runs on every new document).
+- **`StealthProfile::native()`** — changes only what Chrome can be told
+  at launch or over CDP: UA scrub, launch flags (including a screen and
+  a mouse for headless Chrome), Emulation overrides. It runs no JS in the
+  page, so there's no patched function for a
+  `Function.prototype.toString` check to catch. The default, and the
+  first choice for bot-protected sites too.
+- **`StealthProfile::spoofed()`** — `native()` plus JS patches, injected
+  via `Page.addScriptToEvaluateOnNewDocument`, for what Chrome can't be
+  told that way: the WebGL and WebGPU values, `navigator.deviceMemory`,
+  canvas / audio / client-rect noise, and more. For pages that must see
+  a device other than this one; a lie-detecting script can find its
+  patches. Pays a small per-navigation cost (script runs on every new
+  document).
 
 Full table in [Stealth](./stealth.md).
 

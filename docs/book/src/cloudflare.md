@@ -230,13 +230,16 @@ TLS JA3 fingerprint, User-Agent, header order, `navigator.webdriver`,
 etc. Out-of-the-box headless Chrome trips most of those, so it tends to
 get the harder challenge path — sometimes one this driver can't pass.
 
-Pair the bypass with `StealthProfile::spoofed()` for the best results:
+Pair the bypass with stealth. Every profile except `off()` hides
+`navigator.webdriver` and the headless User-Agent, so `native()`, the
+default, already does; `spoofed()` also presents another GPU and other
+device values in the page:
 
 ```rust,ignore
 use zendriver::{Browser, StealthProfile};
 
 let browser = Browser::builder()
-    .stealth(StealthProfile::spoofed())  // patches navigator.webdriver etc.
+    .stealth(StealthProfile::spoofed())  // or native(), the default
     .launch()
     .await?;
 let tab = browser.main_tab();
@@ -248,10 +251,9 @@ tab.cloudflare()
     .await?;
 ```
 
-`spoofed` patches the Navigator-prototype tells that Cloudflare also
-checks during the protocol-level challenge — together they pass most
-consumer-site Cloudflare gates. See [Stealth](./stealth.md) for the
-profile tradeoffs.
+See [Stealth](./stealth.md) for the profile tradeoffs: each patch that
+`spoofed` adds is a JS replacement that a lie-detecting script can
+find.
 
 ## When to call it
 
