@@ -57,6 +57,7 @@ const COMMANDS: &[(&str, Scope)] = &[
     ("DOM.describeNode", P),
     ("DOM.getBoxModel", P),
     ("DOM.getDocument", P),
+    ("DOM.getFrameOwner", P),
     ("DOM.getOuterHTML", P),
     ("DOM.resolveNode", P),
     ("DOM.setFileInputFiles", P),
