@@ -2206,6 +2206,94 @@ impl BrowserInner {
 }
 
 impl BrowserInner {
+    /// Wait for the [`TabRegistrar`] to register the tab of the page target
+    /// `target_id`, which it does once the observer chain on the session
+    /// that auto-attach opens on the target has run.
+    ///
+    /// `events` is a subscription to [`Self::conn`] made before Chrome could
+    /// attach the target, so that it holds that attach, and the detach of
+    /// that session, if any.
+    ///
+    /// Returns the tab. Returns [`ZendriverError::TabSetup`] at once if
+    /// Chrome detaches that session first, or once
+    /// [`Self::tab_setup_budget`] has elapsed; [`ZendriverError::Disconnected`]
+    /// if the connection drops; and [`ZendriverError::Transport`] if it is
+    /// shut down.
+    pub(crate) async fn wait_for_tab(
+        &self,
+        events: &mut (impl futures::Stream<Item = zendriver_transport::AccountedRawEvent> + Unpin),
+        target_id: &str,
+    ) -> Result<Tab, ZendriverError> {
+        use futures::StreamExt;
+        use zendriver_transport::{AccountedRawEvent, TransportError};
+
+        let deadline = tokio::time::Instant::now() + self.tab_setup_budget;
+        // The first session attached to the target is auto-attach's; an
+        // observer may open, and close, others of its own.
+        let mut session_id = None;
+        loop {
+            // Enabled before the read, so that an insert between the read
+            // and the wait still wakes the wait.
+            let inserted = self.tabs_changed.notified();
+            tokio::pin!(inserted);
+            inserted.as_mut().enable();
+            let tab = self
+                .tabs
+                .read()
+                .await
+                .values()
+                .find(|t| t.target_id() == target_id)
+                .cloned();
+            if let Some(tab) = tab {
+                return Ok(tab);
+            }
+
+            tokio::select! {
+                () = inserted => {}
+                event = events.next() => match event {
+                    Some(AccountedRawEvent::Event { event, .. }) => {
+                        let params = &event.params;
+                        if event.method == "Target.attachedToTarget"
+                            && session_id.is_none()
+                            && params["targetInfo"]["targetId"] == target_id
+                        {
+                            session_id = params["sessionId"].as_str().map(str::to_string);
+                        } else if event.method == "Target.detachedFromTarget"
+                            && session_id.is_some()
+                            && params["sessionId"].as_str() == session_id.as_deref()
+                        {
+                            return Err(ZendriverError::TabSetup {
+                                target_id: target_id.to_string(),
+                                reason: "Chrome detached the target's session before its tab \
+                                         was set up: the target closed, or an observer failed \
+                                         on it, and so the transport detached it (and logged \
+                                         which observer)"
+                                    .to_string(),
+                            });
+                        }
+                    }
+                    Some(AccountedRawEvent::Disconnected { .. }) => {
+                        return Err(ZendriverError::Disconnected);
+                    }
+                    Some(AccountedRawEvent::Shutdown { .. }) | None => {
+                        return Err(TransportError::Shutdown.into());
+                    }
+                    // A detach lost in a lag gap is caught by the deadline.
+                    Some(AccountedRawEvent::Lagged { .. } | AccountedRawEvent::Reconnected { .. }) => {}
+                },
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(ZendriverError::TabSetup {
+                        target_id: target_id.to_string(),
+                        reason: format!(
+                            "the setup did not end within its budget of {:?}",
+                            self.tab_setup_budget,
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     /// Send `Target.createTarget` for `url`, plus the other parameters in
     /// `params` (an object), at browser scope and return the [`Tab`] that the
     /// tab registrar registers for the new target, with its next
@@ -2242,76 +2330,6 @@ impl BrowserInner {
             tab.arm_initial_navigation().await;
         }
         Ok(tab)
-    }
-
-    /// Wait for the [`TabRegistrar`] to register the tab of the page target
-    /// `target_id`, which it does once the observer chain on the target's
-    /// session has run.
-    ///
-    /// `events` is a subscription to [`Self::conn`] made before Chrome could
-    /// attach the target, so that it holds the target's detach, if any.
-    ///
-    /// Returns the tab. Returns [`ZendriverError::TabSetup`] at once if
-    /// Chrome detaches the target first (as the transport does when an
-    /// observer fails: the log says which), or once
-    /// [`Self::tab_setup_budget`] has elapsed; and
-    /// [`ZendriverError::Disconnected`] if the connection ends.
-    pub(crate) async fn wait_for_tab(
-        &self,
-        events: &mut (impl futures::Stream<Item = zendriver_transport::AccountedRawEvent> + Unpin),
-        target_id: &str,
-    ) -> Result<Tab, ZendriverError> {
-        use futures::StreamExt;
-        use zendriver_transport::AccountedRawEvent;
-
-        let deadline = tokio::time::Instant::now() + self.tab_setup_budget;
-        loop {
-            // Enabled before the read, so that an insert between the read
-            // and the wait still wakes the wait.
-            let inserted = self.tabs_changed.notified();
-            tokio::pin!(inserted);
-            inserted.as_mut().enable();
-            let tab = self
-                .tabs
-                .read()
-                .await
-                .values()
-                .find(|t| t.target_id() == target_id)
-                .cloned();
-            if let Some(tab) = tab {
-                return Ok(tab);
-            }
-
-            tokio::select! {
-                () = inserted => {}
-                event = events.next() => match event {
-                    // `targetId` is deprecated in this event, but Chrome
-                    // sends it; without it, the wait ends at the deadline.
-                    Some(AccountedRawEvent::Event { event, .. })
-                        if event.method == "Target.detachedFromTarget"
-                            && event.params["targetId"] == target_id =>
-                    {
-                        return Err(ZendriverError::TabSetup {
-                            target_id: target_id.to_string(),
-                            reason: "Chrome detached the target first, as the transport does \
-                                     when an observer fails on it (the log says which)"
-                                .to_string(),
-                        });
-                    }
-                    Some(
-                        AccountedRawEvent::Disconnected { .. } | AccountedRawEvent::Shutdown { .. },
-                    )
-                    | None => return Err(ZendriverError::Disconnected),
-                    Some(_) => {}
-                },
-                () = tokio::time::sleep_until(deadline) => {
-                    return Err(ZendriverError::TabSetup {
-                        target_id: target_id.to_string(),
-                        reason: format!("it was not set up within {:?}", self.tab_setup_budget),
-                    });
-                }
-            }
-        }
     }
 
     /// Wraps `Target.disposeBrowserContext`, the CDP command that destroys
@@ -7364,9 +7382,35 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(
-            matches!(err, ZendriverError::TabSetup { ref target_id, .. } if target_id == "T1"),
+            matches!(err, ZendriverError::TabSetup { ref target_id, ref reason }
+                if target_id == "T1" && reason.contains("detached")),
             "{err:?}"
         );
+    }
+
+    /// The detach of a session that an observer opened on the main target
+    /// itself doesn't end the wait for the main tab: only the detach of the
+    /// session that auto-attach opened, on which the chain runs, does.
+    #[tokio::test]
+    async fn finish_connect_ignores_the_detach_of_another_session_of_the_main_target() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (mut mock, args) = finish_connect_args(vec![Arc::new(Gate(gate.clone()))]);
+        let fut = tokio::spawn(finish_connect(args));
+        answer_targets(&mut mock, one_page()).await;
+        answer_auto_attach(&mut mock, &[("T1", "S1")]).await;
+        emit_page_attach(&mock, "T1", "S9", "about:blank").await;
+        let detached = json!({ "sessionId": "S9", "targetId": "T1" });
+        mock.emit_event("Target.detachedFromTarget", detached).await;
+
+        gate.notify_one();
+        answer_network_enable(&mut mock).await;
+        let inner = timeout(Duration::from_secs(2), fut)
+            .await
+            .expect("finish_connect did not return within 2s")
+            .unwrap()
+            .unwrap();
+        assert_eq!(inner.main_tab.get().unwrap().target_id(), "T1");
+        inner.conn.shutdown();
     }
 
     /// `finish_connect` gives up on a main tab that isn't set up within its
@@ -7382,7 +7426,8 @@ mod tests {
 
         let err = fut.await.unwrap().unwrap_err();
         assert!(
-            matches!(err, ZendriverError::TabSetup { ref target_id, .. } if target_id == "T1"),
+            matches!(err, ZendriverError::TabSetup { ref target_id, ref reason }
+                if target_id == "T1" && reason.contains("budget of 1s")),
             "{err:?}"
         );
     }
