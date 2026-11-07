@@ -166,7 +166,7 @@ The durations mix the model with how it's played back. ghost-cursor's are 16.7 m
     5. Move.
     6. Hit-test the rest point again just before pressing, since `mousemove` handlers can change the page.
     7. Press and release there.
-    
+
     `hover` uses the same order, with its own check and no press.
   - **Wording:** drop `ClickOptions`' "None clicks at the bbox center" wording.
   - **Explicit offsets:** an offset (`ClickOptions` with `Some((dx, dy))`) still ends exactly on that offset.
@@ -197,7 +197,7 @@ The durations mix the model with how it's played back. ghost-cursor's are 16.7 m
   - **Trigger:** `mouse.js` starts when the page adds a `mousemove` listener on `document`, which also covers sensors that load late. A one-time wander after load would miss those. Options:
     - (a) Wander once after each document loads.
     - (b) Have Rust poll `DOMDebugger.getEventListeners` on `document` after load, and wander when a `mousemove` listener appears. The page can't see this.
-    
+
     Decide with a fixture that adds its listener late.
   - **Lifetime:** at most one idle job per tab. Cancel it when the document changes, and when the tab or connection shuts down.
   - **Side effects:** real moves hit real elements. They can open hover menus and tooltips, fire analytics, or cover the next click target.
