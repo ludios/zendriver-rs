@@ -151,8 +151,8 @@ Also for this round:
   - From review: `only_isolated_tab_jars_name_their_context` reads the jar's `Debug`; `tab_cookies_write_into_the_tabs_context` can't tell the tab's connection from the browser's.
 
 ### Browser lifecycle
-- [ ] **`connect()` patches pre-existing tabs (contrary to its docs) and builds the fingerprint from an empty executable path.** *(BR #3, #4)* Test `chrome`.
-- [ ] **`new_tab_at` with `chrome://` / `chrome-extension://` URLs stalls and returns `TabNotFound`.** *(BR #5)* Test `chrome`.
+- [ ] **`connect()` builds the fingerprint from an empty executable path.** *(BR #4)* Test `chrome`. (BR #3, that it patched pre-existing tabs contrary to its docs: its docs now say that it sets them up as tabs, which it does since 5409b2a92.)
+- [ ] **`new_tab_at` with `chrome://` / `chrome-extension://` URLs stalls and returns `TabSetup`** (with the reason that the setup ran out of its budget), as the registrar doesn't set up such a page as a tab. *(BR #5)* Test `chrome`.
 - [ ] **`geo_auto()` captures the proxy at call time.** Calling `.geo_auto().proxy(..)` in that order probes from the real IP. *(BR #6)* Test `unit` on builder order.
 
 ### Transport and input
