@@ -3201,36 +3201,38 @@ pub(crate) struct FinishConnect {
 /// The only spawn-vs-attach differences are carried in [`FinishConnect`]: the
 /// owned `Child` / `TempDir` (present only for `launch`) and the
 /// `owns_process` flag.
-/// How long [`poll_initial_targets`] waits for Chrome to create its first target.
+/// How long [`poll_initial_targets`] waits for Chrome to create its first page target.
 ///
 /// Sized from measurement, not taste: the worst observed banner-to-target gap was ~70 ms on a
 /// slow Windows host. Five seconds is ~70x that, which costs nothing on a healthy launch (the
 /// first poll returns immediately) and only matters on one that would otherwise have failed.
 const INITIAL_TARGET_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Poll interval while waiting for the first target. Short enough that a fast browser is
+/// Poll interval while waiting for the first page target. Short enough that a fast browser is
 /// delayed by at most one tick, long enough not to spin on the CDP connection.
 const INITIAL_TARGET_POLL: Duration = Duration::from_millis(10);
 
-/// `Target.getTargets`, retried until it reports at least one target or the deadline expires.
+/// `Target.getTargets`, retried until it reports at least one page target or the deadline
+/// expires. Other targets don't end the wait: an extension's service worker, for one, can be
+/// listed before the first page.
 ///
-/// Returns the last response either way, so the caller's own "no initial target found" error
-/// still fires for a browser that genuinely never creates one — the timeout changes when we
-/// give up, not what we conclude.
+/// Returns the last response either way, so the caller's own "no initial page target found"
+/// error still fires for a browser that genuinely never creates one — the timeout changes when
+/// we give up, not what we conclude.
 async fn poll_initial_targets(
     conn: &zendriver_transport::Connection,
 ) -> Result<serde_json::Value, ZendriverError> {
     let deadline = tokio::time::Instant::now() + INITIAL_TARGET_TIMEOUT;
     let mut last = conn.call_raw("Target.getTargets", json!({}), None).await?;
     loop {
-        let empty = last["targetInfos"]
+        let has_page = last["targetInfos"]
             .as_array()
-            .is_none_or(|t: &Vec<serde_json::Value>| t.is_empty());
-        if !empty || tokio::time::Instant::now() >= deadline {
-            if empty {
+            .is_some_and(|t| t.iter().any(|t| t["type"] == "page"));
+        if has_page || tokio::time::Instant::now() >= deadline {
+            if !has_page {
                 warn!(
                     waited = ?INITIAL_TARGET_TIMEOUT,
-                    "chrome reported no targets before the deadline; the browser is up but \
+                    "chrome reported no page target before the deadline; the browser is up but \
                      never created one",
                 );
             }
@@ -3302,7 +3304,7 @@ pub(crate) async fn finish_connect(
     conn.call_raw("Target.setAutoAttach", auto_attach_params(), None)
         .await?;
 
-    // Discover the initial target via Target.getTargets (prefer a page).
+    // Discover the initial page target via Target.getTargets.
     //
     // POLLED, not a single call. Chrome prints `DevTools listening on ws://...` as soon as its
     // DevTools server is up, which happens BEFORE it has created the initial page target. A
@@ -3325,15 +3327,12 @@ pub(crate) async fn finish_connect(
     let list = poll_initial_targets(&conn).await?;
     let no_targets = Vec::new();
     let targets = list["targetInfos"].as_array().unwrap_or(&no_targets);
-    // Preference rule (unchanged): the first page target, else the first
-    // target of any type.
-    let main_target = targets
-        .iter()
-        .find(|t| t["type"] == "page")
-        .or_else(|| targets.first());
+    // The first page target. A target of another type (a worker, say) is no
+    // tab to drive.
+    let main_target = targets.iter().find(|t| t["type"] == "page");
     let target_id = main_target
         .and_then(|t| t["targetId"].as_str())
-        .ok_or_else(|| ZendriverError::Navigation("no initial target found".into()))?
+        .ok_or_else(|| ZendriverError::Navigation("no initial page target found".into()))?
         .to_string();
     let default_context_id = find_default_context_id(&conn, targets).await;
     // Like every tab, the main tab names its context only when it isn't the
@@ -8653,19 +8652,25 @@ mod tests {
     /// The regression this exists for. Chrome prints its DevTools banner before creating the
     /// initial target, so an early `getTargets` sees an empty list from a healthy browser.
     /// Measured worst case was ~70 ms on a slow Windows host against a ~15 ms check, which
-    /// failed 3 launches in 4 with `no initial target found`.
+    /// failed 3 launches in 4 with `no initial target found`. A list with no page in it (only
+    /// an extension's service worker, say) is retried the same way.
     #[tokio::test]
-    async fn poll_initial_targets_retries_an_empty_list() {
+    async fn poll_initial_targets_retries_a_list_without_a_page() {
         use zendriver_transport::testing::MockConnection;
         let (mut mock, conn) = MockConnection::pair();
         let fut = tokio::spawn(async move { poll_initial_targets(&conn).await });
 
-        // Two empty responses, as a browser still starting up would give.
-        for _ in 0..2 {
+        // An empty response, as a browser still starting up would give, then
+        // one with only a worker.
+        let worker = json!({ "targetId": "W1", "type": "service_worker", "url": "chrome-extension://x/sw.js" });
+        for reply in [
+            json!({ "targetInfos": [] }),
+            json!({ "targetInfos": [worker] }),
+        ] {
             let id = mock.expect_cmd("Target.getTargets").await;
-            mock.reply(id, json!({ "targetInfos": [] })).await;
+            mock.reply(id, reply).await;
         }
-        // Then the target appears.
+        // Then the page appears.
         let id = mock.expect_cmd("Target.getTargets").await;
         mock.reply(
             id,
@@ -8676,13 +8681,13 @@ mod tests {
         let out = fut.await.expect("join").expect("poll");
         assert_eq!(
             out["targetInfos"][0]["targetId"], "T9",
-            "the target that appeared after the empty responses must be returned"
+            "the page that appeared after the responses without one must be returned"
         );
     }
 
     /// The timeout changes WHEN we give up, not WHAT we conclude. A browser that never creates
-    /// a target must still surface the caller's "no initial target found" rather than hanging
-    /// or inventing one.
+    /// a page target must still surface the caller's "no initial page target found" rather than
+    /// hanging or inventing one.
     #[tokio::test(start_paused = true)]
     async fn poll_initial_targets_gives_up_and_returns_the_empty_list() {
         use zendriver_transport::testing::MockConnection;
@@ -9380,15 +9385,16 @@ mod tests {
         inner.conn.shutdown();
     }
 
-    /// T3: no targets at all still fails cleanly — the sweep rework must not
-    /// turn "nothing to attach to" into a panic or a hang.
+    /// T3: no page target at all still fails cleanly — the sweep rework must
+    /// not turn "nothing to attach to" into a panic or a hang, and a target of
+    /// another type (here, a service worker) is no main tab.
     ///
     /// `getTargets` is now POLLED rather than called once, so the mock has to keep answering
     /// until the driver gives up; a single reply would leave the second call unanswered and
     /// the failure would arrive as a 180s `CdpTimeout` instead of the clean `Navigation` this
     /// asserts. The conclusion is unchanged — that is the point of the polling change.
     #[tokio::test(start_paused = true)]
-    async fn finish_connect_errors_cleanly_on_empty_get_targets() {
+    async fn finish_connect_errors_cleanly_without_a_page_target() {
         use zendriver_transport::testing::MockConnection;
 
         let input_profile = zendriver_stealth::InputProfile::native();
@@ -9415,13 +9421,14 @@ mod tests {
         let id = mock.expect_cmd("Target.setAutoAttach").await;
         mock.reply(id, json!({})).await;
 
-        // Answer every poll with nothing until the driver stops asking. The clock is advanced
-        // by hand because `start_paused` only auto-advances while the runtime is idle, and this
-        // loop never is.
+        // Answer every poll with only a worker until the driver stops asking. The clock is
+        // advanced by hand because `start_paused` only auto-advances while the runtime is idle,
+        // and this loop never is.
+        let worker = json!({ "targetId": "W1", "type": "service_worker", "url": "chrome-extension://x/sw.js" });
         for _ in 0..10_000 {
             if let Some((method, id)) = mock.try_recv_cmd() {
                 assert_eq!(method, "Target.getTargets");
-                mock.reply(id, json!({ "targetInfos": [] })).await;
+                mock.reply(id, json!({ "targetInfos": [worker] })).await;
             } else if fut.is_finished() {
                 break;
             } else {
@@ -9431,7 +9438,7 @@ mod tests {
 
         let err = fut.await.unwrap().unwrap_err();
         assert!(
-            matches!(err, ZendriverError::Navigation(ref m) if m.contains("no initial target")),
+            matches!(err, ZendriverError::Navigation(ref m) if m.contains("no initial page target")),
             "expected a clean Navigation error, got {err:?}",
         );
     }
