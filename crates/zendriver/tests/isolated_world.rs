@@ -81,6 +81,10 @@ const HOOKS_JS: &str = r#"<script>
 ///   `window.clicked`, and the global `childGlobal = "child"`.
 /// - `/two-frames`: iframes `#a` and `#b` of the canned `/plain`, titled `A`
 ///   and `B`.
+/// - `/js-field`: a custom element `<js-field>` whose `<input>` is in its
+///   shadow root, and whose page-defined `focus()` and `value` forward to
+///   that input. Its shadow root doesn't delegate focus, so the native
+///   `focus()` leaves the element unfocused.
 async fn server() -> FixtureServer {
     let iframes = r#"<iframe src="/frame-child"></iframe>"#.repeat(IFRAMES);
     let many_frames = format!(
@@ -101,8 +105,22 @@ async fn server() -> FixtureServer {
     let two_frames = r#"<!doctype html><title>Two frames</title>
 <iframe id="a" src="/plain?title=A"></iframe><iframe id="b" src="/plain?title=B"></iframe>"#
         .to_string();
+    let js_field = r#"<!doctype html><title>JS field</title>
+<js-field></js-field>
+<script>
+  customElements.define('js-field', class extends HTMLElement {
+    constructor() {
+      super();
+      this.attachShadow({ mode: 'open' }).innerHTML = '<input>';
+    }
+    focus() { this.shadowRoot.querySelector('input').focus(); }
+    get value() { return this.shadowRoot.querySelector('input').value; }
+  });
+</script>"#
+        .to_string();
     let routes = Router::new()
         .route("/many-frames", get(|| async { Html(many_frames) }))
+        .route("/js-field", get(|| async { Html(js_field) }))
         .route("/two-frames", get(|| async { Html(two_frames) }))
         .route("/hooked", get(|| async { Html(hooked) }))
         .route("/hooked-child", get(|| async { Html(hooked_child) }));
@@ -417,6 +435,28 @@ async fn a_kept_element_follows_a_same_site_navigation() {
     assert_eq!(text, "Second", "Element::evaluate_main");
     let text: String = kept_for_evaluate.evaluate("el.textContent").await.unwrap();
     assert_eq!(text, "Second", "Element::evaluate");
+
+    browser.close().await;
+}
+
+/// Typing into a custom element whose focus is implemented in page
+/// JavaScript, not by its shadow root, still reaches it; and
+/// `clear_by_deleting` empties it.
+#[tokio::test]
+async fn typing_reaches_a_custom_element_that_focuses_in_page_javascript() {
+    let server = server().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url(SITE_A, "/js-field")).await;
+
+    let field = tab.find().css("js-field").one().await.unwrap();
+    field.type_text("abc").await.unwrap();
+    let value: String = field.evaluate_main("el.value").await.unwrap();
+    assert_eq!(value, "abc");
+
+    field.clear_by_deleting().await.unwrap();
+    let value: String = field.evaluate_main("el.value").await.unwrap();
+    assert_eq!(value, "");
 
     browser.close().await;
 }

@@ -74,6 +74,30 @@ const NATIVE_VALUE_SETTER_JS: &str = "function(el, v){ \
         this.dispatchEvent(new Event('change', {bubbles: true})); \
     }";
 
+/// Focuses the element with the native `focus()` of the world it runs in,
+/// and returns whether the element should get its own `focus()` instead:
+/// whether it is a custom element (its name has a `-`) that didn't take
+/// the focus, neither itself nor inside it (in its shadow root, which
+/// counts as itself, or in a descendant). See [`Element::focus`].
+const FOCUS_JS: &str = "function(){ \
+        this.focus(); \
+        const active = this.getRootNode().activeElement; \
+        const focused = active === this || this.contains(active); \
+        return !focused && this.localName.includes('-'); \
+    }";
+
+/// Returns the length of the value that Backspace deletes from: that of the
+/// focused element, looking into open shadow roots, if it has a string
+/// `value`; else the element's own `value`'s; else 0.
+const VALUE_LEN_JS: &str = "function(){ \
+        let active = document.activeElement; \
+        while (active && active.shadowRoot && active.shadowRoot.activeElement) { \
+            active = active.shadowRoot.activeElement; \
+        } \
+        const v = active && typeof active.value === 'string' ? active.value : this.value; \
+        return typeof v === 'string' ? v.length : 0; \
+    }";
+
 /// Extra Backspace presses [`Element::clear_by_deleting`] issues beyond the
 /// reported value length — covers off-by-one reporting and IME composition
 /// tails so a near-empty field still ends up fully cleared.
@@ -384,6 +408,13 @@ impl Element {
 
     /// Move keyboard focus to this element by calling `el.focus()`.
     ///
+    /// Calls the native `focus()` in zendriver's isolated world, which page
+    /// scripts don't see. A custom element (one whose name has a `-`) may
+    /// implement focusing in page JavaScript, with its own `focus()` method,
+    /// rather than with a shadow root that delegates focus; then the native
+    /// call leaves it unfocused, and this calls the element's own `focus()`
+    /// in the page's main world, where page scripts can see the call.
+    ///
     /// Gated by an actionability check (visible + enabled) so disabled
     /// controls + hidden elements surface a [`ZendriverError::NotActionable`]
     /// error rather than silently no-op on the page side. Reused by
@@ -409,9 +440,10 @@ impl Element {
                 DEFAULT_ACTIONABILITY_TIMEOUT,
             )
             .await?;
-            let _ = self
-                .call_on_main("function(){ this.focus(); }", json!([]))
-                .await?;
+            let res = self.call_on_main(FOCUS_JS, json!([])).await?;
+            if res.get("value") == Some(&json!(true)) {
+                let _: serde_json::Value = self.evaluate_main("el.focus()").await?;
+            }
             Ok(())
         })
         .await
@@ -577,19 +609,21 @@ impl Element {
     /// 1. [`Element::focus`] the element.
     /// 2. Select-all chord — `Cmd+A` on macOS, `Ctrl+A` elsewhere — so the
     ///    whole value is selected before deletion.
-    /// 3. Read the current `value.length` to size a Backspace budget: that
-    ///    many presses plus a small slack ([`CLEAR_BY_DELETING_SLACK`]),
-    ///    bounded by [`CLEAR_BY_DELETING_MAX`].
+    /// 3. Read the length of the focused field's `value` to size a Backspace
+    ///    budget: that many presses plus a small slack
+    ///    ([`CLEAR_BY_DELETING_SLACK`]), bounded by [`CLEAR_BY_DELETING_MAX`].
     /// 4. Press [`SpecialKey::Backspace`] up to that budget, re-reading
-    ///    `value.length` every [`PROBE_EVERY_N_BACKSPACES`] strokes and
+    ///    that length every [`PROBE_EVERY_N_BACKSPACES`] strokes and
     ///    returning as soon as the field reports empty. The budget is a
     ///    ceiling, not a keystroke count: a field the select-all chord
     ///    already cleared costs 16 strokes and a probe, not `len + slack`.
     ///
-    /// One consequence of trusting the field's own report: an element whose
-    /// `value` getter under-reports — a custom element backing its text with
-    /// a shadow-DOM node, say — can stop the loop early and leave the field
-    /// partly filled.
+    /// The length is read in zendriver's isolated world, from the focused
+    /// element, looking into open shadow roots (so a custom element's inner
+    /// `<input>` counts), and otherwise from this element's own `value`.
+    /// A field whose text it can't read that way, such as one in a closed
+    /// shadow root, reads as empty: then this presses only the slack, which
+    /// leaves the field partly filled if the select-all chord didn't take.
     ///
     /// Deletes backward (Backspace) only — never forward-Delete — because
     /// `VK_DELETE` at caret position 0 is treated as a backward delete on some
@@ -648,14 +682,13 @@ impl Element {
         .await
     }
 
-    /// Length of this element's `value`, or 0 if it has none.
+    /// Length of the value that Backspace deletes from (see
+    /// [`VALUE_LEN_JS`]).
     ///
     /// Used by [`Element::clear_by_deleting`] to size its Backspace budget and
     /// then to detect early that the field is already empty.
     async fn value_len(&self) -> Result<usize> {
-        let res = self
-            .call_on_main("function(){ return (this.value || '').length; }", json!([]))
-            .await?;
+        let res = self.call_on_main(VALUE_LEN_JS, json!([])).await?;
         Ok(res
             .get("value")
             .and_then(serde_json::Value::as_u64)
