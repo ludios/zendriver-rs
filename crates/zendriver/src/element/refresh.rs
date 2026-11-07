@@ -181,21 +181,20 @@ fn resolve_origin<'a>(
 /// Matches against:
 ///   - `ZendriverError::ElementStale` (set by the inner-id accessors
 ///     when they observe a cleared id mid-flight).
-///   - `ZendriverError::Navigation(m)` where `m` contains
-///     `"No node with given id"` or `"Cannot find context"`. The
-///     `From<CallError>` impl in `error.rs` maps `-32000 "Cannot find
-///     context"` into the Navigation variant.
-///   - `ZendriverError::Cdp { message, .. }` where `message` contains
-///     either of the above substrings (covers DOM-domain stale errors
-///     that don't get pre-mapped to Navigation).
+///   - `ZendriverError::Navigation(m)` or `ZendriverError::Cdp { message:
+///     m, .. }` where `m` contains `"No node with given id"`, `"Cannot find
+///     context"`, or `"does not belong to the document"` (what
+///     `DOM.resolveNode` answers for a node of a document that a navigation
+///     replaced). The `From<CallError>` impl in `error.rs` maps `-32000
+///     "Cannot find context"` into the Navigation variant; DOM-domain stale
+///     errors arrive as Cdp.
 pub(crate) fn is_stale_node_error(e: &ZendriverError) -> bool {
     match e {
         ZendriverError::ElementStale => true,
-        ZendriverError::Navigation(m) => {
-            m.contains("No node with given id") || m.contains("Cannot find context")
-        }
-        ZendriverError::Cdp { message, .. } => {
-            message.contains("No node with given id") || message.contains("Cannot find context")
+        ZendriverError::Navigation(message) | ZendriverError::Cdp { message, .. } => {
+            message.contains("No node with given id")
+                || message.contains("Cannot find context")
+                || message.contains("does not belong to the document")
         }
         _ => false,
     }
@@ -482,6 +481,13 @@ mod tests {
         assert!(is_stale_node_error(&ZendriverError::Cdp {
             code: -32000,
             message: "No node with given id".into(),
+            data: None,
+        }));
+
+        // DOM.resolveNode's answer for a node of a replaced document.
+        assert!(is_stale_node_error(&ZendriverError::Cdp {
+            code: -32000,
+            message: "Node with given id does not belong to the document".into(),
             data: None,
         }));
 

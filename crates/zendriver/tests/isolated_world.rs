@@ -157,8 +157,11 @@ async fn evaluate_reads_the_new_page_after_a_cross_site_navigation() {
     let frame = tab.main_frame().await.unwrap();
 
     load(&tab, &server.url(SITE_A, "/plain")).await;
-    let old_heading = tab.find().css("#heading").one().await.unwrap();
-    let heading = old_heading.clone();
+    let heading = tab.find().css("#heading").one().await.unwrap();
+    // Kept across the navigation; two, since the first call on one
+    // refreshes it.
+    let kept_for_evaluate = tab.find().css("#heading").one().await.unwrap();
+    let kept_for_evaluate_main = tab.find().css("#heading").one().await.unwrap();
     let tab_title: String = tab.evaluate("document.title").await.unwrap();
     let frame_title: String = frame.evaluate("document.title").await.unwrap();
     let element_title: String = heading.evaluate("document.title").await.unwrap();
@@ -189,9 +192,12 @@ async fn evaluate_reads_the_new_page_after_a_cross_site_navigation() {
     assert_eq!(frame_title, "Many frames", "Frame::evaluate");
     assert_eq!(element_title, "Many frames", "Element::evaluate");
     // An element kept from the previous page re-runs its query.
-    let text: String = old_heading.evaluate("el.textContent").await.unwrap();
+    let text: String = kept_for_evaluate.evaluate("el.textContent").await.unwrap();
     assert_eq!(text, "Many frames", "Element::evaluate on a kept element");
-    let text: String = old_heading.evaluate_main("el.textContent").await.unwrap();
+    let text: String = kept_for_evaluate_main
+        .evaluate_main("el.textContent")
+        .await
+        .unwrap();
     assert_eq!(
         text, "Many frames",
         "Element::evaluate_main on a kept element"
@@ -385,6 +391,32 @@ async fn a_removed_frames_handle_does_not_reach_its_sibling() {
         matches!(found, Err(ZendriverError::FrameNotFound(_))),
         "Frame::find: {found:?}"
     );
+
+    browser.close().await;
+}
+
+/// An element kept across a same-site navigation re-runs its query, for
+/// `Element::evaluate_main` as for `Element::evaluate`. The page keeps its
+/// renderer process, and Chrome says that the old node "does not belong to
+/// the document".
+#[tokio::test]
+async fn a_kept_element_follows_a_same_site_navigation() {
+    let server = server().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+
+    load(&tab, &server.url(SITE_A, "/plain?title=First")).await;
+    let kept_for_evaluate = tab.find().css("#heading").one().await.unwrap();
+    let kept_for_evaluate_main = tab.find().css("#heading").one().await.unwrap();
+    load(&tab, &server.url(SITE_A, "/plain?title=Second")).await;
+
+    let text: String = kept_for_evaluate_main
+        .evaluate_main("el.textContent")
+        .await
+        .unwrap();
+    assert_eq!(text, "Second", "Element::evaluate_main");
+    let text: String = kept_for_evaluate.evaluate("el.textContent").await.unwrap();
+    assert_eq!(text, "Second", "Element::evaluate");
 
     browser.close().await;
 }

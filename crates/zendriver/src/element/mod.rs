@@ -282,7 +282,7 @@ impl Element {
     /// visible; so is this call to page scripts that watch for one. Gets a
     /// main-world handle with `DOM.resolveNode`, which, given no execution
     /// context, wraps the node in the main world of the node's own frame;
-    /// then calls the function on it and releases it.
+    /// then calls the function on it and asks Chrome to release it.
     ///
     /// For stealth-safe isolated-world evaluation, see [`Element::evaluate`].
     ///
@@ -306,7 +306,23 @@ impl Element {
         let function = format!("function(el){{ return ({}) }}", js.as_ref());
         let function = function.as_str();
         self.with_refresh(|| async move {
-            let backend_node_id = self.backend_node_id_cloned().await?;
+            // The node's id, read off the element's own handle rather than
+            // taken from the cached `backend_node_id`. A dead handle then
+            // fails as stale, so `with_refresh` re-runs the element's query,
+            // while the cached id could name an unrelated node once the page
+            // has moved to another renderer process, which numbers its nodes
+            // anew.
+            let own_object_id = self.remote_object_id_cloned().await?;
+            let described = self
+                .inner
+                .tab
+                .call("DOM.describeNode", json!({ "objectId": own_object_id }))
+                .await?;
+            let Some(backend_node_id) = described["node"]["backendNodeId"].as_i64() else {
+                return Err(ZendriverError::Navigation(
+                    "DOM.describeNode returned no backendNodeId".into(),
+                ));
+            };
             let resolved = self
                 .inner
                 .tab
@@ -315,9 +331,10 @@ impl Element {
                     json!({ "backendNodeId": backend_node_id }),
                 )
                 .await?;
-            // No object: the node is no longer in a live document.
             let Some(object_id) = resolved["object"]["objectId"].as_str() else {
-                return Err(ZendriverError::ElementStale);
+                return Err(ZendriverError::Navigation(
+                    "DOM.resolveNode returned no objectId".into(),
+                ));
             };
             let result = self
                 .inner
@@ -434,12 +451,21 @@ mod tests {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         let tab = Tab::new_for_test(sess);
-        let el = Element::from_jsret(tab, 7, "R_ISO".to_string());
+        let el = Element::from_jsret(tab, 6, "R_ISO".to_string());
 
         let fut = tokio::spawn({
             let e = el.clone();
             async move { e.evaluate_main::<String>("el.tagName").await }
         });
+
+        let id_describe = expect(&mut mock, "DOM.describeNode").await;
+        assert_eq!(
+            mock.last_sent()["params"]["objectId"],
+            "R_ISO",
+            "the node's id must come from the element's own handle",
+        );
+        mock.reply(id_describe, json!({ "node": { "backendNodeId": 7 } }))
+            .await;
 
         let id_resolve = expect(&mut mock, "DOM.resolveNode").await;
         let sent = mock.last_sent();
