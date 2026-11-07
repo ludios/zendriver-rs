@@ -2,7 +2,7 @@
 
 zendriver-rs ships a first-class fingerprint layer that lets you control what
 every browser surface reveals to detection scripts — canvas pixel noise, WebGL
-renderer strings, WebRTC IP candidates, hardware hints, and more — without
+renderer strings, hardware hints, and more — without
 touching any CDP internals directly.
 
 ## Two orthogonal axes
@@ -16,7 +16,7 @@ Fingerprint control lives on two independent axes:
 
 You can mix any persona source with any per-surface strategy independently.
 
-## The 8 surfaces
+## The 7 surfaces
 
 | Surface | Kind | Default strategy | What it affects |
 |---------|------|-----------------|-----------------|
@@ -27,7 +27,12 @@ You can mix any persona source with any per-surface strategy independently.
 | `Webgpu` | Value | `Value` | `GPUAdapterInfo` (vendor/architecture/device/description) + optional `.limits`/`.features` |
 | `Fonts` | Value | `Value` | `measureText` width noise + `FontFaceSet.check` allow-list |
 | `Hardware` | Value | `Value` | Battery level, media-device count, speech voices |
-| `Webrtc` | Policy | `Block` | ICE candidate leak suppression / fake IP |
+
+WebRTC isn't a surface, because Chrome handles it itself: every stealth
+profile except `off()` launches Chrome with
+`--webrtc-ip-handling-policy=disable_non_proxied_udp`. Chrome then gathers
+only the ICE candidates that go through the proxy (none if there is no
+proxy), so WebRTC can't reveal an IP address that the proxy hides.
 
 ## The 5 strategies
 
@@ -36,7 +41,7 @@ You can mix any persona source with any per-surface strategy independently.
 | `Native` | No patch — raw browser output. |
 | `Seeded` | Deterministic per-`(seed, content)` noise: the persona's fixed seed → reproducible across separate runs, and stable across repeat reads of identical content within a page. |
 | `Random` | Same content-keyed noise as `Seeded`, but the seed itself is a fresh `Math.random()` draw made once per page load — so repeat reads within one page load are stable, while separate page loads (a new navigation or browser launch) get independent noise. |
-| `Block` | Empty / zero output (appropriate for policy surfaces). |
+| `Block` | Empty / zero output. |
 | `Value` | Substitute a specific value from the `Persona` spec. |
 
 Both noise strategies key their PRNG by the surface's own content (pixel
@@ -46,8 +51,7 @@ in a way that makes repeat reads of the same content diverge.
 
 Noise surfaces (Canvas, Audio, ClientRects) accept `Native`, `Seeded`,
 `Random`, `Block`. Value surfaces (Webgl, Webgpu, Fonts, Hardware) accept
-`Native`, `Value`, `Block`. The policy surface (Webrtc) accepts `Native`,
-`Block`, `Value` (fake IP). Requesting a meaningless combination logs a
+`Native`, `Value`, `Block`. Requesting a meaningless combination logs a
 warning and falls back to the surface's kind default.
 
 **`Native` on `Webgl` also silences the `Webgpu` value spoof.** A native
@@ -194,7 +198,7 @@ use zendriver::{Browser, Persona, Seed, Strategy, Surface};
 
 let browser = Browser::builder()
     .persona(Persona::builder().seed(Seed::from_u64(42)).build())
-    .surface(Surface::Webrtc, Strategy::Native)  // allow real IP
+    .surface(Surface::Audio, Strategy::Native)   // leave audio unpatched
     .surface(Surface::Canvas, Strategy::Random)  // fresh per-page-load seed
     .launch().await?;
 ```
@@ -892,8 +896,7 @@ let persona: Persona = Persona::try_from_json(r#"{
   "webgl": {
     "unmasked_vendor":   "Google Inc. (NVIDIA)",
     "unmasked_renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)"
-  },
-  "webrtc": { "strategy": "Block" }
+  }
 }"#).unwrap();
 ```
 

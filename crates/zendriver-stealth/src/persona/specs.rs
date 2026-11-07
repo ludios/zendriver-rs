@@ -376,14 +376,6 @@ pub struct FontSpec {
     pub available: Option<Vec<String>>,
 }
 
-/// WebRTC policy.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct WebrtcSpec {
-    pub strategy: Option<Strategy>,
-    /// Fake public IP used when strategy = Value.
-    pub fake_ip: Option<String>,
-}
-
 /// Hardware bundle.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct HardwareSpec {

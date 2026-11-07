@@ -7,7 +7,6 @@ pub mod surface;
 pub use seed::Seed;
 pub use specs::{
     FontSpec, HardwareSpec, ScreenSpec, SurfaceCfg, UaMetadata, UaSpec, WebglSpec, WebgpuSpec,
-    WebrtcSpec,
 };
 
 use std::sync::OnceLock;
@@ -94,7 +93,6 @@ pub struct Persona {
     pub audio: Option<SurfaceCfg>,
     pub fonts: Option<FontSpec>,
     pub client_rects: Option<SurfaceCfg>,
-    pub webrtc: Option<WebrtcSpec>,
     pub hardware: Option<HardwareSpec>,
     pub seed: Option<Seed>,
 }
@@ -218,7 +216,6 @@ impl Persona {
             audio: over.audio.or(self.audio),
             fonts: over.fonts.or(self.fonts),
             client_rects: over.client_rects.or(self.client_rects),
-            webrtc: over.webrtc.or(self.webrtc),
             hardware: over.hardware.or(self.hardware),
             seed: over.seed.or(self.seed),
         }
@@ -255,9 +252,6 @@ impl Persona {
             }
             Surface::Fonts => {
                 self.fonts.get_or_insert_with(Default::default).strategy = Some(strategy)
-            }
-            Surface::Webrtc => {
-                self.webrtc.get_or_insert_with(Default::default).strategy = Some(strategy)
             }
             Surface::Hardware => {
                 self.hardware.get_or_insert_with(Default::default).strategy = Some(strategy)
@@ -670,9 +664,9 @@ mod persona_tests {
         use crate::{Strategy, Surface};
         let mut p = Persona::default();
         // Surface spec absent → created with the override strategy.
-        p.apply_surface_override(Surface::Webrtc, Strategy::Native);
+        p.apply_surface_override(Surface::Fonts, Strategy::Native);
         assert_eq!(
-            p.webrtc.as_ref().and_then(|w| w.strategy),
+            p.fonts.as_ref().and_then(|f| f.strategy),
             Some(Strategy::Native)
         );
         // Existing spec → only strategy mutated, other fields preserved.

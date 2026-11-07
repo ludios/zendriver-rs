@@ -13,13 +13,13 @@
 //! The identity patches run inside a single IIFE called with a serialized
 //! fingerprint object — one `Page.addScriptToEvaluateOnNewDocument` round-trip
 //! covers them. The persona-driven surface patches (canvas/audio/clientRects
-//! noise, webgl/fonts/hardware value substitution, webrtc policy) are appended
+//! noise, webgl/fonts/hardware value substitution) are appended
 //! after, each emitted only when its resolved [`Strategy`] is not `Native`.
 
 use serde_json::json;
 
 use crate::persona::surface::{Strategy, Surface};
-use crate::persona::{FontSpec, HardwareSpec, SurfaceCfg, WebglSpec, WebgpuSpec, WebrtcSpec};
+use crate::persona::{FontSpec, HardwareSpec, SurfaceCfg, WebglSpec, WebgpuSpec};
 use crate::{Fingerprint, GpuProfile, Persona, Platform, Seed};
 
 // --- Native-function masking prelude (runs first, wraps everything) ------
@@ -42,7 +42,6 @@ const CANVAS: &str = include_str!("patches/canvas.js");
 const AUDIO: &str = include_str!("patches/audio.js");
 const CLIENT_RECTS: &str = include_str!("patches/client_rects.js");
 const FONTS: &str = include_str!("patches/fonts.js");
-const WEBRTC: &str = include_str!("patches/webrtc.js");
 const HARDWARE: &str = include_str!("patches/hardware.js");
 const WEBGPU: &str = include_str!("patches/webgpu.js");
 // Coherent window/screen geometry — fixes the impossible innerWidth>outerWidth
@@ -83,7 +82,7 @@ pub fn bootstrap_script(persona: &Persona, identity: &Fingerprint) -> String {
 /// not apply) would disagree with the real WebGL renderer, a cross-API
 /// coherence tell. An explicit WebGPU `Block` (hiding `navigator.gpu`) is
 /// renderer-neutral and is still honored. Every other patch (identity IIFE,
-/// noise surfaces, fonts, hardware, webrtc, screen coherence) is
+/// noise surfaces, fonts, hardware, screen coherence) is
 /// unaffected. See
 /// [`StealthProfile::native_isolation`](crate::StealthProfile::native_isolation)
 /// for the caller-facing trade-off this backs.
@@ -193,7 +192,6 @@ fn bootstrap_script_impl(persona: &Persona, identity: &Fingerprint, spoof_webgl:
     );
     push_fonts(&mut body, persona.fonts.as_ref(), seed);
     push_hardware(&mut body, persona.hardware.as_ref());
-    push_webrtc(&mut body, persona.webrtc.as_ref());
 
     // Single outer IIFE: helpers stay closure-local (no globalThis leak); the
     // Function.prototype.toString override inside still persists globally.
@@ -237,14 +235,6 @@ fn push_noise(out: &mut String, surface: Surface, cfg: Option<&SurfaceCfg>, js: 
         out.push('\n');
         out.push_str(&js.replace("SEED", &tok));
     }
-}
-
-/// JSON literal for an optional string value, or JS `null` when absent.
-fn json_or_null(v: Option<&String>) -> String {
-    v.map_or_else(
-        || "null".to_string(),
-        |s| serde_json::to_string(s).unwrap_or_else(|_| "null".to_string()),
-    )
 }
 
 /// The GPU renderer string the persona claims, finest-grained layer first:
@@ -584,26 +574,6 @@ fn push_hardware(out: &mut String, spec: Option<&HardwareSpec>) {
             .replace("HW_BATTERY", &battery)
             .replace("HW_MEDIA_DEVICES", &media)
             .replace("HW_VOICES", &voices),
-    );
-}
-
-/// Append the webrtc policy patch (`WEBRTC_POLICY` + `WEBRTC_FAKE_IP`).
-/// The patch self-no-ops on the `"native"` policy, so we always emit it but
-/// pass the strategy-derived policy string.
-fn push_webrtc(out: &mut String, spec: Option<&WebrtcSpec>) {
-    let strat = Surface::Webrtc.resolve_strategy(spec.and_then(|s| s.strategy));
-    let policy = match strat {
-        Strategy::Native => "native",
-        Strategy::Value => "value",
-        // Block (the policy default) + any non-meaningful fallback.
-        _ => "block",
-    };
-    let fake_ip = json_or_null(spec.and_then(|s| s.fake_ip.as_ref()));
-    out.push('\n');
-    out.push_str(
-        &WEBRTC
-            .replace("WEBRTC_POLICY", &format!("\"{policy}\""))
-            .replace("WEBRTC_FAKE_IP", &fake_ip),
     );
 }
 
@@ -1355,31 +1325,6 @@ mod tests {
     }
 
     #[test]
-    fn webrtc_value_substitutes_policy_and_ip() {
-        let p = Persona {
-            webrtc: Some(WebrtcSpec {
-                strategy: Some(Strategy::Value),
-                fake_ip: Some("203.0.113.7".into()),
-            }),
-            ..Persona::default()
-        };
-        let script = bootstrap_script(&p, &mock_identity());
-        assert!(
-            script.contains("})(\"value\", \"203.0.113.7\");"),
-            "webrtc value policy + fake ip substituted"
-        );
-    }
-
-    #[test]
-    fn webrtc_default_is_block_policy() {
-        let script = bootstrap_script(&Persona::default(), &mock_identity());
-        assert!(
-            script.contains("})(\"block\", null);"),
-            "default webrtc policy is block with no fake ip"
-        );
-    }
-
-    #[test]
     fn hardware_native_omits_patch() {
         let p = Persona {
             hardware: Some(HardwareSpec {
@@ -1887,6 +1832,11 @@ mod tests {
              own navigator.hardwareConcurrency",
         ),
         (
+            "RTCPeerConnection",
+            "the launch flag --webrtc-ip-handling-policy=disable_non_proxied_udp stops \
+             Chrome from gathering ICE candidates that bypass a proxy",
+        ),
+        (
             "Navigator.prototype, 'languages'",
             "the acceptLanguage of the observer's Emulation.setUserAgentOverride \
              drives Chrome's own navigator.languages",
@@ -1963,10 +1913,6 @@ mod tests {
                 strategy: Some(Strategy::Value),
                 available: Some(vec!["Arial".into()]),
             }),
-            webrtc: Some(WebrtcSpec {
-                strategy: Some(Strategy::Value),
-                fake_ip: Some("1.2.3.4".into()),
-            }),
             hardware: Some(HardwareSpec {
                 strategy: Some(Strategy::Value),
                 battery_level: Some(0.9),
@@ -1994,8 +1940,6 @@ mod tests {
             "SEED",
             "WEBGL_PROFILE",
             "FONT_ALLOW",
-            "WEBRTC_POLICY",
-            "WEBRTC_FAKE_IP",
             "HW_BATTERY",
             "HW_MEDIA_DEVICES",
             "HW_VOICES",

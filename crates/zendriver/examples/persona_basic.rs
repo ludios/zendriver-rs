@@ -2,7 +2,7 @@
 //!
 //! Demonstrates:
 //! - Building a `Persona` with an explicit reproducible seed.
-//! - Overriding a single surface's render strategy (`Webrtc → Native`).
+//! - Overriding a single surface's render strategy (`Audio → Native`).
 //! - Launching the browser and navigating to `about:blank`.
 //!
 //! The seed pins the canvas / audio / clientRects farble so the same
@@ -22,8 +22,8 @@ async fn main() -> zendriver::Result<()> {
     tracing_subscriber::fmt::init();
 
     // Build a seeded persona so canvas / audio / clientRects farble is
-    // deterministic, then override WebRTC to Native so real IP candidates
-    // are allowed through (e.g. for WebRTC-based apps).
+    // deterministic, then override Audio to Native so audio output is left
+    // unpatched (e.g. for apps that analyse audio).
     let persona = Persona::builder()
         .seed(Seed::from_u64(42))
         .device_memory_gb(8)
@@ -32,8 +32,8 @@ async fn main() -> zendriver::Result<()> {
 
     let browser = Browser::builder()
         .persona(persona)
-        // One-off surface override: allow WebRTC to reveal the real IP.
-        .surface(Surface::Webrtc, Strategy::Native)
+        // One-off surface override: leave the audio surface unpatched.
+        .surface(Surface::Audio, Strategy::Native)
         .launch()
         .await?;
 

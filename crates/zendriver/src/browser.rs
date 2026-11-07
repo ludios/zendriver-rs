@@ -1536,7 +1536,7 @@ impl BrowserBuilder {
     }
 
     /// Set the base fingerprint [`Persona`]: it drives the spoofed-mode
-    /// surface patches (canvas/WebGL/audio/fonts/clientRects/WebRTC/hardware)
+    /// surface patches (canvas/WebGL/audio/fonts/clientRects/hardware)
     /// and, for every stealth profile except `off`, the emulation overrides —
     /// `timezone`, `locale` / `languages` and `geolocation` — and the screen
     /// (see [`StealthProfile::screen`]).
@@ -1714,7 +1714,7 @@ impl BrowserBuilder {
     /// ```no_run
     /// use zendriver::{Strategy, Surface};
     /// let builder = zendriver::Browser::builder()
-    ///     .surface(Surface::Webrtc, Strategy::Native);
+    ///     .surface(Surface::Audio, Strategy::Native);
     /// ```
     #[must_use]
     pub fn surface(mut self, surface: Surface, strategy: Strategy) -> Self {
@@ -5528,14 +5528,14 @@ mod tests {
         let b = Browser::builder()
             .persona(Persona::builder().device_memory_gb(16).build())
             .persona_overlay(r#"{"timezone":"UTC"}"#.parse().unwrap())
-            .surface(Surface::Webrtc, Strategy::Native);
+            .surface(Surface::Audio, Strategy::Native);
         let p = b.resolved_persona().unwrap();
         assert_eq!(p.device_memory_gb, Some(16));
         assert_eq!(p.timezone.as_deref(), Some("UTC"));
         assert_eq!(
-            p.webrtc.as_ref().and_then(|w| w.strategy),
+            p.audio.as_ref().and_then(|a| a.strategy),
             Some(Strategy::Native),
-            "surface override must set the WebRTC strategy"
+            "surface override must set the audio strategy"
         );
     }
 

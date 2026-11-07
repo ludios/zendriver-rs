@@ -10,7 +10,6 @@ pub enum Surface {
     Audio,
     Fonts,
     ClientRects,
-    Webrtc,
     Hardware,
     Webgpu,
 }
@@ -41,7 +40,6 @@ pub enum Strategy {
 pub enum SurfaceKind {
     Noise,
     Value,
-    Policy,
 }
 
 impl Surface {
@@ -51,7 +49,6 @@ impl Surface {
             Surface::Webgl | Surface::Fonts | Surface::Hardware | Surface::Webgpu => {
                 SurfaceKind::Value
             }
-            Surface::Webrtc => SurfaceKind::Policy,
         }
     }
 
@@ -60,7 +57,6 @@ impl Surface {
         match self.kind() {
             SurfaceKind::Noise => Strategy::Seeded,
             SurfaceKind::Value => Strategy::Value,
-            SurfaceKind::Policy => Strategy::Block,
         }
     }
 
@@ -78,7 +74,6 @@ impl Surface {
                 | (_, Strategy::Block)
                 | (SurfaceKind::Noise, Strategy::Seeded | Strategy::Random)
                 | (SurfaceKind::Value, Strategy::Value)
-                | (SurfaceKind::Policy, Strategy::Value)
         );
         if ok {
             req
@@ -121,11 +116,6 @@ mod tests {
             Surface::Audio.resolve_strategy(Some(Strategy::Block)),
             Strategy::Block
         );
-    }
-
-    #[test]
-    fn webrtc_default_is_block() {
-        assert_eq!(Surface::Webrtc.resolve_strategy(None), Strategy::Block);
     }
 
     #[test]

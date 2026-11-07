@@ -19,7 +19,6 @@ expression: p
   "audio": null,
   "fonts": null,
   "client_rects": null,
-  "webrtc": null,
   "hardware": null,
   "seed": 1
 }
