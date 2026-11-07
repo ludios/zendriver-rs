@@ -2,7 +2,7 @@
 
 Bugs from the 2026-10-31 AI review ([ai-code-reviews/](ai-code-reviews/README.md)) and from running the library against real sites ([R](<ai-code-reviews/Project testing on ludios.org and sites.md>)), turned into work items.
 
-**Order:** P0 → P1 → P2.
+**Order:** P0 → P1 → P2. The sections outside P0–P2 have no set place in this order.
 
 **Rule:** every fix lands with a test that fails before the fix. Some of those tests exist already: a test named `known_bug_*` is `#[ignore]`d with its TODO item in the reason, and the fix deletes the `#[ignore]` and the prefix. A stealth fix deletes its row from `KNOWN_DISAGREEMENTS` in `zendriver-testkit`'s `probe.rs` or `KNOWN_BUGS` in `stealth_conformance.rs` (the test fails until it does). If a behaviour depends on Chrome, test it against real Chrome, not the mock CDP. About a fifth of the review findings are only "likely". When a test can't reproduce one, close it as not-a-bug rather than fixing blind.
 
@@ -22,14 +22,13 @@ Bugs from the 2026-10-31 AI review ([ai-code-reviews/](ai-code-reviews/README.md
 - `chrome`: real-Chrome test in `crates/zendriver/tests/` against the local fixture server (`zendriver-testkit`).
 - `mcp`: real-Chrome test in `crates/zendriver-mcp/tests/` that drives the server.
 - `probe`: covered by the stealth consistency probe (`stealth_probe.rs`).
-- `contract`: covered by the CDP contract test (`cdp_contract.rs`).
 - `unit`: no browser.
 
 ---
 
 ## Test harness
 
-**Local setup:** `~/bin/cargo` on this machine forces nightly-only `-Z` flags, but the repo pins stable, so run `/run/current-system/sw/bin/cargo`. On rustc 1.99, `cargo clippy --workspace -D warnings` fails in `zendriver-transport` on `clippy::double_must_use` from `#[async_trait]`, which predates this work (upstream has a branch `fix/clippy-1.99-double-must-use`). Until that merges, add `-A clippy::double-must-use` to check everything else. `cargo-insta` isn't installed: accept a schema snapshot by moving its `.snap.new` over the `.snap` minus the `assertion_line:` line, or run the test with `INSTA_UPDATE=always`. `mdbook` isn't on PATH: `nix shell nixpkgs#mdbook -c mdbook build docs/book`. `cargo-public-api` 0.52.0 and `nightly-2026-06-10` are installed (built with `nix-shell -p openssl pkg-config --run "cargo +stable install cargo-public-api --locked --version 0.52.0"`), so regenerate the baseline with `cargo +nightly-2026-06-10 public-api -p zendriver --all-features > crates/zendriver-mcp/public-api-baseline.txt` and check with `PUBLIC_API_TOOLCHAIN=nightly-2026-06-10 cargo +nightly-2026-06-10 test -p zendriver-mcp --features public-api-check --test public_api --locked` (the default nightly reports hundreds of unrelated items).
+**Local setup**, on the NixOS machine that AGENTS.md describes: `~/bin/cargo` there forces nightly-only `-Z` flags, but the repo pins stable, so run `/run/current-system/sw/bin/cargo`. `cargo-insta` isn't installed: accept a schema snapshot by moving its `.snap.new` over the `.snap` minus the `assertion_line:` line, or run the test with `INSTA_UPDATE=always`. `mdbook` isn't on PATH: `nix shell nixpkgs#mdbook -c mdbook build docs/book`. `cargo-public-api` 0.52.0 and `nightly-2026-06-10` are installed (built with `nix-shell -p openssl pkg-config --run "cargo +stable install cargo-public-api --locked --version 0.52.0"`), so regenerate the baseline with `cargo +nightly-2026-06-10 public-api -p zendriver --all-features > crates/zendriver-mcp/public-api-baseline.txt` and check with `PUBLIC_API_TOOLCHAIN=nightly-2026-06-10 cargo +nightly-2026-06-10 test -p zendriver-mcp --features public-api-check --test public_api --locked` (the default nightly reports hundreds of unrelated items).
 
 - [ ] **No CI job runs the `known_bug_*` tests.** The nightly ignored-test lane skips them, since they fail by design. So one that starts failing for another reason, or starts passing because something else fixed it, goes unnoticed. An inverted nightly check (alert when one passes) would close that.
 - [ ] **CDP contract test (`cdp_contract.rs`) limits:**
@@ -272,4 +271,3 @@ Each item needs a test; `unit` is fine where no browser is involved.
 ## Docs
 
 - [ ] **The README's first example and `crates/zendriver/examples/hello.rs` fail** because example.com was redesigned. *(R)* Point them at a stable target and add an examples smoke job (almost every example hits a live site, so that job needs stable targets first).
-- [ ] **Any new public API** (the MCP HTML cap) needs the CLAUDE.md checklist: MCP tool or ledger entry, README tool count, rustdoc, mdBook.
