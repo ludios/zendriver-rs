@@ -3518,14 +3518,22 @@ pub(crate) async fn finish_connect(
 
     // On `connect`, the user's other tabs, which are set up meanwhile, so
     // that `Browser::tabs` lists them once `connect` returns. A tab that
-    // isn't set up (it closed, say) is only logged.
+    // isn't set up (it closed, say) is only logged; a connection that ends
+    // fails `connect`.
     let inner_ref = &inner;
-    futures::future::join_all(user_tabs.into_iter().map(|(id, mut events)| async move {
-        if let Err(error) = inner_ref.wait_for_tab(&mut events, &id).await {
-            warn!(%error, "one of the tabs open at connect was not set up");
+    let waits = user_tabs.into_iter().map(|(id, mut events)| async move {
+        match inner_ref.wait_for_tab(&mut events, &id).await {
+            Ok(_) => Ok(()),
+            Err(ZendriverError::TabSetup { reason, .. }) => {
+                warn!(target_id = %id, reason, "a tab open at connect was not set up");
+                Ok(())
+            }
+            Err(e) => Err(e),
         }
-    }))
-    .await;
+    });
+    for waited in futures::future::join_all(waits).await {
+        waited?;
+    }
 
     let child = child
         .lock()
@@ -7430,6 +7438,41 @@ mod tests {
                 if target_id == "T1" && reason.contains("budget of 1s")),
             "{err:?}"
         );
+    }
+
+    /// `connect` fails when the connection drops while it waits for the
+    /// user's other tabs, instead of returning a browser that can do nothing.
+    #[tokio::test]
+    async fn finish_connect_fails_when_the_connection_drops_while_it_waits_for_a_tab() {
+        let (mut mock, args) = finish_connect_args(Vec::new());
+        let fut = tokio::spawn(finish_connect(args));
+        let two_pages = json!({ "targetInfos": [
+            { "targetId": "T1", "type": "page", "url": "about:blank" },
+            { "targetId": "T2", "type": "page", "url": "about:blank" },
+        ] });
+        answer_targets(&mut mock, two_pages).await;
+        answer_auto_attach(&mut mock, &[("T1", "S1"), ("T2", "S2")]).await;
+        // Set up the main tab, leave the other one waiting, and give the
+        // main tab's registration a moment, so that the drop hits the wait
+        // for the other tab.
+        loop {
+            let id = timeout(Duration::from_secs(2), mock.expect_cmd("Network.enable"))
+                .await
+                .expect("no Network.enable of the main tab within 2s");
+            if mock.last_sent()["sessionId"] == "S1" {
+                mock.reply(id, json!({})).await;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        mock.disconnect();
+
+        let err = timeout(Duration::from_secs(5), fut)
+            .await
+            .expect("finish_connect did not return within 5s of the drop")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, ZendriverError::Disconnected), "{err:?}");
     }
 
     /// The main tab is set up even when its page is one of Chrome's own,
