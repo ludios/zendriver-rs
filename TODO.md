@@ -179,10 +179,9 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
 - [ ] **`chrome_version(major)` invents a build number.** *(ST #4)* Test `unit`.
 - [ ] **`fonts.js` bugs:** `measureText` isn't deterministic; `fonts.check` keeps only the last word of the family name. *(ST #5, #6)*
   - Also, real Chrome's `document.fonts.check()` is true for any local font, even one that doesn't exist (seen in Chrome 156 and 157), while the persona allow-list answers false for every family not on it. So the allow-list is itself a deviation, which fixing the parsing leaves in place.
-- [ ] **`innerHeight` is smaller than `clientHeight`.** Only under the spoofed profiles. *(ST #7)*
 - [ ] **`getClientRects()` returns an `Array`,** not a `DOMRectList`. *(ST #11)*
 - [ ] **Masked functions are constructible** in the spoofed patches: each is an ordinary `function`, with an own `prototype` (rebrowser's `nativeTampering` checks for one). *(ST #12)*
-- [ ] **Own properties on instances** where Chrome has them on the prototype. Only under the spoofed profiles. *(ST #13)*
+- [ ] **Own properties on instances** where Chrome has them on the prototype: `fonts.js` patches `document.fonts`, and `hardware.js` patches `navigator`, `navigator.mediaDevices` and `speechSynthesis`, when a persona sets their values. *(ST #13)*
 - [ ] **`broken_image.js`** reports 16 for every image with no `src`. *(ST #14)*
 - [ ] **Generative personas use Safari/Firefox UAs.** Filter to Chrome UAs only. *(ST #15)* Test `unit`.
 - [ ] **Generative network cache:** validate before writing, and key the cache by URL. *(ST #16)* Test `unit`.

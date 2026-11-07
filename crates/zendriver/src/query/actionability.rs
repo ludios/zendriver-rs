@@ -206,21 +206,18 @@ pub(crate) async fn check_visible(el: &Element, within: Within) -> Result<bool> 
                 // the box it must be compared against is the LAYOUT viewport. Two
                 // things about reading that box are load-bearing:
                 //
-                // 1. It must never come from `window.inner*`.
-                //    `StealthProfile::spoofed()` runs
-                //    `zendriver-stealth`'s `patches/screen.js`, which rewrites
-                //    `window.inner*` to the persona's screen size minus a chrome
-                //    inset, while `scroll_into_view` moves the element with
-                //    Chrome's real viewport. The inset is whatever the caller's
-                //    `ScreenSpec` measured, falling back to a derived 86px when no
-                //    capture supplied one, so its size is not knowable from here —
-                //    which is the point: no constant can compensate for it.
-                //    Measured under the default profile (the 86px fallback):
-                //    `innerHeight` 994 against a real 1080. Comparing a
-                //    real-geometry scroll against that fabricated viewport leaves
-                //    every element landing in the inset band permanently "not
-                //    visible", which broke `focus` — and with it `type_text` /
-                //    `press` / `type_keys` — on any below-the-fold field.
+                // 1. It must never come from `window.inner*`, which this world's
+                //    page can redefine, while `scroll_into_view` moves the
+                //    element with Chrome's real viewport. Under
+                //    `StealthProfile::spoofed()`, `zendriver-stealth`'s
+                //    `patches/screen.js` (since deleted) rewrote `window.inner*`
+                //    to the persona's screen size minus a chrome inset.
+                //    Measured with its 86px default: `innerHeight` 994 against a
+                //    real 1080. Comparing a real-geometry scroll against that
+                //    fabricated viewport leaves every element landing in the
+                //    inset band permanently "not visible", which broke `focus`
+                //    — and with it `type_text` / `press` / `type_keys` — on any
+                //    below-the-fold field.
                 //
                 // 2. WHICH element reports the layout viewport depends on the
                 //    rendering mode, and reading the wrong one fails silently.

@@ -113,12 +113,11 @@ impl UaMetadata {
     }
 }
 
-/// The screen that stealth presents: under `native()`, the screen a headless
-/// Chrome gets at launch (`--screen-info`); under `spoofed()`, the screen of
-/// `Emulation.setDeviceMetricsOverride` and of the bootstrap's geometry patch.
-/// See `StealthProfile::screen`. Sizes are in CSS pixels.
+/// The screen that stealth presents: the screen a headless Chrome gets at
+/// launch (`--screen-info`) under `native()` and `spoofed()`. See
+/// `StealthProfile::screen`. Sizes are in CSS pixels.
 ///
-/// When `native()` launches a headless Chrome with this screen (that is,
+/// When stealth launches a headless Chrome with this screen (that is,
 /// the caller passes no `--screen-info` of its own, which skips these
 /// checks), the launch fails unless `device_pixel_ratio` is 1, 1.25, 1.5,
 /// … or 4 on Linux and Windows (which covers Windows' scaling steps), or 1
@@ -154,22 +153,14 @@ pub struct ScreenSpec {
     /// by a constant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avail_height: Option<u32>,
-    /// Viewport height, i.e. `window.innerHeight`, under `spoofed()` only.
-    /// `None` keeps the derived default of `height - 86` (a plausible tab
-    /// strip + omnibox + bookmarks bar). Same reasoning as
-    /// [`Self::avail_height`]: the browser chrome's real height varies with
-    /// the user's toolbars and zoom. Under `native()`, Chrome derives the
-    /// viewport from the window instead.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inner_height: Option<u32>,
 }
 
 impl ScreenSpec {
-    /// A screen of `width x height` at `device_pixel_ratio`, with every inset
-    /// left to its default (see the fields).
+    /// A screen of `width x height` at `device_pixel_ratio`, with its work
+    /// area left to the default (see the fields).
     ///
-    /// Use the `with_*` setters to replay a MEASURED device instead. They are
-    /// separate because the derived defaults are a plausible fiction and a
+    /// Use [`Self::with_avail`] to replay a MEASURED device instead. It is
+    /// separate because the derived default is a plausible fiction and a
     /// measurement is not: a caller should have to say which one it means.
     #[must_use]
     pub fn new(width: u32, height: u32, device_pixel_ratio: f64) -> Self {
@@ -179,7 +170,6 @@ impl ScreenSpec {
             device_pixel_ratio,
             avail_width: None,
             avail_height: None,
-            inner_height: None,
         }
     }
 
@@ -188,13 +178,6 @@ impl ScreenSpec {
     pub fn with_avail(mut self, width: u32, height: u32) -> Self {
         self.avail_width = Some(width);
         self.avail_height = Some(height);
-        self
-    }
-
-    /// Replay a measured `window.innerHeight`.
-    #[must_use]
-    pub fn with_inner_height(mut self, height: u32) -> Self {
-        self.inner_height = Some(height);
         self
     }
 }

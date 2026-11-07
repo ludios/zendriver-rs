@@ -1,6 +1,7 @@
 //! The screen, window and viewport that a headless launch's pages see under
-//! the `native` stealth profile (the default). Instead of patching the page,
-//! it launches headless Chrome with a screen (`--screen-info`) and windows
+//! the `native` stealth profile (the default), and under `spoofed`, which
+//! takes its screen the same way. Instead of patching the page, they launch
+//! headless Chrome with a screen (`--screen-info`) and windows
 //! that fill its work area (see `StealthObserver::headless_flags`), so
 //! Chrome itself reports geometry that agrees, to the page in front of each
 //! window. On Linux, a background tab's page sees other geometry, which a
@@ -11,6 +12,7 @@
 use std::collections::HashSet;
 
 use serde_json::{Value, json};
+use zendriver::stealth::StealthProfile;
 use zendriver::{Browser, BrowserBuilder, Persona, Tab};
 use zendriver_testkit::{FixtureServer, eval, launch_for_test, load};
 
@@ -92,6 +94,15 @@ async fn geometry_of_first_tab_and_new_window(builder: BrowserBuilder) -> [Value
 #[tokio::test]
 async fn the_default_screen_is_1920x1080_with_a_taskbar() {
     for seen in geometry_of_first_tab_and_new_window(Browser::builder()).await {
+        assert_fills_work_area(&seen, [1920, 1080], [1920, 1032], 1.0);
+    }
+}
+
+/// `spoofed` patches none of the screen, window or viewport either.
+#[tokio::test]
+async fn spoofed_gets_the_same_screen() {
+    let builder = Browser::builder().stealth(StealthProfile::spoofed());
+    for seen in geometry_of_first_tab_and_new_window(builder).await {
         assert_fills_work_area(&seen, [1920, 1080], [1920, 1032], 1.0);
     }
 }

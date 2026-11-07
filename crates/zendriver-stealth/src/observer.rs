@@ -4,9 +4,9 @@
 //! `Target.attachedToTarget`, the actor pauses the new target, walks every
 //! observer serially, then releases the debugger via
 //! `Runtime.runIfWaitingForDebugger`. The observer's job is to push every
-//! UA/timezone/locale override and (for `Spoofed`) the screen and CPU-count
-//! overrides and the bootstrap script _before_ the debugger releases, so the first script the
-//! page runs sees the patched globals.
+//! UA/timezone/locale override and (for `Spoofed`) the CPU-count override
+//! and the bootstrap script _before_ the debugger releases, so the first
+//! script the page runs sees the patched globals.
 
 use serde_json::json;
 use zendriver_transport::{CallError, ObserverError, PausedSession, TargetObserver};
@@ -269,11 +269,11 @@ impl StealthObserver {
     ///
     /// This is where the persona and the fingerprint are combined, so it is
     /// where they are merged: the persona's `timezone` / `locale` /
-    /// `languages` / `screen` are folded into `fingerprint` up front, and
-    /// every consumer below — the
-    /// `Emulation.set*Override` calls, the `Accept-Language` header, the
-    /// bootstrap script's geometry patch, and the launch switches of [`StealthObserver::headless_flags`] — then
-    /// reads that one merged value. An explicitly-set persona field wins over
+    /// `languages` / `screen` / `hardware_concurrency` are folded into
+    /// `fingerprint` up front, and every consumer below — the
+    /// `Emulation.set*Override` calls, the `Accept-Language` header, and the
+    /// launch switches of [`StealthObserver::headless_flags`] — then reads
+    /// that one merged value. An explicitly-set persona field wins over
     /// the fingerprint's; `None` inherits the fingerprint's.
     #[must_use]
     pub fn with_persona(
@@ -291,9 +291,6 @@ impl StealthObserver {
                     bootstrap_script(&persona, &fingerprint)
                 }
             }
-            // `Native` patches no JS: under headless, its screen comes from the
-            // launch switches of `headless_flags`, so Chrome itself reports a
-            // coherent screen, window and viewport.
             ProfileKind::Native | ProfileKind::Off => String::new(),
         };
         let geolocation = persona.geolocation;
@@ -317,9 +314,10 @@ impl StealthObserver {
     }
 
     /// The switches to launch a headless Chrome with, for this observer's
-    /// profile and screen. Empty unless the profile is `Native`.
+    /// profile and screen. Empty if the profile is `Off`.
     ///
-    /// For `Native`, they are `--screen-info`, which gives headless Chrome
+    /// For `Native` and `Spoofed`, they are `--screen-info`, which gives
+    /// headless Chrome
     /// the screen that the persona or the [`StealthProfile::screen`] pin
     /// configures (else 1920x1080, with a 48-pixel taskbar), and
     /// `--window-size` plus `--window-position=0,0`, which make each window
@@ -340,7 +338,7 @@ impl StealthObserver {
     /// to 65536. Headless Chrome would report a different screen for most of
     /// those, and dumps core on some.
     pub fn headless_flags(&self) -> Result<Vec<String>, StealthError> {
-        if self.profile.kind() != ProfileKind::Native {
+        if self.profile.kind() == ProfileKind::Off {
             return Ok(Vec::new());
         }
         headless_screen_switches(&self.screen())
@@ -416,26 +414,9 @@ impl TargetObserver for StealthObserver {
             )
             .await?;
 
-        // Screen-size override, for `Spoofed` only: `Native` takes its screen
-        // from the launch switches of `headless_flags` instead, or from the
-        // real display when headed.
+        // `navigator.hardwareConcurrency`, in the page and its same-process
+        // iframes; a worker still reports the host's.
         if self.profile.kind() == ProfileKind::Spoofed {
-            let screen = self.screen();
-            session
-                .call(
-                    "Emulation.setDeviceMetricsOverride",
-                    json!({
-                        "width": screen.width,
-                        "height": screen.height,
-                        "deviceScaleFactor": screen.device_pixel_ratio,
-                        "mobile": false,
-                        "screenWidth": screen.width,
-                        "screenHeight": screen.height,
-                    }),
-                )
-                .await?;
-            // `navigator.hardwareConcurrency`, in the page and its
-            // same-process iframes; a worker still reports the host's.
             session
                 .call(
                     "Emulation.setHardwareConcurrencyOverride",
@@ -640,7 +621,6 @@ mod tests {
         for expected in [
             "Page.enable",
             "Emulation.setUserAgentOverride",
-            "Emulation.setDeviceMetricsOverride",
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.setBypassCSP",
@@ -720,7 +700,6 @@ mod tests {
         for expected in [
             "Page.enable",
             "Emulation.setUserAgentOverride",
-            "Emulation.setDeviceMetricsOverride",
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setLocaleOverride",
@@ -808,7 +787,6 @@ mod tests {
         for expected in [
             "Page.enable",
             "Emulation.setUserAgentOverride",
-            "Emulation.setDeviceMetricsOverride",
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setLocaleOverride",
@@ -880,7 +858,6 @@ mod tests {
         for expected in [
             "Page.enable",
             "Emulation.setUserAgentOverride",
-            "Emulation.setDeviceMetricsOverride",
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.setBypassCSP",
@@ -952,7 +929,6 @@ mod tests {
         for expected in [
             "Page.enable",
             "Emulation.setUserAgentOverride",
-            "Emulation.setDeviceMetricsOverride",
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.setBypassCSP",
@@ -1029,7 +1005,6 @@ mod tests {
         for expected in [
             "Page.enable",
             "Emulation.setUserAgentOverride",
-            "Emulation.setDeviceMetricsOverride",
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setGeolocationOverride",
@@ -1054,7 +1029,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spoofed_observer_emits_persona_ua_metadata_and_screen_when_present() {
+    async fn spoofed_observer_emits_persona_ua_metadata_when_present() {
         let fp = Fingerprint {
             platform: Platform::MacIntel,
             chrome_major: 120,
@@ -1081,7 +1056,6 @@ mod tests {
                 }),
                 ..Default::default()
             }),
-            screen: Some(crate::persona::specs::ScreenSpec::new(1536, 864, 1.25)),
             ..crate::Persona::default()
         };
         let profile = StealthProfile::spoofed();
@@ -1107,7 +1081,6 @@ mod tests {
         for expected in [
             "Page.enable",
             "Emulation.setUserAgentOverride",
-            "Emulation.setDeviceMetricsOverride",
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.setBypassCSP",
@@ -1127,14 +1100,6 @@ mod tests {
                 assert_eq!(uam["platform"].as_str(), Some("macOS"));
                 assert!(uam["brands"].is_array());
             }
-            if expected == "Emulation.setDeviceMetricsOverride" {
-                let params = mock.last_sent()["params"].clone();
-                assert_eq!(params["width"].as_u64(), Some(1536));
-                assert_eq!(params["height"].as_u64(), Some(864));
-                assert_eq!(params["deviceScaleFactor"].as_f64(), Some(1.25));
-                assert_eq!(params["screenWidth"].as_u64(), Some(1536));
-                assert_eq!(params["screenHeight"].as_u64(), Some(864));
-            }
             mock.reply(id, json!({})).await;
         }
 
@@ -1142,7 +1107,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spoofed_observer_uses_fingerprint_uam_and_fixed_screen_when_persona_absent() {
+    async fn spoofed_observer_uses_fingerprint_uam_when_persona_absent() {
         let fp = Fingerprint {
             platform: Platform::MacIntel,
             chrome_major: 120,
@@ -1185,7 +1150,6 @@ mod tests {
         for expected in [
             "Page.enable",
             "Emulation.setUserAgentOverride",
-            "Emulation.setDeviceMetricsOverride",
             "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.setBypassCSP",
@@ -1203,13 +1167,6 @@ mod tests {
                     uam, expected_json,
                     "absent persona UAM → fingerprint's verbatim"
                 );
-            }
-            if expected == "Emulation.setDeviceMetricsOverride" {
-                let params = mock.last_sent()["params"].clone();
-                // Today's fixed default, unchanged.
-                assert_eq!(params["width"].as_u64(), Some(1920));
-                assert_eq!(params["height"].as_u64(), Some(1080));
-                assert_eq!(params["deviceScaleFactor"].as_f64(), Some(1.0));
             }
             mock.reply(id, json!({})).await;
         }
@@ -1267,8 +1224,7 @@ mod tests {
         for expected in [
             "Page.enable",
             "Emulation.setUserAgentOverride",
-            // `Native` sends no `Emulation.setDeviceMetricsOverride` and no
-            // bootstrap: its screen comes from launch switches.
+            // `Native` sends no bootstrap and no CPU-count override.
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setGeolocationOverride",
             "Runtime.runIfWaitingForDebugger",
@@ -1427,17 +1383,6 @@ mod persona_reaches_cdp_tests {
             "the observer never completed — no debugger release in {methods:?}"
         );
         frames
-    }
-
-    /// The single trimmed line of `source` starting with `prefix`. Keeps a
-    /// failure over the bootstrap readable — the script is thousands of lines,
-    /// and only the substituted token is in question.
-    fn line_with<'a>(source: &'a str, prefix: &str) -> &'a str {
-        source
-            .lines()
-            .map(str::trim)
-            .find(|l| l.starts_with(prefix))
-            .unwrap_or("<no such line>")
     }
 
     fn method_names(frames: &[Value]) -> Vec<String> {
@@ -1612,94 +1557,6 @@ mod persona_reaches_cdp_tests {
         );
     }
 
-    /// The other direction of the same seam: `StealthProfile::screen` lands on
-    /// `Fingerprint::screen`, which nothing read — the observer took its screen
-    /// from the persona alone, so the profile setter was inert and its rustdoc
-    /// ("replaces the observer's fixed 1920x1080 default") was false.
-    #[tokio::test]
-    async fn fingerprint_screen_reaches_device_metrics_when_the_persona_has_none() {
-        let fp = Fingerprint {
-            screen: Some(ScreenSpec::new(1366, 768, 1.0)),
-            ..bare_fingerprint()
-        };
-
-        let frames = drive_attach(StealthObserver::with_persona(
-            StealthProfile::spoofed(),
-            fp,
-            Persona::default(),
-        ))
-        .await;
-
-        let metrics = params(&frames, "Emulation.setDeviceMetricsOverride");
-        assert_eq!(metrics["width"].as_u64(), Some(1366));
-        assert_eq!(metrics["height"].as_u64(), Some(768));
-        assert_eq!(metrics["screenWidth"].as_u64(), Some(1366));
-        assert_eq!(metrics["screenHeight"].as_u64(), Some(768));
-    }
-
-    /// A screen that reaches the CDP metrics but not the geometry patch is
-    /// worse than one that reaches neither: `screen.availHeight` would then be
-    /// derived from a size the patch never saw. Both have to move together.
-    #[tokio::test]
-    async fn fingerprint_screen_also_reaches_the_geometry_patch() {
-        let fp = Fingerprint {
-            screen: Some(
-                ScreenSpec::new(1366, 768, 1.0)
-                    .with_avail(1366, 728)
-                    .with_inner_height(640),
-            ),
-            ..bare_fingerprint()
-        };
-
-        let frames = drive_attach(StealthObserver::with_persona(
-            StealthProfile::spoofed(),
-            fp,
-            Persona::default(),
-        ))
-        .await;
-
-        let source = params(&frames, "Page.addScriptToEvaluateOnNewDocument")["source"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        assert_eq!(
-            line_with(&source, "const AVAIL_H"),
-            "const AVAIL_H = 728;",
-            "the measured availHeight must reach the geometry patch"
-        );
-        assert_eq!(
-            line_with(&source, "const INNER_H"),
-            "const INNER_H = 640;",
-            "the measured innerHeight must reach the geometry patch"
-        );
-    }
-
-    /// Precedence guard rather than a regression: the persona already won for
-    /// `screen`, and folding the two sources together must not flip that.
-    #[tokio::test]
-    async fn persona_screen_still_wins_over_the_fingerprints() {
-        let fp = Fingerprint {
-            screen: Some(ScreenSpec::new(1366, 768, 1.0)),
-            ..bare_fingerprint()
-        };
-        let persona = Persona {
-            screen: Some(ScreenSpec::new(1536, 864, 1.25)),
-            ..Persona::default()
-        };
-
-        let frames = drive_attach(StealthObserver::with_persona(
-            StealthProfile::spoofed(),
-            fp,
-            persona,
-        ))
-        .await;
-
-        let metrics = params(&frames, "Emulation.setDeviceMetricsOverride");
-        assert_eq!(metrics["width"].as_u64(), Some(1536));
-        assert_eq!(metrics["height"].as_u64(), Some(864));
-        assert_eq!(metrics["deviceScaleFactor"].as_f64(), Some(1.25));
-    }
-
     /// An empty persona list is the absence of a value, not a value. Every
     /// other language consumer in the crate already reads it that way
     /// (`lang::fingerprint_languages` filters it), so a merge that treated `Some(vec![])` as a pin let a
@@ -1799,6 +1656,43 @@ mod persona_reaches_cdp_tests {
                 "native sent {absent}: {methods:?}"
             );
         }
+    }
+
+    /// `spoofed` takes its screen from the same launch switches as `native`,
+    /// and sends no screen override.
+    #[tokio::test]
+    async fn spoofed_gets_the_screen_of_native() {
+        let fp = Fingerprint {
+            screen: Some(ScreenSpec::new(1366, 768, 1.0)),
+            ..bare_fingerprint()
+        };
+        let persona = Persona {
+            screen: Some(ScreenSpec::new(1440, 900, 2.0).with_avail(1400, 860)),
+            ..Persona::default()
+        };
+        let observer =
+            |profile| StealthObserver::with_persona(profile, fp.clone(), persona.clone());
+        assert_eq!(
+            observer(StealthProfile::spoofed())
+                .headless_flags()
+                .unwrap(),
+            observer(StealthProfile::native()).headless_flags().unwrap(),
+        );
+        assert!(
+            observer(StealthProfile::off())
+                .headless_flags()
+                .unwrap()
+                .is_empty()
+        );
+
+        let frames = drive_attach(observer(StealthProfile::spoofed())).await;
+        let methods = method_names(&frames);
+        assert!(
+            !methods
+                .iter()
+                .any(|m| m == "Emulation.setDeviceMetricsOverride"),
+            "spoofed sent a screen override: {methods:?}"
+        );
     }
 
     /// The headless switches of a `native()` observer whose fingerprint
@@ -2006,14 +1900,6 @@ mod persona_reaches_cdp_tests {
                     "window {css} at {dpr}"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn only_native_has_headless_flags() {
-        for profile in [StealthProfile::off(), StealthProfile::spoofed()] {
-            let observer = StealthObserver::new(profile, bare_fingerprint());
-            assert_eq!(observer.headless_flags().unwrap(), Vec::<String>::new());
         }
     }
 

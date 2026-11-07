@@ -44,23 +44,12 @@ const CLIENT_RECTS: &str = include_str!("patches/client_rects.js");
 const FONTS: &str = include_str!("patches/fonts.js");
 const HARDWARE: &str = include_str!("patches/hardware.js");
 const WEBGPU: &str = include_str!("patches/webgpu.js");
-// Coherent window/screen geometry — fixes the impossible innerWidth>outerWidth
-// and availHeight===height that setDeviceMetricsOverride leaves behind (a hard
-// reese84/Imperva bot tell). References no `fp` fields; emitted unconditionally.
-const SCREEN: &str = include_str!("patches/screen.js");
 
 /// Build the bootstrap script for the spoofed profile.
 ///
 /// `identity` supplies the memory size that `persona` doesn't pin; `persona`
 /// drives the fingerprint surfaces, and its platform picks the GPU that the
 /// WebGL and WebGPU patches present.
-///
-/// The window/screen geometry is the one surface `identity` can drive on its
-/// own: `persona.screen` is used when set, and a persona that leaves it unset
-/// falls back to `identity.screen`. That keeps the emitted `avail*`/`outer*`
-/// insets describing whatever display
-/// `Emulation.setDeviceMetricsOverride` was given, which resolves the same
-/// two sources the same way.
 ///
 /// Order: identity IIFE first, then the PRNG definition, then each persona
 /// surface.
@@ -82,26 +71,13 @@ pub fn bootstrap_script(persona: &Persona, identity: &Fingerprint) -> String {
 /// not apply) would disagree with the real WebGL renderer, a cross-API
 /// coherence tell. An explicit WebGPU `Block` (hiding `navigator.gpu`) is
 /// renderer-neutral and is still honored. Every other patch (identity IIFE,
-/// noise surfaces, fonts, hardware, screen coherence) is
+/// noise surfaces, fonts, hardware) is
 /// unaffected. See
 /// [`StealthProfile::native_isolation`](crate::StealthProfile::native_isolation)
 /// for the caller-facing trade-off this backs.
 #[must_use]
 pub fn bootstrap_script_native_webgl(persona: &Persona, identity: &Fingerprint) -> String {
     bootstrap_script_impl(persona, identity, false)
-}
-
-/// Substitute `screen.js`'s inset tokens from a caller's [`ScreenSpec`].
-///
-/// `None` — or no screen at all — emits `null` for each, which the patch reads
-/// as "derive it". That is what keeps every existing caller byte-identical:
-/// the defaults only apply when nobody measured anything.
-fn screen_patch(screen: Option<&crate::persona::specs::ScreenSpec>) -> String {
-    let tok = |v: Option<u32>| v.map_or_else(|| "null".to_string(), |n| n.to_string());
-    SCREEN
-        .replace("ZD_AVAIL_WIDTH", &tok(screen.and_then(|s| s.avail_width)))
-        .replace("ZD_AVAIL_HEIGHT", &tok(screen.and_then(|s| s.avail_height)))
-        .replace("ZD_INNER_HEIGHT", &tok(screen.and_then(|s| s.inner_height)))
 }
 
 /// Shared implementation for [`bootstrap_script`] /
@@ -124,18 +100,6 @@ fn bootstrap_script_impl(persona: &Persona, identity: &Fingerprint, spoof_webgl:
     // surface is Native (it just defines an unused function).
     body.push('\n');
     body.push_str(PRNG);
-
-    // Geometry coherence runs unconditionally — it repairs the outer*/avail*
-    // props that the CDP metrics override cannot reach. Same precedence as
-    // every other shared axis (persona pin first, else the fingerprint's), so
-    // the insets describe the display `Emulation.setDeviceMetricsOverride`
-    // sizes. `StealthObserver::with_persona` has already merged the two, which
-    // makes this a no-op there; it still matters for a caller driving the
-    // public `bootstrap_script` with an unmerged pair.
-    body.push('\n');
-    body.push_str(&screen_patch(
-        persona.screen.as_ref().or(identity.screen.as_ref()),
-    ));
 
     push_noise(
         &mut body,
@@ -1832,6 +1796,11 @@ mod tests {
              own navigator.hardwareConcurrency",
         ),
         (
+            "outerWidth",
+            "the launch switches --screen-info, --window-size and --window-position \
+             give Chrome a screen and a window that agree",
+        ),
+        (
             "RTCPeerConnection",
             "the launch flag --webrtc-ip-handling-policy=disable_non_proxied_udp stops \
              Chrome from gathering ICE candidates that bypass a proxy",
@@ -1995,62 +1964,5 @@ mod tests {
             s.contains("featuresServed") && s.contains("limitsServed"),
             "the plain-object/Set path must stay gated on the real classes being absent: {s}"
         );
-    }
-}
-
-#[cfg(test)]
-mod screen_patch_tests {
-    use super::screen_patch;
-    use crate::persona::specs::ScreenSpec;
-
-    /// A caller that measured nothing gets the derived defaults.
-    ///
-    /// Every shipped zeus profile was captured THROUGH the metrics override, so
-    /// all of them already carry `height - 48`. If `None` drifted from the
-    /// derived default, the geometry that took auth's imperva-15 rate from 25%
-    /// to 0/80 would move underneath them silently.
-    #[test]
-    fn no_measured_insets_emits_the_derived_defaults() {
-        let derived = screen_patch(None);
-        assert_eq!(
-            derived,
-            screen_patch(Some(&ScreenSpec::new(1920, 1080, 1.0))),
-            "a screen with no measured insets must ALSO derive them"
-        );
-        assert!(
-            derived.contains("null"),
-            "the tokens must resolve to null: {derived:.0}"
-        );
-        assert!(
-            !derived.contains("ZD_AVAIL_HEIGHT"),
-            "no token may survive substitution"
-        );
-    }
-
-    /// A capture from real hardware is presented as captured — this is what
-    /// makes a profile taken on someone else's machine usable at all.
-    #[test]
-    fn measured_insets_are_presented_verbatim() {
-        // A real macOS: menu bar 25px, dock showing, so neither inset is the
-        // -48 / -86 the derivation would invent.
-        let mac = ScreenSpec::new(1920, 1080, 2.0)
-            .with_avail(1920, 1030)
-            .with_inner_height(974);
-        let js = screen_patch(Some(&mac));
-        assert!(
-            js.contains("1030"),
-            "the measured availHeight must reach the page"
-        );
-        assert!(
-            js.contains("974"),
-            "the measured innerHeight must reach the page"
-        );
-        assert!(
-            !js.contains("ZD_AVAIL_HEIGHT") && !js.contains("ZD_INNER_HEIGHT"),
-            "no token may survive substitution"
-        );
-        // The derivation constants stay in the file as the fallback arm; what
-        // must not happen is the PAGE seeing a derived value when one was given.
-        assert_ne!(js, screen_patch(None), "measured must differ from derived");
     }
 }

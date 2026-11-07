@@ -235,7 +235,7 @@ const KNOWN_BUGS: &[(&str, &[&str], &str)] = &[
     ),
     (
         "properties_live_on_prototypes",
-        SPOOFED,
+        &["spoofed fonts"],
         "P1 Stealth: own properties on instances (ST #13)",
     ),
     (
@@ -247,11 +247,6 @@ const KNOWN_BUGS: &[(&str, &[&str], &str)] = &[
         "measure_text_is_stable",
         SPOOFED,
         "P1 Stealth: measureText isn't deterministic (ST #5)",
-    ),
-    (
-        "inner_size_covers_client_size",
-        SPOOFED,
-        "P1 Stealth: innerHeight is smaller than clientHeight (ST #7)",
     ),
 ];
 

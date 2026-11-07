@@ -17,10 +17,9 @@ pub enum ProfileKind {
     /// (HeadlessChrome → Chrome) + Emulation overrides. No JS bootstrap (see
     /// [`StealthProfile::native`]). Default.
     Native,
-    /// Native + Navigator-prototype JS patches, except that its screen comes
-    /// from `Emulation.setDeviceMetricsOverride` and a JS geometry patch
-    /// instead of launch switches. Passes sannysoft. Detectable by
-    /// sophisticated bots that probe `toString` on Navigator getters.
+    /// Native + a JS bootstrap that patches what Chrome can't be told over CDP
+    /// or at launch (see [`StealthProfile::spoofed`]). Each patch replaces a
+    /// Chrome function with a JS one, which lie-detecting scripts can find.
     Spoofed,
 }
 
@@ -180,10 +179,15 @@ impl StealthProfile {
         }
     }
 
-    /// `native` + Navigator-prototype JS patches, except that its screen
-    /// comes from `Emulation.setDeviceMetricsOverride` and a JS geometry
-    /// patch instead of launch switches. Passes the sannysoft detection
-    /// battery.
+    /// `native` + a JS bootstrap that patches what Chrome can't be told over
+    /// CDP or at launch: `navigator.deviceMemory`, the WebGL and WebGPU
+    /// values, noise on canvas, audio and client rects, fonts, and hardware
+    /// hints (see [`Persona`](crate::Persona)). It also sends
+    /// `Emulation.setHardwareConcurrencyOverride`.
+    ///
+    /// Each patch replaces a Chrome function with a JS one, which
+    /// lie-detecting scripts (such as creepjs) can find, so use `spoofed`
+    /// only when the page must see a device other than this one.
     ///
     /// Sets [`bypass_csp`](Self::bypass_csp) on by default so the bootstrap
     /// script can install on pages with strict CSP headers.
@@ -331,15 +335,11 @@ impl StealthProfile {
     /// Override the reported screen wholesale, replacing the default of
     /// 1920x1080 with a 48-pixel taskbar.
     ///
-    /// Under [`native`](Self::native), a headless Chrome that zendriver
-    /// launches gets this screen (see [`native`](Self::native)), and its
-    /// window fills the work area that the `avail_*` fields describe;
-    /// `inner_height` doesn't apply. A headed Chrome, or one that
-    /// `Browser::connect` attaches to, keeps its own screen.
-    /// Under [`spoofed`](Self::spoofed), it sizes
-    /// `Emulation.setDeviceMetricsOverride`, and supplies the bootstrap's
-    /// `avail*` / `outer*` insets so the JS geometry describes the same
-    /// display that CDP sizes. Like
+    /// Under [`native`](Self::native) and [`spoofed`](Self::spoofed), a
+    /// headless Chrome that zendriver launches gets this screen (see
+    /// [`native`](Self::native)), and its window fills the work area that the
+    /// `avail_*` fields describe. A headed Chrome, or one that
+    /// `Browser::connect` attaches to, keeps its own screen. Like
     /// [`user_agent_metadata`](Self::user_agent_metadata), this is a
     /// profile-level pin; a [`Persona`](crate::Persona)'s `screen` field
     /// (threaded via

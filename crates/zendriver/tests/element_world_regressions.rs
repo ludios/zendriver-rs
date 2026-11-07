@@ -39,17 +39,19 @@
 //!    and the gate reported `NotActionable("occluded by overlay")` for every
 //!    `click` / `hover` / `tap` on any element inside any iframe.
 //!
-//! 3. **Visibility under a spoofed viewport.** The gate's on-screen clause
-//!    read `window.innerHeight`, which `zendriver-stealth`'s `screen.js`
-//!    rewrites to the persona's screen height minus a fixed 86px chrome
-//!    inset, while `scroll_into_view` moves the element with Chrome's *real*
-//!    viewport. Comparing a real-geometry scroll against a fabricated
-//!    viewport left every element parked between the two heights permanently
-//!    "not visible", so `focus` — and with it `type_text` / `press` /
-//!    `type_keys` — failed on any below-the-fold field. That patch ships in
-//!    `StealthProfile::spoofed()`. Measured: `innerHeight` 994 against a
-//!    real 1080. The existing cases here missed it twice over: they launch
-//!    with no explicit profile and neither uses an element below the fold.
+//! 3. **Visibility under a shrunk `window.innerHeight`.** The gate's
+//!    on-screen clause read `window.innerHeight`, which `zendriver-stealth`'s
+//!    `screen.js` (since deleted) rewrote under `StealthProfile::spoofed()`
+//!    to the persona's screen height minus a fixed 86px chrome inset, while
+//!    `scroll_into_view` moves the element with Chrome's *real* viewport.
+//!    Comparing a real-geometry scroll against a fabricated viewport left
+//!    every element parked between the two heights permanently "not
+//!    visible", so `focus` — and with it `type_text` / `press` /
+//!    `type_keys` — failed on any below-the-fold field. Measured:
+//!    `innerHeight` 994 against a real 1080. The existing cases here missed
+//!    it twice over: they launch with no explicit profile and neither uses
+//!    an element below the fold. Any page can shrink `innerHeight` the same
+//!    way, so the case's test now has its page do it.
 //!
 //! 4. **The on-screen clause in quirks mode.** The clause that replaced case
 //!    3's read — the two are the same line, fixed twice — read
@@ -343,20 +345,23 @@ async fn hover_and_click_reach_an_element_inside_an_iframe() {
     browser.close().await.unwrap();
 }
 
-/// A below-the-fold field must stay reachable while stealth spoofs the
-/// viewport.
+/// A below-the-fold field must stay reachable when the page reports a
+/// `window.innerHeight` smaller than its layout viewport.
 ///
-/// The `window.inner*` rewrite lives in `screen.js`, which `observer.rs`
-/// installs for `ProfileKind::Spoofed`. `spoofed` is also the full shipping
-/// posture, and its humanized `InputProfile` is what the typing at the end
-/// of this test exercises.
+/// The actionability gate runs in the page's main world, where the page can
+/// redefine `window.inner*`. Under `spoofed`, `zendriver-stealth`'s
+/// `screen.js` (since deleted) did: on the stock 1920x1080 persona it
+/// claimed `innerHeight` 1080 - 86 (browser chrome) = 994, while the layout
+/// viewport stayed at Chrome's real 1080. `scroll_into_view` scrolls with
+/// the real number, so anything landing in that 86px band read as
+/// off-screen: `focus` — the first step of `type_text`, `press` and
+/// `type_keys` — died with `NotActionable(5s, "not visible")` on a field
+/// plainly on screen. The fixture's own script now shrinks `innerHeight`
+/// the same way.
 ///
-/// On the stock 1920x1080 persona it claims `innerHeight` 1080 - 86 (browser
-/// chrome) = 994, while the layout viewport stays at Chrome's real 1080.
-/// `scroll_into_view` scrolls with the real number, so anything landing in
-/// that 86px band read as off-screen: `focus` — the first step of
-/// `type_text`, `press` and `type_keys` — died with
-/// `NotActionable(5s, "not visible")` on a field plainly on screen.
+/// `spoofed` is kept because it is the full shipping posture, and its
+/// humanized `InputProfile` is what the typing at the end of this test
+/// exercises.
 ///
 /// The fixture puts the field LAST in a document taller than any viewport, so
 /// `scrollIntoView({ block: 'center' })` clamps at the document bottom
@@ -367,7 +372,7 @@ async fn hover_and_click_reach_an_element_inside_an_iframe() {
 /// fails loudly instead of passing vacuously.
 #[tokio::test]
 #[serial]
-async fn focus_reaches_a_below_the_fold_field_under_a_spoofed_viewport() {
+async fn focus_reaches_a_below_the_fold_field_when_the_page_shrinks_inner_height() {
     let mock = MockServer::start().await;
     // The spacer is deliberately far taller than any persona's screen rather
     // than tuned to one: all it has to guarantee is that the page scrolls.
@@ -378,6 +383,13 @@ async fn focus_reaches_a_below_the_fold_field_under_a_spoofed_viewport() {
         &mock,
         "/deep",
         r#"<!doctype html><html><body style="margin:0">
+             <script>
+               // Report a viewport 86px shorter than the layout viewport.
+               Object.defineProperty(window, 'innerHeight', {
+                 get: () => document.documentElement.clientHeight - 86,
+                 configurable: true,
+               });
+             </script>
              <div style="height:6000px">a very long page</div>
              <input id="deep" style="display:block;width:200px;height:24px;
                     box-sizing:border-box">
@@ -409,10 +421,10 @@ async fn focus_reaches_a_below_the_fold_field_under_a_spoofed_viewport() {
     field.scroll_into_view().await.unwrap();
 
     // Read the post-scroll geometry in the MAIN world: that is where the
-    // persona's patch lives, and where the actionability probe runs. The
+    // page's override lives, and where the actionability probe runs. The
     // isolated world would report Chrome's real `innerHeight` and quietly
     // prove nothing.
-    let (top, spoofed_vh, real_vh): (f64, f64, f64) = tab
+    let (top, shrunk_vh, real_vh): (f64, f64, f64) = tab
         .evaluate_main(
             "(() => {
                const r = document.getElementById('deep').getBoundingClientRect();
@@ -423,23 +435,22 @@ async fn focus_reaches_a_below_the_fold_field_under_a_spoofed_viewport() {
         .unwrap();
 
     assert!(
-        spoofed_vh < real_vh,
-        "the persona must actually be spoofing the viewport, or this test \
-         guards nothing: window.innerHeight {spoofed_vh}, \
+        shrunk_vh < real_vh,
+        "the page must actually shrink innerHeight, or this test guards \
+         nothing: window.innerHeight {shrunk_vh}, \
          documentElement.clientHeight {real_vh}"
     );
     assert!(
-        top >= spoofed_vh && top < real_vh,
-        "the fixture must park the field inside the spoof band — on screen \
-         for the real viewport, past the bottom of the spoofed one; got \
-         rect.top {top} against innerHeight {spoofed_vh} / clientHeight \
-         {real_vh}"
+        top >= shrunk_vh && top < real_vh,
+        "the fixture must park the field inside the band — on screen for the \
+         real viewport, past the bottom of the shrunk one; got rect.top {top} \
+         against innerHeight {shrunk_vh} / clientHeight {real_vh}"
     );
 
     field
         .focus()
         .await
-        .expect("focus must pass the actionability gate for a below-the-fold field under stealth");
+        .expect("focus must pass the actionability gate for a below-the-fold field");
 
     // Assert the DOM side effect, not just the absence of an error: typing
     // that reports success while the keystrokes go nowhere is still broken.
@@ -598,7 +609,7 @@ async fn the_gate_tests_the_viewport_on_a_doctype_less_page() {
 async fn type_text_types_whitespace_instead_of_dropping_it() {
     let mock = MockServer::start().await;
     // Nothing to scroll, deliberately. This fixture used to carry a 6000px
-    // spacer that put the field below the fold under a spoofed viewport —
+    // spacer that put the field below the fold under a shrunk viewport —
     // which is the exact configuration the two visibility tests above exist
     // to cover. `type_text` focuses first and focus runs the actionability
     // gate, so with the spacer a regression in `check_visible` turned this
