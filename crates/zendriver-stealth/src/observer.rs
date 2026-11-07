@@ -543,9 +543,9 @@ impl TargetObserver for StealthObserver {
                 .await?;
         }
 
-        // An opt-in, and SPOOFED-only: it weakens the page's own security policy, and pages can
-        // detect it. The bootstrap doesn't need it (see `StealthProfile::bypass_csp`).
-        if self.profile.kind() == ProfileKind::Spoofed && self.profile.bypass_csp_enabled() {
+        // An opt-in: it weakens the page's own security policy, and pages can detect it. The
+        // bootstrap doesn't need it (see `StealthProfile::bypass_csp`).
+        if self.profile.bypass_csp_enabled() {
             session
                 .call("Page.setBypassCSP", json!({ "enabled": true }))
                 .await?;
@@ -1826,12 +1826,16 @@ mod persona_reaches_cdp_tests {
         }
     }
 
-    /// `spoofed` sends `Page.setBypassCSP` only when asked to.
+    /// `native` and `spoofed` send `Page.setBypassCSP` only when asked to,
+    /// and `off` never does.
     #[tokio::test]
-    async fn spoofed_bypasses_csp_only_when_asked() {
+    async fn the_csp_bypass_is_sent_only_when_asked() {
         for (profile, expected) in [
             (StealthProfile::spoofed(), false),
             (StealthProfile::spoofed().bypass_csp(true), true),
+            (StealthProfile::native(), false),
+            (StealthProfile::native().bypass_csp(true), true),
+            (StealthProfile::off().bypass_csp(true), false),
         ] {
             let frames = drive_attach(StealthObserver::new(profile, bare_fingerprint())).await;
             let sent = method_names(&frames)

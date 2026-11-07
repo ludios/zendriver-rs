@@ -323,8 +323,8 @@ character only ever lands in text the parser discards.
   included: block or continue each one yourself, or put it at `Last`.
 - **CSP-restricted pages.** `Fetch.fulfillRequest` synthesizes responses
   that may violate a page's `Content-Security-Policy` (especially for
-  scripts). Combine with `StealthProfile::spoofed().bypass_csp(true)` if
-  you're synthesizing scripts.
+  scripts). Turn on the stealth profile's `.bypass_csp(true)` if you're
+  synthesizing scripts.
 - **HTTPS responses can't be re-signed.** `respond` and `modify_request`
   work for the wire payload Chrome sees, not for upstream-TLS-signed
   artifacts.

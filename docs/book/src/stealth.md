@@ -16,7 +16,7 @@ over the specific tells that mainstream fingerprint checks probe for.
 | Profile     | Launch flags | UA scrub | Emulation overrides | JS bootstrap   | Bypass CSP | Use case                                     |
 |-------------|--------------|----------|---------------------|----------------|------------|----------------------------------------------|
 | `off()`     | none         | no       | no                  | none           | no         | Reproducing issues in vanilla Chrome.       |
-| `native()`  | yes          | yes      | yes                 | none           | no         | Most sites, bot-protected ones included. Default recommendation. |
+| `native()`  | yes          | yes      | yes                 | none           | opt-in     | Most sites, bot-protected ones included. Default recommendation. |
 | `spoofed()` | yes          | yes      | yes                 | device values  | opt-in     | Pages that must see a device other than this one. |
 
 ### `StealthProfile::off()`
@@ -188,8 +188,9 @@ profile.
 
 `Page.setBypassCSP` is off: the bootstrap installs even on a page whose
 Content Security Policy forbids every script, because Chrome runs it
-through DevTools. `.bypass_csp(true)` turns the bypass on, which a page
-can detect by loading a script that its policy forbids.
+through DevTools. `.bypass_csp(true)`, under `spoofed()` or `native()`,
+turns the bypass on, which a page can detect by loading a script that its
+policy forbids.
 
 On [sannysoft], headless Chrome 157 under `spoofed()` passed every check.
 Pays a small per-navigation cost (the JS bootstrap runs on every new

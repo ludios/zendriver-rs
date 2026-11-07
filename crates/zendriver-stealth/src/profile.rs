@@ -354,13 +354,13 @@ impl StealthProfile {
         self.per_field.screen = Some(s);
         self
     }
-    /// Under [`spoofed`](Self::spoofed), send `Page.setBypassCSP`, so the
-    /// page's own Content Security Policy blocks nothing. Off by default, and
-    /// [`native`](Self::native) and [`off`](Self::off) never send it.
+    /// Under [`native`](Self::native) and [`spoofed`](Self::spoofed), send
+    /// `Page.setBypassCSP`, so the page's own Content Security Policy blocks
+    /// nothing. Off by default; [`off`](Self::off) never sends it.
     ///
-    /// The bootstrap doesn't need it: Chrome runs the bootstrap through
-    /// DevTools, which CSP doesn't restrict. And a page can detect it, by
-    /// loading a script that its policy forbids.
+    /// The `spoofed` bootstrap doesn't need it: Chrome runs the bootstrap
+    /// through DevTools, which CSP doesn't restrict. And a page can detect
+    /// it, by loading a script that its policy forbids.
     #[must_use]
     pub fn bypass_csp(mut self, on: bool) -> Self {
         self.bypass_csp = on;
