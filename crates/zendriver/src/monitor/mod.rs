@@ -472,9 +472,11 @@ impl MonitorBuilder {
     /// Subscribe to the session's events and spawn the correlator task;
     /// return a live [`NetworkMonitor`].
     ///
-    /// The subscription is registered, and being drained, when this returns,
-    /// and the `Network` domain is enabled on every tab's session before the
-    /// tab is handed out — so there is no CDP round-trip here. Activity that
+    /// The subscription is registered, and its draining task spawned, when
+    /// this returns, and the `Network` domain is enabled on every tab's
+    /// session before the tab is handed out (raw CDP on the session can
+    /// disable it again, which nothing here undoes) — so there is no CDP
+    /// round-trip here. Activity that
     /// the caller starts after this returns — a navigation, say — cannot
     /// begin before the monitor is watching: none of its requests on this
     /// session is missed because of the monitor's own setup. This says
@@ -489,7 +491,9 @@ impl MonitorBuilder {
     /// [`NetworkDeliveryBoundary::Disconnected`] or
     /// [`NetworkDeliveryBoundary::Shutdown`]. In those two cases the task
     /// emits that boundary event and then ends; the stream returns `None` on
-    /// the next poll. There is no automatic reconnect: a consumer
+    /// the next poll. (A monitor started after the session's detach, or
+    /// after the connection's end, gets the boundary at once.) There is no
+    /// automatic reconnect: a consumer
     /// that wants to keep observing across a transport blip must call
     /// [`crate::Tab::monitor`]`().start()` again to spawn a fresh correlator
     /// — after [`crate::Browser::reconnect`], on a tab from

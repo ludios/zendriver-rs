@@ -464,9 +464,9 @@ impl Tab {
         // `responseReceived` (headers only) is deliberately not terminal.
         // `wait_for_idle` reads from the same `network_tracker` Arc. The
         // subscription is registered here, not in the task, so that it exists
-        // when this returns: an event that arrives after that is seen whether
-        // or not the task has run yet. (`Network.enable` itself is
-        // `enable_network`'s job.)
+        // when this returns: an event that arrives after that is buffered for
+        // the task (up to the bus's capacity), whether or not the task has
+        // run yet. (`Network.enable` itself is `enable_network`'s job.)
         let network_tracker = crate::network_idle::InFlightTracker::new();
         let network_cancel = tokio_util::sync::CancellationToken::new();
         let network_events = session.connection().subscribe_raw();

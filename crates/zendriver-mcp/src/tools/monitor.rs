@@ -8,7 +8,7 @@
 //! pushes them into a per-handle bounded ring ([`MonitorBuffer`], capped at
 //! [`MONITOR_BUFFER_CAP`]). The handle is returned with the monitor already
 //! watching (`start()` registers its subscription before it returns); the
-//! task runs until cancelled.
+//! task runs until cancelled, or until the monitor's stream ends.
 //!
 //! `browser_monitor_read` drains the ring (up to `max`) and reports the running
 //! `dropped` count (events evicted while the ring was full), then resets it.
@@ -110,8 +110,8 @@ pub struct StartOutput {
 /// Resolves the current tab, builds the lib-side monitor stream, spawns the
 /// drain task, and registers the resulting [`MonitorState`] under a fresh
 /// handle. Returns with the monitor already watching, so a navigation that
-/// the agent starts after this call cannot begin before it is; events
-/// accumulate in the background.
+/// the agent starts after this call cannot begin before the monitor is
+/// watching; events accumulate in the background.
 pub async fn start(
     state: Arc<Mutex<SessionState>>,
     input: StartInput,

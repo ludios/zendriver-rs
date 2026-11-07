@@ -144,8 +144,10 @@ impl InFlightTracker {
     /// Drive the tracker until `cancel` fires.
     ///
     /// `events` is a subscription to the events of the tab's connection,
-    /// which [`crate::Tab::new`] registers before it spawns this, so that no
-    /// event is missed between the two; `session_id` is the tab's session
+    /// which [`crate::Tab::new`] registers before it spawns this, so that the
+    /// task's late start loses no event (a burst past the bus's capacity
+    /// still does: this subscription isn't loss-accounted); `session_id` is
+    /// the tab's session
     /// (`None` for a root session), whose events are the ones kept. Loops
     /// over `Network.requestWillBeSent` (insert) and the two terminal events
     /// (`loadingFailed`, `loadingFinished` — both remove). Notifies the
