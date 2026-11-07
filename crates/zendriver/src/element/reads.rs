@@ -28,9 +28,10 @@ use crate::query::{BoundingBox, PageBox};
 impl Element {
     /// Return the value of attribute `name`, or `None` when absent.
     ///
-    /// Routes through `el.getAttribute(name)` in JS so HTML attributes
-    /// (`href`, `data-*`) and ARIA attributes resolve identically to user
-    /// code reading them in DevTools.
+    /// Routes through `el.getAttribute(name)`, run in zendriver's isolated
+    /// world, so HTML attributes (`href`, `data-*`) and ARIA attributes read
+    /// as they are in the DOM, whatever the page's JavaScript has done to
+    /// `getAttribute`.
     ///
     /// # Examples
     ///

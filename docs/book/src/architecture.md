@@ -184,7 +184,10 @@ their answers; DOM changes and the events they fire still reach the
 page. `element.evaluate(...)` runs there too, and
 `element.evaluate_main(...)` runs in the main world of the element's
 frame, where page globals and what page scripts put on the element are
-visible.
+visible. One action can also reach the main world: `focus` (and so the
+typing that starts with it) calls a custom element's own `focus()` there
+when the native one leaves the element unfocused, as it does for a
+component that implements focusing in page JavaScript.
 
 Each frame has its own isolated world, and `tab.evaluate(...)` uses the
 main frame's. Every call asks Chrome for the world's context in the

@@ -7,13 +7,12 @@
 //! happily as the right one. None of these defects is visible without a
 //! browser.
 //!
-//! Where the fixes live, because this file sits in a stacked PR and the
-//! answer is not "here": cases 2 to 5 shipped broken and are fixed in the
-//! **parent** commit of the stack, in `query/actionability.rs`,
-//! `input/keyboard.rs` and `tab.rs` — none of which this commit touches.
-//! Case 1 guards the move of element queries and actions into the isolated
-//! world, which has since been re-landed: queries now look up the isolated
-//! world's context on every call instead of caching it, and `attr` /
+//! Where the fixes live, since the answer is not "here": cases 2 to 5
+//! shipped broken and were fixed in `query/actionability.rs`,
+//! `input/keyboard.rs` and `tab.rs`. Case 1 guards the move of element
+//! queries and actions into the isolated world, which has since been
+//! re-landed: a query on a tab or a frame now looks up the isolated world's
+//! context on every call instead of caching it, and `attr` /
 //! `inner_text` call `Runtime.callFunctionOn` on the element's own handle,
 //! which the query created in that world. So there is no cached `contextId`
 //! left to go stale.

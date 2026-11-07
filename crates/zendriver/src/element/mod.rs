@@ -254,8 +254,12 @@ impl Element {
         Ok(res["result"].clone())
     }
 
-    /// Invoke a JS function in the main world with this element bound as
-    /// the first positional argument. Accepts a function declaration whose
+    /// Invoke a JS function on this element's own handle, with the element
+    /// also bound as the first positional argument. Despite the name, this
+    /// runs where the handle lives: in zendriver's isolated world of the
+    /// element's frame, where every query creates its handles (see
+    /// `QueryScope::execution_context_id`). [`Element::evaluate_main`] is
+    /// what runs in the main world. Accepts a function declaration whose
     /// first parameter is the element handle (`function(el, ...rest){...}`)
     /// and an `args` JSON array of additional `Runtime.callFunctionOn`
     /// argument descriptors that follow the element. Returns the raw
@@ -388,7 +392,7 @@ mod tests {
     use zendriver_transport::SessionHandle;
     use zendriver_transport::testing::MockConnection;
 
-    /// `call_on_main` invokes the element's own page-world handle and binds
+    /// `call_on_main` invokes the element's own handle and binds
     /// it as the first positional argument, *ahead of* the caller's `args`.
     /// Every declaration routed through it therefore has to open with a
     /// leading parameter to absorb that handle.
@@ -417,7 +421,7 @@ mod tests {
             }
         });
 
-        // A single dispatch, straight at the page-world handle: no
+        // A single dispatch, straight at the element's own handle: no
         // isolated-world handshake is served here, so a path that grew one
         // would trip this wait's timeout rather than hang the suite.
         let id = expect(&mut mock, "Runtime.callFunctionOn").await;

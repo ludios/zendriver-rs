@@ -55,13 +55,16 @@ const DEFAULT_ACTIONABILITY_TIMEOUT: Duration = Duration::from_secs(5);
 /// value-setter and fires bubbled `input` + `change` events.
 ///
 /// React installs a per-instance `_valueTracker` whose own `value` setter
-/// shadows the prototype's. A direct `this.value = v` goes through that
-/// tracker, which updates its cached value and the DOM together — so the
-/// `input` event it then sees reports "no change" and React skips `onChange`,
-/// reverting the field on the next render. Calling the *prototype's*
-/// `value` setter (resolved via `Object.getOwnPropertyDescriptor`) bypasses
-/// the tracker, leaving its cached value stale so React fires `onChange`
-/// correctly. Falls back to a plain assignment when the descriptor has no
+/// shadows the prototype's. A direct `this.value = v` from the page's main
+/// world goes through that tracker, which updates its cached value and the
+/// DOM together — so the `input` event it then sees reports "no change" and
+/// React skips `onChange`, reverting the field on the next render. Calling
+/// the *prototype's* `value` setter (resolved via
+/// `Object.getOwnPropertyDescriptor`) bypasses the tracker, leaving its
+/// cached value stale so React fires `onChange` correctly. (This runs in
+/// zendriver's isolated world, whose own wrapper of the element never has
+/// the tracker's setter; the prototype's setter is what it reaches either
+/// way.) Falls back to a plain assignment when the descriptor has no
 /// setter (non-input elements). Resolves the `<textarea>` prototype for
 /// textareas and the `<input>` prototype otherwise.
 const NATIVE_VALUE_SETTER_JS: &str = "function(el, v){ \
@@ -553,7 +556,8 @@ impl Element {
 
     /// Replace this element's text content with `value`.
     ///
-    /// Sets `this.textContent = value` in the main world. Ports nodriver's
+    /// Sets `this.textContent = value` from zendriver's isolated world (the
+    /// DOM it changes is the page's). Ports nodriver's
     /// `Element.set_text` (element.py:771), which writes the first text-child
     /// node's value via `DOM.setNodeValue`; assigning `textContent` is the
     /// simpler equivalent with the same observable result — the element's
@@ -788,7 +792,7 @@ impl Element {
             };
             let cx = bbox.x + bbox.width / 2.0;
             let cy = bbox.y + bbox.height / 2.0;
-            // Inject the dot in the main world with the element bound (house
+            // Inject the dot from the isolated world with the element bound (house
             // pattern); the args carry the viewport-center coords + lifetime.
             // Leading `el` absorbs the element handle `call_on_main` prepends,
             // so `cx`/`cy`/`ms` line up with the args passed below.

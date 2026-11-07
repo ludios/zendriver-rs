@@ -21,6 +21,10 @@ impl Element {
     /// Wraps `js` as `function(el){ return (<js>) }`, with `el` (and `this`)
     /// bound to the element. The returned value is deserialized into `T`.
     ///
+    /// One exception to "of the element's frame": an element found in an
+    /// iframe whose handle has gone stale is re-found by running its query
+    /// again on the top-level page, so the call runs there.
+    ///
     /// Use this for stealth-safe reads — the isolated world doesn't share
     /// scope with page scripts, so monkeypatched DOM prototypes don't lie
     /// to you. For cases where you need page globals (e.g. reading a custom
