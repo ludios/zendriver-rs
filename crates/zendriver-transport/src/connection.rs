@@ -1,5 +1,6 @@
 //! `Connection` — the public handle to the transport actor.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -158,6 +159,12 @@ pub(crate) struct ConnectionInner {
     /// replays a past end). It also tells a call that finds the actor gone
     /// why it is gone; see [`actor_gone_error`].
     pub(crate) generation_end: Mutex<Option<GenerationEnd>>,
+    /// The sessions that Chrome has detached (`Target.detachedFromTarget`),
+    /// recorded by the actor before it broadcasts the detach, so that a
+    /// [`SessionHandle::subscribe_accounted`](crate::session::SessionHandle::subscribe_accounted)
+    /// that starts after the detach still ends. Grows by one entry per
+    /// detached session over the connection's life.
+    pub(crate) detached_sessions: Mutex<HashSet<String>>,
     /// Cancellation token of the *current* actor. Swapped on reconnect: the
     /// old actor is cancelled (its already-dead `pending` drains) and the new
     /// actor gets a fresh token. Each spawned actor owns its own clone, so
@@ -211,6 +218,7 @@ impl std::fmt::Debug for ConnectionInner {
             .field("accounted_tx", &self.accounted_tx)
             .field("generation", &self.generation)
             .field("generation_end", &self.generation_end)
+            .field("detached_sessions", &self.detached_sessions)
             .field("shutdown", &self.shutdown)
             .field("observer_timeout", &self.observer_timeout)
             .field("call_timeout_ms", &self.call_timeout_ms)
@@ -923,6 +931,7 @@ where
         accounted_tx: accounted_tx.clone(),
         generation: AtomicU64::new(1),
         generation_end: Mutex::new(None),
+        detached_sessions: Mutex::new(HashSet::new()),
         shutdown: Mutex::new(shutdown.clone()),
         observer_timeout,
         call_timeout_ms: AtomicU64::new(DEFAULT_CALL_TIMEOUT.as_millis() as u64),
@@ -1408,6 +1417,7 @@ mod tests {
             accounted_tx,
             generation: AtomicU64::new(1),
             generation_end: Mutex::new(None),
+            detached_sessions: Mutex::new(HashSet::new()),
             shutdown: Mutex::new(CancellationToken::new()),
             observer_timeout: DEFAULT_OBSERVER_TIMEOUT,
             call_timeout_ms: AtomicU64::new(DEFAULT_CALL_TIMEOUT.as_millis() as u64),

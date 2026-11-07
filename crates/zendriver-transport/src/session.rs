@@ -118,16 +118,38 @@ impl SessionHandle {
     /// sends no event of the session after that: at the
     /// `Target.detachedFromTarget` naming the session, the stream yields
     /// [`AccountedRawEvent::Shutdown`], with that event's generation, and
-    /// then ends. A stream that misses the detach (because it subscribed
-    /// after the detach, or lost the detach in a `Lagged` gap) never ends:
-    /// like the connection's stream, it reports the connection's end, and
-    /// then stays open.
+    /// then ends. A stream that subscribes after the detach yields that
+    /// `Shutdown` (with the current generation) at once, and ends. A stream
+    /// that lost the detach in a `Lagged` gap never ends: like the
+    /// connection's stream, it reports the connection's end, and then stays
+    /// open.
     pub fn subscribe_accounted(
         &self,
     ) -> impl Stream<Item = AccountedRawEvent> + Send + Unpin + use<> {
-        let events = self.inner.conn.subscribe_raw_accounted();
-        let state = Some((events, self.inner.session_id.clone()));
+        // Subscribe first, then check for a past detach: the actor records a
+        // detach before it broadcasts it, so a detach that this check misses
+        // arrives on the subscription, and one that the subscription misses
+        // (because it subscribed later) is found here.
+        let raw = self.inner.conn.subscribe_raw_accounted();
+        let session_id = self.inner.session_id.clone();
+        let detached_already = session_id.as_ref().is_some_and(|sid| {
+            self.inner
+                .conn
+                .inner
+                .detached_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(sid)
+        });
+        let past_detach = detached_already.then(|| AccountedRawEvent::Shutdown {
+            generation: self.inner.conn.connection_generation(),
+        });
         // The state is `None` after the detach, which ends the stream.
+        let state = if detached_already {
+            None
+        } else {
+            Some((raw, session_id))
+        };
         let events = futures::stream::unfold(state, |state| async move {
             let (mut events, session_id) = state?;
             loop {
@@ -153,7 +175,7 @@ impl SessionHandle {
             }
         });
         // An `Unfold` panics if polled after its end.
-        Box::pin(events.fuse())
+        Box::pin(futures::stream::iter(past_detach).chain(events).fuse())
     }
 }
 
@@ -262,6 +284,30 @@ mod tests {
         }
         assert!(next_within_a_second(&mut events).await.is_none());
         assert!(next_within_a_second(&mut events).await.is_none());
+    }
+
+    /// A flat session's accounted stream that starts after the session's
+    /// detach ends at once, with `Shutdown`.
+    #[tokio::test]
+    async fn flat_accounted_stream_started_after_the_detach_ends_at_once() {
+        let (mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn, "S1");
+        // Seen through this stream, so that the actor has processed the
+        // detach before the next subscription.
+        let mut before = sess.subscribe_accounted();
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S1" }))
+            .await;
+        assert!(matches!(
+            next_within_a_second(&mut before).await,
+            Some(AccountedRawEvent::Shutdown { generation: 1 })
+        ));
+
+        let mut after = sess.subscribe_accounted();
+        match next_within_a_second(&mut after).await {
+            Some(AccountedRawEvent::Shutdown { generation: 1 }) => {}
+            other => panic!("expected Shutdown, got {other:?}"),
+        }
+        assert!(next_within_a_second(&mut after).await.is_none());
     }
 
     /// A root session has no session id for a detach to name: a detach on
