@@ -1317,7 +1317,7 @@ impl Tab {
     /// # Ok(()) }
     /// ```
     pub async fn evaluate<T: DeserializeOwned>(&self, js: impl AsRef<str>) -> Result<T> {
-        self.main_frame().await?.evaluate(js).await
+        self.main_frame_handle().evaluate(js).await
     }
 
     /// Evaluate a JavaScript expression in the page main world.
@@ -1414,10 +1414,24 @@ impl Tab {
     }
 
     /// The `executionContextId` of zendriver's isolated world in the current
-    /// document of this tab's main frame: [`Frame::ensure_isolated_world`]
-    /// on [`Tab::main_frame`].
+    /// document of this tab's main frame.
     pub(crate) async fn ensure_isolated_world(&self) -> Result<i64> {
-        self.main_frame().await?.ensure_isolated_world().await
+        self.main_frame_handle().ensure_isolated_world().await
+    }
+
+    /// A new [`Frame`] handle on this tab's main frame, whose id is the
+    /// target id, for running zendriver's JavaScript there. Not
+    /// [`Tab::main_frame`], which would create its cached `Frame` early;
+    /// nothing keeps that one's URL current.
+    fn main_frame_handle(&self) -> Frame {
+        Frame::new(
+            self.target_id().to_string(),
+            None,
+            String::new(),
+            None,
+            self.inner.session.clone(),
+            Arc::downgrade(&self.inner),
+        )
     }
 
     /// Get the tab's current URL.
@@ -3492,16 +3506,12 @@ mod tests {
                 let t = tab.clone();
                 async move { t.evaluate::<i32>(value.to_string()).await }
             });
-            if value == 1 {
-                let id_tree = expect(&mut mock, "Page.getFrameTree").await;
-                mock.reply(
-                    id_tree,
-                    json!({ "frameTree": { "frame": { "id": "MAIN_FRAME" } } }),
-                )
-                .await;
-            }
             let id_world = expect(&mut mock, "Page.createIsolatedWorld").await;
-            assert_eq!(mock.last_sent()["params"]["frameId"], "MAIN_FRAME");
+            assert_eq!(
+                mock.last_sent()["params"]["frameId"],
+                tab.target_id(),
+                "the main frame's id is the target id",
+            );
             assert_eq!(mock.last_sent()["params"]["worldName"], "zendriver-eval");
             mock.reply(id_world, json!({ "executionContextId": context }))
                 .await;
@@ -3515,6 +3525,10 @@ mod tests {
             .await;
             assert_eq!(fut.await.unwrap().unwrap(), value);
         }
+        assert!(
+            tab.inner.main_frame.get().is_none(),
+            "evaluate must not create the Frame that main_frame() caches",
+        );
         conn.shutdown();
     }
 

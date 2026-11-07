@@ -39,27 +39,11 @@ pub(crate) async fn expect(mock: &mut MockConnection, method: &str) -> u64 {
 
 /// Serve the `Page.createIsolatedWorld` that a document-wide query or an
 /// isolated-world evaluation sends before its `Runtime.evaluate`, answering
-/// with execution context `context`. On a tab's first such call, also
-/// answer the `Page.getFrameTree` before it, which looks up the tab's main
-/// frame (as `MAIN_FRAME`). Skips any other command, as [`expect`] does.
+/// with execution context `context`.
 pub(crate) async fn serve_isolated_world(mock: &mut MockConnection, context: i64) {
-    loop {
-        let Some((method, id)) = mock.recv_cmd_timeout(EXPECT_TIMEOUT).await else {
-            panic!("timed out waiting for Page.createIsolatedWorld");
-        };
-        match method.as_str() {
-            "Page.getFrameTree" => {
-                let tree = json!({ "frameTree": { "frame": { "id": "MAIN_FRAME" } } });
-                mock.reply(id, tree).await;
-            }
-            "Page.createIsolatedWorld" => {
-                mock.reply(id, json!({ "executionContextId": context }))
-                    .await;
-                return;
-            }
-            _ => {}
-        }
-    }
+    let id = expect(mock, "Page.createIsolatedWorld").await;
+    mock.reply(id, json!({ "executionContextId": context }))
+        .await;
 }
 
 /// The execution context that [`expect_tab_query`] gives the isolated world.
