@@ -2251,7 +2251,7 @@ impl BrowserInner {
     /// `events` is a subscription to [`Self::conn`] made before Chrome could
     /// attach the target, so that it holds the target's detach, if any.
     ///
-    /// Returns the tab. Returns [`ZendriverError::TabNotFound`] at once if
+    /// Returns the tab. Returns [`ZendriverError::TabSetup`] at once if
     /// Chrome detaches the target first (as the transport does when an
     /// observer fails: the log says which), or once
     /// [`Self::tab_setup_budget`] has elapsed; and
@@ -2291,8 +2291,12 @@ impl BrowserInner {
                         if event.method == "Target.detachedFromTarget"
                             && event.params["targetId"] == target_id =>
                     {
-                        warn!(target_id, "the target was detached before its tab was set up");
-                        return Err(ZendriverError::TabNotFound(target_id.to_string()));
+                        return Err(ZendriverError::TabSetup {
+                            target_id: target_id.to_string(),
+                            reason: "Chrome detached the target first, as the transport does \
+                                     when an observer fails on it (the log says which)"
+                                .to_string(),
+                        });
                     }
                     Some(
                         AccountedRawEvent::Disconnected { .. } | AccountedRawEvent::Shutdown { .. },
@@ -2301,12 +2305,10 @@ impl BrowserInner {
                     Some(_) => {}
                 },
                 () = tokio::time::sleep_until(deadline) => {
-                    warn!(
-                        target_id,
-                        budget = ?self.tab_setup_budget,
-                        "the target's tab was not set up within the budget",
-                    );
-                    return Err(ZendriverError::TabNotFound(target_id.to_string()));
+                    return Err(ZendriverError::TabSetup {
+                        target_id: target_id.to_string(),
+                        reason: format!("it was not set up within {:?}", self.tab_setup_budget),
+                    });
                 }
             }
         }
@@ -3498,10 +3500,12 @@ pub(crate) async fn finish_connect(
 
     // On `connect`, the user's other tabs, which are set up meanwhile, so
     // that `Browser::tabs` lists them once `connect` returns. A tab that
-    // isn't set up (it closed, say) is only logged, by `wait_for_tab`.
+    // isn't set up (it closed, say) is only logged.
     let inner_ref = &inner;
     futures::future::join_all(user_tabs.into_iter().map(|(id, mut events)| async move {
-        let _ = inner_ref.wait_for_tab(&mut events, &id).await;
+        if let Err(error) = inner_ref.wait_for_tab(&mut events, &id).await {
+            warn!(%error, "one of the tabs open at connect was not set up");
+        }
     }))
     .await;
 
@@ -3921,7 +3925,7 @@ impl BrowserBuilder {
     /// fails or the configured screen is one that headless Chrome can't take
     /// (see [`StealthObserver::headless_flags`]),
     /// [`ZendriverError::Transport`] when the WebSocket attach times out, and
-    /// [`ZendriverError::TabNotFound`] when the main tab isn't set up: an
+    /// [`ZendriverError::TabSetup`] when the main tab isn't set up: an
     /// observer fails on its target, or the observers take longer than 5 s
     /// each.
     ///
@@ -4278,7 +4282,7 @@ impl BrowserBuilder {
     /// with the reply's status and the start of its body);
     /// [`BrowserError::WsTimeout`] when that reply takes too long;
     /// [`ZendriverError::Transport`] when the WebSocket attach fails; and
-    /// [`ZendriverError::TabNotFound`] when the main tab isn't set up: an
+    /// [`ZendriverError::TabSetup`] when the main tab isn't set up: an
     /// observer fails on its target, or the observers take longer than 5 s
     /// each.
     ///
@@ -4796,7 +4800,7 @@ impl Browser {
     ///
     /// # Errors
     ///
-    /// Returns [`ZendriverError::TabNotFound`] if the new tab isn't set up:
+    /// Returns [`ZendriverError::TabSetup`] if the new tab isn't set up:
     /// an observer fails on its target, or the observers take longer than
     /// 5 s each.
     ///
@@ -4848,7 +4852,7 @@ impl Browser {
     ///
     /// # Errors
     ///
-    /// Same as [`Browser::new_tab`]: [`ZendriverError::TabNotFound`] if the
+    /// Same as [`Browser::new_tab`]: [`ZendriverError::TabSetup`] if the
     /// new window's tab isn't set up.
     ///
     /// # Examples
@@ -7360,7 +7364,7 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(
-            matches!(err, ZendriverError::TabNotFound(ref t) if t == "T1"),
+            matches!(err, ZendriverError::TabSetup { ref target_id, .. } if target_id == "T1"),
             "{err:?}"
         );
     }
@@ -7378,7 +7382,7 @@ mod tests {
 
         let err = fut.await.unwrap().unwrap_err();
         assert!(
-            matches!(err, ZendriverError::TabNotFound(ref t) if t == "T1"),
+            matches!(err, ZendriverError::TabSetup { ref target_id, .. } if target_id == "T1"),
             "{err:?}"
         );
     }

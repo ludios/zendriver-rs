@@ -542,6 +542,14 @@ excluded = "error variant, not an operation; a CDP call going unanswered within 
 api = "zendriver::ZendriverError::CdpTimeout"
 excluded = "crate-root re-export of the above variant; same per-tool failure surface"
 
+[[entry]]
+api = "zendriver::error::ZendriverError::TabSetup"
+excluded = "error variant, not an operation; a new tab whose observer chain failed or ran out of time, surfaced as a failure of browser_open (the main tab) or browser_tab_new"
+
+[[entry]]
+api = "zendriver::ZendriverError::TabSetup"
+excluded = "crate-root re-export of the above variant; same failure surface"
+
 # ── Per-context proxy auth — first-class API (BrowserContextBuilder) ───────
 [[entry]]
 api = "zendriver::browser::Browser::browser_context"

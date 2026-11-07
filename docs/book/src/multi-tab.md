@@ -33,14 +33,16 @@ fully-initialised [`Tab`]:
 2. Stealth bootstrap re-applied via the auto-attach observer chain.
 3. Isolated-world ready for `evaluate()` calls.
 
-Internally, `new_tab*` waits up to 5 s for the new target to appear in
-the tab registry, and returns as soon as it does — typically within a
-few milliseconds. If the auto-attach observer crashes or is misconfigured,
-you'll get [`ZendriverError::TabNotFound`] after the 5 s window.
+Internally, `new_tab*` waits for the observer chain to set up the new
+target's tab, and returns as soon as it has — typically within a few
+milliseconds. If an observer fails on the target, the transport detaches
+it, and you get [`ZendriverError::TabSetup`] at once; you get it too if
+the setup takes longer than 5 s for each observer in the chain.
+`launch()` and `connect()` wait the same way for the main tab.
 
 [`Browser::new_tab()`]: https://docs.rs/zendriver/latest/zendriver/struct.Browser.html#method.new_tab
 [`Browser::new_tab_at()`]: https://docs.rs/zendriver/latest/zendriver/struct.Browser.html#method.new_tab_at
-[`ZendriverError::TabNotFound`]: https://docs.rs/zendriver/latest/zendriver/enum.ZendriverError.html
+[`ZendriverError::TabSetup`]: https://docs.rs/zendriver/latest/zendriver/enum.ZendriverError.html#variant.TabSetup
 
 ## Iterating tabs
 

@@ -147,6 +147,25 @@ mod tests {
         assert_eq!(data["suggested_next"], "browser_html");
     }
 
+    /// A tab that wasn't set up (on `browser_open`, the main tab, say) is
+    /// reported with its cause, and with no hint: `browser_tab_list` can't
+    /// help, as no tab was registered, and none at all is open when
+    /// `browser_open` fails.
+    #[test]
+    fn tab_setup_names_its_cause_and_no_next_tool() {
+        let inner = ZendriverError::TabSetup {
+            target_id: "T1".into(),
+            reason: "Chrome detached the target first".into(),
+        };
+        let e = map_error(McpServerError::from(inner));
+        assert!(
+            e.message.contains("Chrome detached the target first"),
+            "{}",
+            e.message
+        );
+        assert!(e.data.is_none(), "{:?}", e.data);
+    }
+
     #[test]
     fn from_zendriver_error_lets_question_mark_work() {
         // Smoke: `?` operator goes ZendriverError -> McpServerError -> ErrorData.

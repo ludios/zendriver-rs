@@ -127,7 +127,7 @@ async fn launch_fails_at_once_when_an_observer_fails_on_the_main_target() {
         .await;
     let elapsed = started.elapsed();
     let err = launched.expect_err("launched despite the failing observer");
-    assert!(matches!(err, ZendriverError::TabNotFound(_)), "{err:?}");
+    assert!(matches!(err, ZendriverError::TabSetup { .. }), "{err:?}");
     assert!(
         elapsed < Duration::from_secs(10),
         "failed only after {elapsed:?}"

@@ -1111,6 +1111,9 @@ pub zendriver::error::ZendriverError::Serde(serde_json::error::Error)
 pub zendriver::error::ZendriverError::Stealth(alloc::boxed::Box<zendriver_stealth::error::StealthError>)
 pub zendriver::error::ZendriverError::Storage(alloc::string::String)
 pub zendriver::error::ZendriverError::TabNotFound(alloc::string::String)
+pub zendriver::error::ZendriverError::TabSetup
+pub zendriver::error::ZendriverError::TabSetup::reason: alloc::string::String
+pub zendriver::error::ZendriverError::TabSetup::target_id: alloc::string::String
 pub zendriver::error::ZendriverError::Timeout(core::time::Duration)
 pub zendriver::error::ZendriverError::Transport(alloc::boxed::Box<zendriver_transport::error::TransportError>)
 impl core::convert::From<serde_json::error::Error> for zendriver::error::ZendriverError
@@ -6508,6 +6511,9 @@ pub zendriver::ZendriverError::Serde(serde_json::error::Error)
 pub zendriver::ZendriverError::Stealth(alloc::boxed::Box<zendriver_stealth::error::StealthError>)
 pub zendriver::ZendriverError::Storage(alloc::string::String)
 pub zendriver::ZendriverError::TabNotFound(alloc::string::String)
+pub zendriver::ZendriverError::TabSetup
+pub zendriver::ZendriverError::TabSetup::reason: alloc::string::String
+pub zendriver::ZendriverError::TabSetup::target_id: alloc::string::String
 pub zendriver::ZendriverError::Timeout(core::time::Duration)
 pub zendriver::ZendriverError::Transport(alloc::boxed::Box<zendriver_transport::error::TransportError>)
 impl core::convert::From<serde_json::error::Error> for zendriver::error::ZendriverError

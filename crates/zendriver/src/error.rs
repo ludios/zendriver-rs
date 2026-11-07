@@ -159,11 +159,22 @@ pub enum ZendriverError {
     #[error("frame not found: {0}")]
     FrameNotFound(String),
 
-    /// Tab lookup by target_id / session_id failed, or a new target's tab
-    /// (a new tab, or a tab that launch or connect sets up) wasn't set up:
-    /// an observer failed on the target, or its setup ran out of time.
+    /// Tab lookup by target_id / session_id failed.
     #[error("tab not found: {0}")]
     TabNotFound(String),
+
+    /// The tab of a new page target wasn't set up: of a tab that
+    /// [`crate::Browser::new_tab`] (or a sibling) opened, or of one that
+    /// `launch` or `connect` sets up, such as the main tab. Chrome detached
+    /// the target first, which the transport does when an observer fails on
+    /// it, or the setup didn't end within its budget (5 s for each observer).
+    #[error("the tab of target {target_id} was not set up: {reason}")]
+    TabSetup {
+        /// The id of the page target.
+        target_id: String,
+        /// What happened instead, for a human to read.
+        reason: String,
+    },
 
     /// A cookie operation failed (CDP refusal, malformed payload, etc.).
     #[error("cookie operation failed: {0}")]
@@ -724,6 +735,15 @@ mod tests {
     fn display_frame_not_found() {
         let e = ZendriverError::FrameNotFound("F1".into());
         assert_eq!(e.to_string(), "frame not found: F1");
+    }
+
+    #[test]
+    fn display_tab_setup_names_the_target_and_the_reason() {
+        let e = ZendriverError::TabSetup {
+            target_id: "T1".into(),
+            reason: "no".into(),
+        };
+        assert_eq!(e.to_string(), "the tab of target T1 was not set up: no");
     }
 
     #[test]

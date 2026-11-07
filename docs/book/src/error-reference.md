@@ -31,7 +31,8 @@ new variants may land in minor releases.
 | `NotRefreshable` | An element returned from raw `evaluate()` went stale and can't be replayed (no underlying selector). | Use `tab.find()` instead of `evaluate` when you need an element you'll hold across DOM mutations. |
 | `NotActionable(Duration, reason)` | Element wasn't visible/enabled/stable/hit-testable within the gate timeout. | See [FAQ entry](./faq.md#why-am-i-getting-notactionable). Use `click_fast` to skip the gate when intentional. |
 | `FrameNotFound(String)` | `tab.frame_by_url/name/id(...)` matched no frame. | Confirm the iframe is loaded; `tab.frames().await?` to inspect what frames Chrome sees. |
-| `TabNotFound(String)` | Tab registry lookup failed, or a new tab (from `new_tab()`, or the main tab from `launch()` / `connect()`) wasn't set up: an observer failed on its target, or the observers took longer than 5 s each. | Look in the log for an observer that failed or timed out; otherwise restart the browser, and report it as a bug if it happens with a reliable repro. |
+| `TabNotFound(String)` | Tab registry lookup failed. | Use `browser.tabs()` to list the live tabs; report it as a bug if it happens with a reliable repro. |
+| `TabSetup { target_id, reason }` | A new tab (from `new_tab()`, or the main tab from `launch()` / `connect()`) wasn't set up: an observer failed on its target, so the transport detached it, or the observers took longer than 5 s each. | Look in the log for the observer that failed or timed out. |
 | `Cookie(String)` | Cookie operation refused by Chrome (malformed domain, mixed origin, etc.). | Read the message — most often a domain / path mismatch. |
 | `Storage(String)` | DOM storage operation refused (origin mismatch). | Confirm `tab.url()` matches the storage origin before the call. |
 | `HistoryNavigation(String)` | `back()` / `forward()` with no entry to go to. | Check `tab.history_length().await?` first. |
