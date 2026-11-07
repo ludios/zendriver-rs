@@ -1,8 +1,8 @@
 //! Recognizing Chrome's answer for an execution context that no longer
 //! exists. Zendriver's own JavaScript runs in its isolated world, whose
 //! context [`crate::frame::Frame::ensure_isolated_world`] looks up anew for
-//! each call; a navigation can still destroy that context before the call
-//! reaches it.
+//! each call; a navigation can still destroy that context before Chrome
+//! handles the command that uses its id.
 
 /// Whether `e` is Chrome saying that the `executionContextId` sent with a
 /// call names no context (typically one that a navigation destroyed after

@@ -18,10 +18,11 @@ use zendriver_testkit::{
     FixtureServer, SITE_A, SITE_B, assert_eventually, eval, launch_for_test, load,
 };
 
-/// How many same-origin iframes `/many-frames` embeds. The page's renderer
+/// How many same-origin iframes `/many-frames` embeds. A new renderer
 /// process numbers its execution contexts from 1 as it creates them, and
-/// each iframe adds at least one, so the contexts of these iframes take
-/// every small id.
+/// each iframe adds at least one, so one of these iframes' contexts is
+/// likely to get the id that the previous page's isolated world had. The
+/// test that uses this checks that one did.
 const IFRAMES: usize = 12;
 
 /// A page script that wraps the DOM methods and getters that element
@@ -129,24 +130,25 @@ async fn isolated_world_id(tab: &Tab) -> i64 {
     reply["executionContextId"].as_i64().unwrap()
 }
 
-/// `tab`'s only iframe, once the frame registry has it.
-async fn only_child_frame(tab: &Tab) -> Frame {
+/// `tab`'s iframe named `child`, once the frame registry has it under that
+/// name. The registry replaces a frame's entry when it learns the frame's
+/// name, and only the new entry's URL is kept current.
+async fn child_frame(tab: &Tab) -> Frame {
     assert_eventually(Duration::from_secs(10), "the iframe registers", || async {
-        tab.frames().await.unwrap().iter().any(|f| !f.is_main())
+        tab.frame_by_name("child").await.unwrap().is_some()
     })
     .await;
-    let frames = tab.frames().await.unwrap();
-    frames.into_iter().find(|f| !f.is_main()).unwrap()
+    tab.frame_by_name("child").await.unwrap().unwrap()
 }
 
 /// After a cross-site navigation, `Tab::evaluate`, `Frame::evaluate` and
 /// `Element::evaluate` must run in the new document of the main frame.
 ///
-/// A cross-site navigation moves the page into a new renderer process, and
-/// the new process numbers its execution contexts from 1 again. So the id of
-/// a context of the previous page can name a context of the new page: here,
-/// one of an iframe's. A call that keeps using such an id gets no error; it
-/// reads the wrong document.
+/// Under site isolation, a cross-site navigation moves the page into a new
+/// renderer process, which numbers its execution contexts from 1 again. So
+/// the id of a context of the previous page can name a context of the new
+/// page: here, one of an iframe's. A call that keeps using such an id gets
+/// no error; it reads the wrong document.
 #[tokio::test]
 async fn evaluate_reads_the_new_page_after_a_cross_site_navigation() {
     let server = server().await;
@@ -206,7 +208,7 @@ async fn frame_find_reads_the_new_document_after_the_frame_navigates() {
     let tab = browser.main_tab();
 
     load(&tab, &server.url(SITE_A, "/iframe-same-origin")).await;
-    let child = only_child_frame(&tab).await;
+    let child = child_frame(&tab).await;
     let button = child.find().css("#child-button").one().await.unwrap();
     assert_eq!(button.inner_text().await.unwrap(), "Child button");
 
@@ -234,7 +236,7 @@ async fn evaluate_main_runs_in_the_main_world_of_a_same_process_iframe() {
     let browser = launch_for_test(Browser::builder()).await;
     let tab = browser.main_tab();
     load(&tab, &server.url(SITE_A, "/iframe-same-origin")).await;
-    let frame = only_child_frame(&tab).await;
+    let frame = child_frame(&tab).await;
     // A global of the iframe's main world, which no isolated world sees.
     eval(
         &tab,

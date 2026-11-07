@@ -82,10 +82,10 @@ pub(crate) struct FrameInner {
     /// frame shares the owning tab's session; OOPIFs attach to a distinct
     /// child session whose handle is plumbed in at construction.
     pub(crate) session: SessionHandle,
-    /// The `frameId` that Chrome uses for this frame now, once Chrome has
-    /// rejected `frame_id` (see [`Frame::id`]). Set by
-    /// [`Frame::ensure_isolated_world`], so that its later calls skip the
-    /// rejected id. `None` until then.
+    /// The `frameId` under which [`Frame::ensure_isolated_world`] last found
+    /// this frame in the frame tree, after Chrome had rejected `frame_id`
+    /// (see [`Frame::id`]). Its later calls try this id first. `None` until
+    /// then.
     pub(crate) rebound_frame_id: Mutex<Option<String>>,
     /// Set by [`lifecycle`] when Chrome reports this frame detached
     /// (`Page.frameDetached`). Then [`Frame::ensure_isolated_world`] fails
@@ -267,12 +267,16 @@ impl Frame {
     /// Sandboxed — no page globals visible. Result deserialized into `T`.
     /// [`crate::Tab::evaluate`] is this on the tab's main frame.
     ///
-    /// Each call first gets the id of the isolated world's context in the
-    /// frame's current document (see [`Frame::ensure_isolated_world`]), so a
-    /// `Frame` handle kept across a navigation of its frame keeps working.
-    /// If a navigation destroys that context before the expression reaches
-    /// it, Chrome answers `Cannot find context with specified id`, and the
-    /// call is retried once.
+    /// Each call first asks Chrome for the id of the isolated world's
+    /// context in the frame's current document, so a `Frame` handle kept
+    /// across a navigation of its frame keeps working. If Chrome answers the
+    /// evaluation with `Cannot find context with specified id`, because a
+    /// navigation destroyed that context after the lookup, the call is
+    /// retried once. A navigation into another renderer process in that
+    /// interval can instead hand the id to a context of the new process,
+    /// and the expression then runs there. A navigation while the
+    /// expression runs fails the call, with no retry, since the expression
+    /// may already have had effects.
     ///
     /// # Errors
     ///
@@ -317,7 +321,7 @@ impl Frame {
                     }
                     // A navigation destroyed the context after
                     // `ensure_isolated_world` returned its id; the next
-                    // iteration gets the new document's.
+                    // iteration looks up the new document's context.
                 }
             }
         }
@@ -614,15 +618,16 @@ impl Frame {
     /// The `executionContextId` of zendriver's isolated world in this
     /// frame's current document, creating the world if needed.
     ///
-    /// Asks Chrome on every call (one `Page.createIsolatedWorld`), because a
+    /// Asks Chrome on every call (with `Page.createIsolatedWorld`), because a
     /// remembered id can name a different context: a cross-process
     /// navigation numbers the new process's contexts from 1 again, so an id
     /// from the previous document can belong to, say, an iframe of the new
     /// one, and a call with it then runs there without any error. Chrome
-    /// keeps one isolated world per name, so a repeated call returns the
-    /// same context and creates nothing. The same can still happen to the
-    /// returned id if such a navigation commits before the caller uses it,
-    /// but only within that one round trip.
+    /// keeps one isolated world per name, with one context in each
+    /// document, so a repeated call on the same document returns the same
+    /// context and creates nothing. The returned id can still come to name
+    /// another context in the same way, if such a navigation commits before
+    /// Chrome handles the caller's command that uses the id.
     ///
     /// If Chrome has re-attached the frame under a fresh `frameId` (observed
     /// for `srcdoc` iframes under `--headless=new`, with no `frameDetached`
@@ -788,8 +793,9 @@ impl Frame {
 
     /// Shared post-processing for `Runtime.evaluate` responses — checks
     /// `exceptionDetails` first (raising [`ZendriverError::JsException`])
-    /// then deserializes `result.value` into `T`. Mirrors the inline tail
-    /// of [`crate::tab::Tab::evaluate`] / `evaluate_main`.
+    /// then deserializes `result.value` into `T`. Used by
+    /// [`Frame::evaluate`], and so by [`crate::tab::Tab::evaluate`];
+    /// [`crate::tab::Tab::evaluate_main`] has the same steps inline.
     #[allow(clippy::result_large_err)] // ZendriverError variance is the project-wide return type
     fn extract_value<T: DeserializeOwned>(res: &Value) -> Result<T> {
         if let Some(e) = ZendriverError::js_exception_in(res) {
@@ -943,7 +949,7 @@ mod tests {
     /// `Page.createIsolatedWorld` and `Runtime.evaluate`. `Frame::evaluate`
     /// must then look the world up again and retry once, transparently.
     #[tokio::test]
-    async fn evaluate_recreates_the_isolated_world_after_a_stale_context() {
+    async fn evaluate_retries_in_a_fresh_context_after_a_stale_one() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         let frame = frame_on(sess, "FRAME_C");
@@ -962,7 +968,8 @@ mod tests {
         mock.reply_err(id_eval, -32000, "Cannot find context with specified id")
             .await;
 
-        // The retry: a NEW isolated world, then the same expression again.
+        // The retry: the world's context in the new document, then the
+        // same expression again.
         let id_world2 = next_cmd(&mut mock, "Page.createIsolatedWorld").await;
         mock.reply(id_world2, json!({ "executionContextId": 9 }))
             .await;
@@ -1344,36 +1351,6 @@ mod tests {
         conn.shutdown();
     }
 
-    /// After a recovery, later calls go straight to the live id, instead of
-    /// being rejected on the recorded one and walking the frame tree again.
-    #[tokio::test]
-    async fn recovery_remembers_the_live_id() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let frame = stale_frame(sess, None, "");
-
-        let fut = tokio::spawn({
-            let f = frame.clone();
-            async move { f.ensure_isolated_world().await }
-        });
-        reject_then_serve_tree(&mut mock, json!([tree_frame("LIVE", "", "")])).await;
-        let id_retry = next_cmd(&mut mock, "Page.createIsolatedWorld").await;
-        mock.reply(id_retry, json!({ "executionContextId": 3 }))
-            .await;
-        assert_eq!(fut.await.unwrap().unwrap(), 3);
-
-        let fut = tokio::spawn({
-            let f = frame.clone();
-            async move { f.ensure_isolated_world().await }
-        });
-        let id_world = next_cmd(&mut mock, "Page.createIsolatedWorld").await;
-        assert_eq!(mock.last_sent()["params"]["frameId"], "LIVE");
-        mock.reply(id_world, json!({ "executionContextId": 4 }))
-            .await;
-        assert_eq!(fut.await.unwrap().unwrap(), 4);
-        conn.shutdown();
-    }
-
     /// A frame that Chrome reported detached is gone: recovery must fail
     /// instead of walking the tree, where the lone child it would bind is
     /// another frame.
@@ -1430,7 +1407,9 @@ mod tests {
 
     /// The unambiguous single-iframe page keeps recovering with no name or
     /// url to go on — the disambiguation must not make the common case
-    /// stricter.
+    /// stricter. Later calls then go straight to the recovered frame id,
+    /// instead of being rejected on the recorded one and walking the frame
+    /// tree again.
     #[tokio::test]
     async fn lone_child_still_recovers_without_name_or_url() {
         let (mut mock, conn) = MockConnection::pair();
@@ -1448,6 +1427,16 @@ mod tests {
         mock.reply(id_retry, json!({ "executionContextId": 3 }))
             .await;
         assert_eq!(fut.await.unwrap().unwrap(), 3);
+
+        let fut = tokio::spawn({
+            let f = frame.clone();
+            async move { f.ensure_isolated_world().await }
+        });
+        let id_world = next_cmd(&mut mock, "Page.createIsolatedWorld").await;
+        assert_eq!(mock.last_sent()["params"]["frameId"], "LIVE");
+        mock.reply(id_world, json!({ "executionContextId": 4 }))
+            .await;
+        assert_eq!(fut.await.unwrap().unwrap(), 4);
         conn.shutdown();
     }
 }

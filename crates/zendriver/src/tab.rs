@@ -1296,8 +1296,8 @@ impl Tab {
     /// stealth-safe execution. The result is deserialized into `T`.
     ///
     /// This is [`Frame::evaluate`] on the tab's [main frame](Tab::main_frame),
-    /// so it runs in the main frame's current document, and is retried once
-    /// if a navigation destroys that document's context mid-call.
+    /// so it runs in the main frame's current document; see there for what a
+    /// navigation during the call does.
     ///
     /// # Errors
     ///

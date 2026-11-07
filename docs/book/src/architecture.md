@@ -190,8 +190,9 @@ Each frame has its own isolated world, and `tab.evaluate(...)` uses the
 main frame's. Every call asks Chrome for the world's context in the
 frame's current document (`Page.createIsolatedWorld`, which returns the
 existing context when there is one), rather than reusing a context id
-from an earlier call. After a cross-site navigation the page runs in a
-new renderer process, which numbers its contexts from 1 again, so an old
+from an earlier call. A navigation can move the page into another
+renderer process (under site isolation, a cross-site navigation does),
+and a new renderer process numbers its contexts from 1 again, so an old
 id can name a context of the new page, such as an iframe's.
 
 ## Why these choices
