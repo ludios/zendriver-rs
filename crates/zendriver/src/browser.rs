@@ -2303,7 +2303,8 @@ impl BrowserInner {
     /// # Errors
     ///
     /// Returns [`ZendriverError::Navigation`] if the response lacks
-    /// `targetId`, and the errors of [`Self::wait_for_tab`].
+    /// `targetId`, and the errors of [`Self::wait_for_tab`]; after a
+    /// [`ZendriverError::TabSetup`], the new target is closed.
     pub(crate) async fn create_tab(
         &self,
         url: String,
@@ -2325,7 +2326,21 @@ impl BrowserInner {
             })?
             .to_string();
 
-        let tab = self.wait_for_tab(&mut events, &target_id).await?;
+        let tab = match self.wait_for_tab(&mut events, &target_id).await {
+            Ok(tab) => tab,
+            Err(e @ ZendriverError::TabSetup { .. }) => {
+                // The page may well be running (the transport releases a
+                // target it detaches), but no `Tab` tracks it, and nothing
+                // would close it: close it here. Best-effort, as the error
+                // to return is the setup's.
+                let close = json!({ "targetId": target_id });
+                if let Err(error) = self.conn.call_raw("Target.closeTarget", close, None).await {
+                    debug!(target_id, %error, "could not close a target whose tab wasn't set up");
+                }
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         if navigates {
             tab.arm_initial_navigation().await;
         }
@@ -7681,6 +7696,48 @@ mod tests {
     }
 
     // ----- Browser::new_tab + tabs + tab_count (P4 T3) -------------------
+
+    /// When an observer fails on a new tab's target, so that the transport
+    /// detaches it, `new_tab` fails with `TabSetup`, and closes the target,
+    /// which no `Tab` would track.
+    #[tokio::test]
+    async fn new_tab_closes_the_target_when_its_tab_is_not_set_up() {
+        let registrar = Arc::new(TabRegistrar::new(zendriver_stealth::InputProfile::native()));
+        let (mut mock, conn) =
+            zendriver_transport::testing::MockConnection::pair_with_observers(vec![
+                Arc::new(Fail),
+                registrar.clone(),
+            ]);
+        let inner = test_only_inner_from_conn(conn);
+        registrar.set_browser(Arc::downgrade(&inner));
+        let browser = Browser {
+            inner: inner.clone(),
+        };
+        let fut = tokio::spawn(async move { browser.new_tab().await });
+
+        let id = mock.expect_cmd("Target.createTarget").await;
+        mock.reply(id, json!({ "targetId": "T2" })).await;
+        emit_page_attach(&mock, "T2", "S2", "about:blank").await;
+        let id = mock.expect_cmd("Target.detachFromTarget").await;
+        mock.reply(id, json!({})).await;
+        let detached = json!({ "sessionId": "S2", "targetId": "T2" });
+        mock.emit_event("Target.detachedFromTarget", detached).await;
+        let id = timeout(
+            Duration::from_secs(2),
+            mock.expect_cmd("Target.closeTarget"),
+        )
+        .await
+        .expect("the target was not closed within 2s");
+        assert_eq!(mock.last_sent()["params"]["targetId"], "T2");
+        mock.reply(id, json!({ "success": true })).await;
+
+        let err = fut.await.unwrap().unwrap_err();
+        assert!(
+            matches!(err, ZendriverError::TabSetup { ref target_id, .. } if target_id == "T2"),
+            "{err:?}"
+        );
+        inner.conn.shutdown();
+    }
 
     /// End-to-end mock-drive of [`Browser::new_tab`]: send `Target.createTarget`,
     /// emit the corresponding `Target.attachedToTarget`, and assert the
