@@ -4,8 +4,8 @@
 //! `Target.attachedToTarget`, the actor pauses the new target, walks every
 //! observer serially, then releases the debugger via
 //! `Runtime.runIfWaitingForDebugger`. The observer's job is to push every
-//! UA/timezone/locale override and (for `Spoofed`) the CPU-count override
-//! and the bootstrap script _before_ the debugger releases, so the first
+//! UA/timezone/locale override and (for `Spoofed`) the CPU-count and
+//! CPU-tier overrides and the bootstrap script _before_ the debugger releases, so the first
 //! script the page runs sees the patched globals.
 
 use serde_json::json;
@@ -14,7 +14,7 @@ use zendriver_transport::{CallError, ObserverError, PausedSession, TargetObserve
 use crate::patches::{bootstrap_script, bootstrap_script_native_webgl};
 use crate::persona::GeoPos;
 use crate::persona::specs::{ScreenSpec, UaMetadata};
-use crate::{Fingerprint, Persona, ProfileKind, StealthError, StealthProfile};
+use crate::{Fingerprint, Persona, Platform, ProfileKind, StealthError, StealthProfile};
 
 /// The height that [`headless_screen_switches`] leaves for a taskbar when the
 /// screen has no `avail_height`; the default that [`ScreenSpec`] documents.
@@ -345,6 +345,29 @@ impl StealthObserver {
     }
 }
 
+/// The `navigator.cpuPerformance` tier that Chrome reports on a machine
+/// with `cores` logical processors, as `Emulation.setCPUPerformanceOverride`
+/// names it. `apple_silicon`: whether the CPU is one of Apple's M series.
+///
+/// Chrome derives the tier from the processor count and the CPU's model
+/// (`GetTierFromCpuInfo` in Chromium's
+/// `content/browser/cpu_performance/cpu_performance.cc`): 1 or 2 is low, 3
+/// or 4 mid, 5 to 10 high, and 11 or more ultra, as is an M-series (or
+/// Intel Core Ultra) CPU with 8 to 10. A fingerprint names no CPU model, so
+/// this leaves out the rest of Chrome's exceptions for particular models:
+/// low for some old CPUs with up to 4, mid for an Intel or AMD CPU with 2
+/// that isn't one of those, and high for a Ryzen or Intel N-series with 4.
+fn cpu_performance_tier(cores: u32, apple_silicon: bool) -> &'static str {
+    match cores {
+        0 => "unknown",
+        1 | 2 => "low",
+        3 | 4 => "mid",
+        8..=10 if apple_silicon => "ultra",
+        5..=10 => "high",
+        _ => "ultra",
+    }
+}
+
 #[async_trait::async_trait]
 impl TargetObserver for StealthObserver {
     fn name(&self) -> &'static str {
@@ -416,6 +439,12 @@ impl TargetObserver for StealthObserver {
 
         // `navigator.hardwareConcurrency`, in the page and its same-process
         // iframes; a worker still reports the host's.
+        //
+        // `navigator.cpuPerformance` (Chrome 152 on, in windows only) follows
+        // the same count, since Chrome derives it from the host's processors
+        // and a real machine never pairs the persona's count with the host's
+        // tier. Chrome only has the override from 153 on, so a Chrome without
+        // it reports the host's tier.
         if self.profile.kind() == ProfileKind::Spoofed {
             session
                 .call(
@@ -423,6 +452,18 @@ impl TargetObserver for StealthObserver {
                     json!({ "hardwareConcurrency": self.fingerprint.cpu_count }),
                 )
                 .await?;
+            let apple_silicon = self.fingerprint.platform == Platform::MacIntel
+                && user_agent_metadata.architecture == "arm";
+            let tier = cpu_performance_tier(self.fingerprint.cpu_count, apple_silicon);
+            let reply = session
+                .call(
+                    "Emulation.setCPUPerformanceOverride",
+                    json!({ "performanceTier": tier }),
+                )
+                .await;
+            if !matches!(reply, Err(CallError::Rpc(-32601, ..))) {
+                reply?;
+            }
         }
 
         // Focus emulation keeps the (always-backgrounded) headless tab from
@@ -622,6 +663,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
+            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
@@ -700,6 +742,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
+            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setLocaleOverride",
             "Page.addScriptToEvaluateOnNewDocument",
@@ -786,6 +829,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
+            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setLocaleOverride",
             "Page.addScriptToEvaluateOnNewDocument",
@@ -856,6 +900,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
+            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
@@ -926,6 +971,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
+            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
@@ -1001,6 +1047,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
+            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setGeolocationOverride",
             "Page.addScriptToEvaluateOnNewDocument",
@@ -1076,6 +1123,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
+            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
@@ -1144,6 +1192,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
+            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
@@ -1337,6 +1386,13 @@ mod persona_reaches_cdp_tests {
     /// missing override shows up as an absent entry in the returned list, and
     /// a wedged observer fails on the per-frame budget instead of hanging.
     async fn drive_attach(observer: StealthObserver) -> Vec<Value> {
+        drive_attach_without(observer, &[]).await
+    }
+
+    /// [`drive_attach`], against a Chrome that lacks each command in
+    /// `missing`: it answers them `-32601`, as Chrome answers a command it
+    /// doesn't have.
+    async fn drive_attach_without(observer: StealthObserver, missing: &[&str]) -> Vec<Value> {
         const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
         let (mut mock, conn) =
@@ -1360,7 +1416,12 @@ mod persona_reaches_cdp_tests {
         let mut frames = Vec::new();
         while let Some((method, id)) = mock.recv_cmd_timeout(FRAME_BUDGET).await {
             frames.push(mock.last_sent().clone());
-            mock.reply(id, json!({})).await;
+            if missing.contains(&method.as_str()) {
+                mock.reply_err(id, -32601, &format!("'{method}' wasn't found"))
+                    .await;
+            } else {
+                mock.reply(id, json!({})).await;
+            }
             if method == "Runtime.runIfWaitingForDebugger" || method == "Target.detachFromTarget" {
                 break;
             }
@@ -1426,7 +1487,90 @@ mod persona_reaches_cdp_tests {
                 Some(expected),
                 "persona hardware_concurrency {pinned:?}"
             );
+            assert_eq!(
+                params(&frames, "Emulation.setCPUPerformanceOverride")["performanceTier"],
+                if expected > 10 { "ultra" } else { "high" },
+                "persona hardware_concurrency {pinned:?}"
+            );
         }
+    }
+
+    #[test]
+    fn cpu_performance_tier_follows_chromes_table() {
+        let expected = [
+            (1, false, "low"),
+            (2, false, "low"),
+            (3, false, "mid"),
+            (4, true, "mid"),
+            (5, false, "high"),
+            (8, false, "high"),
+            (8, true, "ultra"),
+            (10, false, "high"),
+            (10, true, "ultra"),
+            (11, false, "ultra"),
+            (32, false, "ultra"),
+        ];
+        for (cores, apple_silicon, tier) in expected {
+            assert_eq!(
+                cpu_performance_tier(cores, apple_silicon),
+                tier,
+                "{cores} cores, apple_silicon {apple_silicon}"
+            );
+        }
+    }
+
+    /// A Mac persona whose UA-CH architecture is `arm` has an M-series CPU,
+    /// which Chrome rates a tier higher at 8 to 10 cores.
+    #[tokio::test]
+    async fn spoofed_rates_an_arm_macs_cpu_as_apple_silicon() {
+        let fp = Fingerprint {
+            cpu_count: 8,
+            ..bare_fingerprint()
+        };
+        for (architecture, tier) in [(None, "high"), (Some("arm"), "ultra")] {
+            let ua = architecture.map(|a| crate::persona::specs::UaSpec {
+                ua_metadata: Some(UaMetadata {
+                    architecture: Some(a.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let persona = Persona {
+                ua,
+                ..Persona::default()
+            };
+            let frames = drive_attach(StealthObserver::with_persona(
+                StealthProfile::spoofed(),
+                fp.clone(),
+                persona,
+            ))
+            .await;
+            assert_eq!(
+                params(&frames, "Emulation.setCPUPerformanceOverride")["performanceTier"],
+                tier,
+                "architecture {architecture:?}"
+            );
+        }
+    }
+
+    /// Chrome 152 and older lack `Emulation.setCPUPerformanceOverride`; the
+    /// page must still get the rest of its setup.
+    #[tokio::test]
+    async fn spoofed_goes_on_without_the_cpu_tier_override() {
+        let missing = ["Emulation.setCPUPerformanceOverride"];
+        let observer = StealthObserver::with_persona(
+            StealthProfile::spoofed(),
+            bare_fingerprint(),
+            Persona::default(),
+        );
+        let frames = drive_attach_without(observer, &missing).await;
+        let methods = method_names(&frames);
+        assert!(
+            methods
+                .iter()
+                .any(|m| m == "Page.addScriptToEvaluateOnNewDocument"),
+            "{methods:?}"
+        );
     }
 
     #[tokio::test]
@@ -1641,6 +1785,7 @@ mod persona_reaches_cdp_tests {
         for absent in [
             "Emulation.setDeviceMetricsOverride",
             "Emulation.setHardwareConcurrencyOverride",
+            "Emulation.setCPUPerformanceOverride",
             "Page.addScriptToEvaluateOnNewDocument",
         ] {
             assert!(

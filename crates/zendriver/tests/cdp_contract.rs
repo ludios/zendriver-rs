@@ -66,6 +66,7 @@ const COMMANDS: &[(&str, Scope)] = &[
     ("DOMStorage.getDOMStorageItems", P),
     ("DOMStorage.removeDOMStorageItem", P),
     ("DOMStorage.setDOMStorageItem", P),
+    ("Emulation.setCPUPerformanceOverride", P),
     ("Emulation.setDeviceMetricsOverride", P),
     ("Emulation.setFocusEmulationEnabled", P),
     ("Emulation.setHardwareConcurrencyOverride", P),

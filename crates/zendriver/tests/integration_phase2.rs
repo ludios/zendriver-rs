@@ -153,3 +153,25 @@ async fn isolated_world_eval_does_not_see_page_globals() {
     );
     browser.close().await.unwrap();
 }
+
+/// Under `spoofed`, `navigator.cpuPerformance` follows the persona's CPU
+/// count instead of the host's processors: Chrome rates 1 processor as the
+/// low tier, 1.
+#[tokio::test]
+async fn spoofed_cpu_performance_follows_the_personas_cpu_count() {
+    let server = FixtureServer::start().await;
+    let pinned: Persona = PINNED_HARDWARE.parse().expect("persona JSON");
+    let builder = Browser::builder()
+        .stealth(StealthProfile::spoofed())
+        .persona_overlay(pinned);
+    let browser = launch_for_test(builder).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url("127.0.0.1", "/plain")).await;
+    let seen = eval(
+        &tab,
+        "[navigator.hardwareConcurrency, navigator.cpuPerformance]",
+    )
+    .await;
+    browser.close().await;
+    assert_eq!(seen, json!([1, 1]));
+}

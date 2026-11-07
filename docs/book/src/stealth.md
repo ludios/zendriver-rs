@@ -166,9 +166,11 @@ injects:
   of a broken image.
 
 It also sends `Emulation.setHardwareConcurrencyOverride`, so Chrome's own
-`navigator.hardwareConcurrency` reports the persona's CPU count. A
-dedicated worker still reports the host's count and memory: no override
-or patch reaches it.
+`navigator.hardwareConcurrency` reports the persona's CPU count, and
+`Emulation.setCPUPerformanceOverride`, so `navigator.cpuPerformance`
+reports the tier that Chrome gives that count (from 1 for low to 4 for
+ultra) instead of the host's tier. A dedicated worker still reports the
+host's count and memory: no override or patch reaches it.
 
 Everything else comes from Chrome itself, as under `native()`: the
 launch flags hide `navigator.webdriver` and stop WebRTC from gathering
