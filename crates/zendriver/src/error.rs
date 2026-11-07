@@ -159,7 +159,9 @@ pub enum ZendriverError {
     #[error("frame not found: {0}")]
     FrameNotFound(String),
 
-    /// Tab lookup by target_id / session_id failed.
+    /// Tab lookup by target_id / session_id failed, or a new target's tab
+    /// (a new tab, or the main tab at launch or connect) wasn't set up in
+    /// time: the target's observers didn't finish, say.
     #[error("tab not found: {0}")]
     TabNotFound(String),
 
@@ -423,9 +425,10 @@ pub enum BrowserError {
     GpuBackendUnavailable,
 
     /// Chrome printed its WS endpoint (or wrote `DevToolsActivePort`) but the
-    /// post-endpoint handshake — the WebSocket dial plus the initial
-    /// `Target.setAutoAttach` / `Target.getTargets` / `Target.attachToTarget`
-    /// round-trips — did not complete within the handshake budget.
+    /// post-endpoint handshake — the WebSocket dial, the initial
+    /// `Target.setAutoAttach` / `Target.getTargets` round-trips, and the
+    /// observers' setup of the main tab — did not complete within the
+    /// handshake budget.
     ///
     /// Distinct from [`BrowserError::WsTimeout`], which means the endpoint
     /// itself never appeared. Here Chrome *started* but its CDP responder went

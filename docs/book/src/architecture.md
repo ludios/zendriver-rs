@@ -102,6 +102,12 @@ The same observer chain re-applies stealth on every new tab — that's
 why `Browser::new_tab()` gives you a fully stealth-patched tab without
 extra code.
 
+The main tab is the exception to the pause: Chrome opened its page
+before zendriver connected, so auto-attach attaches it (once, like any
+page) without a pause, and the document already open in it has run its
+scripts. `launch()` and `connect()` return only once the observers have
+finished on it, so every document you load in it gets their setup.
+
 ## Auto-refresh on stale handles
 
 CDP returns a `RemoteObjectId` (per-context handle) for every queried
