@@ -87,7 +87,6 @@ const INVARIANTS: &[(&str, &str)] = &[
             WebGLRenderingContext.prototype.getParameter,
           'Element.prototype.getClientRects': Element.prototype.getClientRects,
           'HTMLMediaElement.prototype.canPlayType': HTMLMediaElement.prototype.canPlayType,
-          'Navigator.prototype.webdriver getter': getter(Navigator.prototype, 'webdriver'),
           'Navigator.prototype.platform getter': getter(Navigator.prototype, 'platform'),
           'Navigator.prototype.plugins getter': getter(Navigator.prototype, 'plugins'),
           'HTMLImageElement.prototype.naturalWidth getter':

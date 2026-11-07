@@ -22,7 +22,7 @@ async fn fixture_with_html(html: &str) -> MockServer {
 
 #[tokio::test]
 #[serial]
-async fn spoofed_profile_patches_navigator_webdriver_to_false() {
+async fn spoofed_profile_hides_navigator_webdriver_via_flag() {
     let mock = fixture_with_html("<!doctype html><body>hello</body>").await;
     let browser = Browser::builder()
         .stealth(StealthProfile::spoofed())
@@ -33,7 +33,10 @@ async fn spoofed_profile_patches_navigator_webdriver_to_false() {
     tab.goto(&mock.uri()).await.unwrap();
     tab.wait_for_load().await.unwrap();
     let wd: bool = tab.evaluate_main("navigator.webdriver").await.unwrap();
-    assert!(!wd, "spoofed profile must hide webdriver");
+    assert!(
+        !wd,
+        "spoofed profile hides webdriver via the AutomationControlled flag"
+    );
     browser.close().await.unwrap();
 }
 

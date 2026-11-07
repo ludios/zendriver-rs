@@ -18,7 +18,6 @@ use crate::{Fingerprint, GpuProfile, Persona, Platform, Seed, UserAgentMetadata}
 const NATIVE: &str = include_str!("patches/_native.js");
 
 // --- Identity patches (run inside the fp IIFE) ---------------------------
-const WEBDRIVER: &str = include_str!("patches/webdriver.js");
 const PLUGINS: &str = include_str!("patches/plugins.js");
 const CHROME: &str = include_str!("patches/chrome.js");
 const PERMISSIONS: &str = include_str!("patches/permissions.js");
@@ -62,8 +61,8 @@ const SCREEN: &str = include_str!("patches/screen.js");
 /// `Emulation.setDeviceMetricsOverride` was given, which resolves the same
 /// two sources the same way.
 ///
-/// Order: identity IIFE first (webdriver-most-probed-first, navigator_props
-/// last), then the PRNG definition, then each persona surface.
+/// Order: identity IIFE first, then the PRNG definition, then each persona
+/// surface.
 #[must_use]
 pub fn bootstrap_script(persona: &Persona, identity: &Fingerprint) -> String {
     bootstrap_script_impl(persona, identity, true)
@@ -240,7 +239,7 @@ fn identity_iife(persona: &Persona, identity: &Fingerprint) -> String {
     });
 
     format!(
-        "(function(fp){{\n{WEBDRIVER}\n{PLUGINS}\n{CHROME}\n{PERMISSIONS}\n{CODECS}\n{NAVIGATOR_PROPS}\n{USER_AGENT_DATA}\n{BROKEN_IMAGE}\n}})({fp_json});",
+        "(function(fp){{\n{PLUGINS}\n{CHROME}\n{PERMISSIONS}\n{CODECS}\n{NAVIGATOR_PROPS}\n{USER_AGENT_DATA}\n{BROKEN_IMAGE}\n}})({fp_json});",
     )
 }
 
@@ -683,9 +682,8 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_includes_all_nine_patches() {
+    fn bootstrap_includes_every_patch() {
         let s = bootstrap_script(&Persona::default(), &mock_identity());
-        assert!(s.contains("webdriver"), "webdriver patch missing");
         assert!(s.contains("PluginArray"), "plugins patch missing");
         assert!(s.contains("window.chrome"), "chrome patch missing");
         assert!(
@@ -1291,7 +1289,6 @@ mod tests {
         // Only the webgl block is dropped — identity IIFE + other surfaces
         // are byte-for-byte what `bootstrap_script` would emit.
         let s = bootstrap_script_native_webgl(&Persona::default(), &mock_identity());
-        assert!(s.contains("webdriver"), "webdriver patch missing");
         assert!(s.contains("PluginArray"), "plugins patch missing");
         assert!(s.contains("window.chrome"), "chrome patch missing");
         assert!(
@@ -1947,10 +1944,6 @@ mod tests {
     fn identity_patches_route_through_masking_helpers() {
         let s = bootstrap_script(&Persona::default(), &mock_identity());
         assert!(
-            s.contains("__zdGetter(Navigator.prototype, 'webdriver'"),
-            "webdriver"
-        );
-        assert!(
             s.contains("__zdGetter(Navigator.prototype, 'plugins'"),
             "plugins getter"
         );
@@ -1959,11 +1952,27 @@ mod tests {
             "permissions/codecs methods routed"
         );
         assert!(s.contains("__zdMark"), "value-fn members marked");
-        // No raw defineProperty getter on Navigator.prototype.webdriver remains.
-        assert!(
-            !s.contains("Object.defineProperty(Navigator.prototype, 'webdriver'"),
-            "webdriver should go through __zdGetter, not raw defineProperty"
-        );
+    }
+
+    /// `(needle, why)`: what the bootstrap must not contain, because Chrome
+    /// itself already gives the page the right value. A JS patch there could
+    /// only add a detectable replacement of Chrome's own function.
+    const LEFT_TO_CHROME: &[(&str, &str)] = &[(
+        "webdriver",
+        "the launch flag --disable-blink-features=AutomationControlled makes \
+         Chrome's own navigator.webdriver false",
+    )];
+
+    #[test]
+    fn bootstrap_leaves_alone_what_chrome_sets_natively() {
+        for s in [
+            bootstrap_script(&Persona::default(), &mock_identity()),
+            bootstrap_script_native_webgl(&Persona::default(), &mock_identity()),
+        ] {
+            for (needle, why) in LEFT_TO_CHROME {
+                assert!(!s.contains(needle), "bootstrap contains {needle:?}: {why}");
+            }
+        }
     }
 
     #[test]

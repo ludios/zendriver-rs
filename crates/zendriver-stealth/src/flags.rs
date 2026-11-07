@@ -146,12 +146,9 @@ fn shared_stealth_flags(native_isolation: bool) -> Vec<String> {
         "--disable-session-crashed-bubble".into(),
         "--disable-search-engine-choice-screen".into(),
         "--remote-allow-origins=*".into(),
-        // Stop Blink injecting `navigator.webdriver` (native getter → `true`).
-        // py-zendriver sets this by default (config.py); ALL non-Off profiles
-        // need it. Previously it lived only in the Spoofed branch, so the
-        // Native profile leaked `navigator.webdriver === true` — an instant
-        // bot tell. The Spoofed JS webdriver shim also relies on this flag so
-        // Chrome's AutomationControlled hook can't re-inject over the shim.
+        // Make Chrome's own `navigator.webdriver` getter return false instead
+        // of true, with nothing patched in the page. py-zendriver sets this
+        // by default (config.py); ALL non-Off profiles need it.
         "--disable-blink-features=AutomationControlled".into(),
         // WebRTC IP-leak prevention (zendriver Python disable_webrtc=True default)
         "--webrtc-ip-handling-policy=disable_non_proxied_udp".into(),
