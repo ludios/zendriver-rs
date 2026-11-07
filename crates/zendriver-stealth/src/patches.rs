@@ -5,7 +5,9 @@
 //! The bootstrap patches only what Chrome can't be told over CDP or at
 //! launch: the UA, the UA client hints, `navigator.platform` and
 //! `navigator.languages` come from the observer's
-//! `Emulation.setUserAgentOverride` instead, so the page reads them from
+//! `Emulation.setUserAgentOverride` instead, and
+//! `navigator.hardwareConcurrency` from its
+//! `Emulation.setHardwareConcurrencyOverride`, so the page reads them from
 //! Chrome's own getters.
 //!
 //! The identity patches run inside a single IIFE called with a serialized
@@ -25,7 +27,7 @@ const NATIVE: &str = include_str!("patches/_native.js");
 
 // --- Identity patches (run inside the fp IIFE) ---------------------------
 const CODECS: &str = include_str!("patches/codecs.js");
-const NAVIGATOR_PROPS: &str = include_str!("patches/navigator_props.js");
+const DEVICE_MEMORY: &str = include_str!("patches/device_memory.js");
 const BROKEN_IMAGE: &str = include_str!("patches/broken_image.js");
 
 // --- Persona surface patches (appended after the identity IIFE) ----------
@@ -50,7 +52,7 @@ const SCREEN: &str = include_str!("patches/screen.js");
 
 /// Build the bootstrap script for the spoofed profile.
 ///
-/// `identity` supplies the hardware that `persona` doesn't pin; `persona`
+/// `identity` supplies the memory size that `persona` doesn't pin; `persona`
 /// drives the fingerprint surfaces, and its platform picks the GPU that the
 /// WebGL and WebGPU patches present.
 ///
@@ -206,16 +208,12 @@ fn resolved_platform(persona: &Persona, identity: &Fingerprint) -> Platform {
 }
 
 /// Emit the identity patches wrapped in `(function(fp){ ... })(fpJson)`,
-/// where `fp` holds the hardware they present: the `persona`'s where it pins
-/// it, else the `identity`'s.
+/// where `fp` holds the memory size they present: the `persona`'s if it
+/// pins one, else the `identity`'s.
 fn identity_iife(persona: &Persona, identity: &Fingerprint) -> String {
-    let cpu = persona.hardware_concurrency.unwrap_or(identity.cpu_count);
     let mem = persona.device_memory_gb.unwrap_or(identity.memory_gb);
-    let fp_json = json!({
-        "cpuCount": cpu,
-        "memoryGb": mem,
-    });
-    format!("(function(fp){{\n{CODECS}\n{NAVIGATOR_PROPS}\n{BROKEN_IMAGE}\n}})({fp_json});")
+    let fp_json = json!({ "memoryGb": mem });
+    format!("(function(fp){{\n{CODECS}\n{DEVICE_MEMORY}\n{BROKEN_IMAGE}\n}})({fp_json});")
 }
 
 /// JS source for the resolved seed token of a noise surface, or `None` when
@@ -664,10 +662,7 @@ mod tests {
             "webgl patch missing"
         );
         assert!(s.contains("canPlayType"), "codecs patch missing");
-        assert!(
-            s.contains("hardwareConcurrency"),
-            "navigator_props patch missing"
-        );
+        assert!(s.contains("deviceMemory"), "device_memory patch missing");
         assert!(s.contains("naturalWidth"), "broken_image patch missing");
     }
 
@@ -715,7 +710,6 @@ mod tests {
             ..Persona::default()
         };
         let s = bootstrap_script(&persona, &mock_identity());
-        assert!(s.contains("\"cpuCount\":4"), "cpu override missing");
         // deviceMemory is rendered into the fp json untouched here (the JS
         // clamps); persona value should appear.
         assert!(s.contains("\"memoryGb\":16"), "memory override missing");
@@ -1229,10 +1223,7 @@ mod tests {
         // are byte-for-byte what `bootstrap_script` would emit.
         let s = bootstrap_script_native_webgl(&Persona::default(), &mock_identity());
         assert!(s.contains("canPlayType"), "codecs patch missing");
-        assert!(
-            s.contains("hardwareConcurrency"),
-            "navigator_props patch missing"
-        );
+        assert!(s.contains("deviceMemory"), "device_memory patch missing");
         assert!(s.contains("naturalWidth"), "broken_image patch missing");
     }
 
@@ -1889,6 +1880,11 @@ mod tests {
             "Navigator.prototype, 'platform'",
             "the platform of the observer's Emulation.setUserAgentOverride drives \
              Chrome's own navigator.platform",
+        ),
+        (
+            "hardwareConcurrency",
+            "the observer's Emulation.setHardwareConcurrencyOverride drives Chrome's \
+             own navigator.hardwareConcurrency",
         ),
         (
             "Navigator.prototype, 'languages'",

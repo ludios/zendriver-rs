@@ -67,6 +67,7 @@ const COMMANDS: &[(&str, Scope)] = &[
     ("DOMStorage.setDOMStorageItem", P),
     ("Emulation.setDeviceMetricsOverride", P),
     ("Emulation.setFocusEmulationEnabled", P),
+    ("Emulation.setHardwareConcurrencyOverride", P),
     ("Emulation.setGeolocationOverride", P),
     ("Emulation.setLocaleOverride", P),
     ("Emulation.setTimezoneOverride", P),

@@ -4,8 +4,8 @@
 //! `Target.attachedToTarget`, the actor pauses the new target, walks every
 //! observer serially, then releases the debugger via
 //! `Runtime.runIfWaitingForDebugger`. The observer's job is to push every
-//! UA/timezone/locale override and (for `Spoofed`) the screen override and the
-//! bootstrap script _before_ the debugger releases, so the first script the
+//! UA/timezone/locale override and (for `Spoofed`) the screen and CPU-count
+//! overrides and the bootstrap script _before_ the debugger releases, so the first script the
 //! page runs sees the patched globals.
 
 use serde_json::json;
@@ -434,6 +434,14 @@ impl TargetObserver for StealthObserver {
                     }),
                 )
                 .await?;
+            // `navigator.hardwareConcurrency`, in the page and its
+            // same-process iframes; a worker still reports the host's.
+            session
+                .call(
+                    "Emulation.setHardwareConcurrencyOverride",
+                    json!({ "hardwareConcurrency": self.fingerprint.cpu_count }),
+                )
+                .await?;
         }
 
         // Focus emulation keeps the (always-backgrounded) headless tab from
@@ -633,6 +641,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setDeviceMetricsOverride",
+            "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.setBypassCSP",
             "Page.addScriptToEvaluateOnNewDocument",
@@ -712,6 +721,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setDeviceMetricsOverride",
+            "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setLocaleOverride",
             "Page.setBypassCSP",
@@ -799,6 +809,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setDeviceMetricsOverride",
+            "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setLocaleOverride",
             "Page.setBypassCSP",
@@ -870,6 +881,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setDeviceMetricsOverride",
+            "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.setBypassCSP",
             "Page.addScriptToEvaluateOnNewDocument",
@@ -941,6 +953,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setDeviceMetricsOverride",
+            "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.setBypassCSP",
             "Page.addScriptToEvaluateOnNewDocument",
@@ -1017,6 +1030,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setDeviceMetricsOverride",
+            "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setGeolocationOverride",
             "Page.setBypassCSP",
@@ -1094,6 +1108,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setDeviceMetricsOverride",
+            "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.setBypassCSP",
             "Page.addScriptToEvaluateOnNewDocument",
@@ -1171,6 +1186,7 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setDeviceMetricsOverride",
+            "Emulation.setHardwareConcurrencyOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.setBypassCSP",
             "Page.addScriptToEvaluateOnNewDocument",
@@ -1450,6 +1466,32 @@ mod persona_reaches_cdp_tests {
     /// fingerprint's. The two fixtures are deliberately different real zones:
     /// a persona value equal to the fingerprint's would be satisfied by the
     /// bug, which sent the fingerprint's unconditionally.
+    #[tokio::test]
+    async fn spoofed_overrides_the_cpu_count_with_the_personas_else_the_fingerprints() {
+        let fp = Fingerprint {
+            cpu_count: 6,
+            ..bare_fingerprint()
+        };
+        for (pinned, expected) in [(Some(12), 12), (None, 6), (Some(0), 6)] {
+            let persona = Persona {
+                hardware_concurrency: pinned,
+                ..Persona::default()
+            };
+            let frames = drive_attach(StealthObserver::with_persona(
+                StealthProfile::spoofed(),
+                fp.clone(),
+                persona,
+            ))
+            .await;
+            assert_eq!(
+                params(&frames, "Emulation.setHardwareConcurrencyOverride")["hardwareConcurrency"]
+                    .as_u64(),
+                Some(expected),
+                "persona hardware_concurrency {pinned:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn persona_timezone_wins_over_the_fingerprints_in_the_cdp_override() {
         let fp = Fingerprint {
@@ -1749,6 +1791,7 @@ mod persona_reaches_cdp_tests {
         let methods = method_names(&frames);
         for absent in [
             "Emulation.setDeviceMetricsOverride",
+            "Emulation.setHardwareConcurrencyOverride",
             "Page.addScriptToEvaluateOnNewDocument",
         ] {
             assert!(

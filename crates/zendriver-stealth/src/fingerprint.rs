@@ -265,6 +265,15 @@ impl Fingerprint {
         if let Some(screen) = persona.screen {
             self.screen = Some(screen);
         }
+        // Chrome rejects a count of 0, which would fail the page's setup.
+        match persona.hardware_concurrency {
+            Some(0) => tracing::warn!(
+                cpu_count = self.cpu_count,
+                "persona hardware_concurrency 0 ignored: Chrome reports at least 1"
+            ),
+            Some(n) => self.cpu_count = n,
+            None => {}
+        }
     }
 
     /// Recompose UA string + UAM after platform/version overrides.
