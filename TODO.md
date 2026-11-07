@@ -68,7 +68,6 @@ Also for this round:
   - Lost events (`Lagged`): the recovery's `Fetch.disable` continues every paused request, those a block rule or a stream would have held included, and the backlog read after it holds pauses already continued (their releases then fail, with a warning). Lag on the accounted bus counts every event on the connection, not just this session's `Fetch` ones; the multiplexer stops reading while it waits on Chrome (`apply`, `recover`). Running those round trips beside the event loop would make lag rarer.
   - A stream layer's queue is unbounded (Chrome holds the requests anyway); the auth memory doesn't know which credentials answered, so new credentials for the same request and proxy within 60 s get `CancelAuth`.
   - Each intercepting tab subscribes to the accounted bus, which turns on the transport's per-event clone for it.
-  - After a lost-events recovery, a stream consumer's late answer to a pause that `Fetch.disable` already continued is refused, and the follow-up `failRequest` is refused too: two log lines per such pause.
   - *Open from the reviews of `b965a0d09..777c35159`, `4dd5e05e0` and `b357bdb23` (2026-11-06):*
     - An entry inserted while a request is already under way (paused at the Request stage, or sent before `insert` returned) doesn't get that request's Response pause: Chrome fixed its stages when it started. Documented as "a request sent from then on". Sending `interceptResponse` on every Request-stage continue, worked out (by resource type, as for a new URL since `94768fd1e`) from the list at answer time, would close it.
     - When Chrome refuses both an answer and the `failRequest` that follows it, the hold is dropped as answered, so a later `Fetch.disable` may release the request (if Chrome still had it). Keeping the hold would keep `Fetch` on for a request Chrome most likely no longer knows. *(Astra, `b965a0d09..777c35159`.)*
@@ -134,7 +133,7 @@ Also for this round:
 ### Downloads, expect, monitor, cookies
 - [ ] **Downloads, phase 2** (phase 1, 2026-11-06: downloads followed at browser scope, so a `MatchedDownload` outlives its tab; designed with Astra and an Opus critique):
   - `Browser::expect_download` (or popup attribution): a download in a tab that Chrome opened for it (a `target=_blank` link to a file) matches no `expect_download` today. Playwright attributes a download of a page that hasn't loaded its first document to its opener.
-  - MCP download ids: a matched download kept in the session, with status / save / cancel / release tools; today `browser_expect_register { save_to }` is the only way to the file, and without it the handle is dropped.
+  - MCP download ids: a matched download kept in the session, with status / save / cancel / release tools. Today the result names the file (`path`, once the download has completed), but the handle is dropped, so no tool can wait for, save, or cancel a download that is still under way.
   - `MatchedDownload::cancel` (`Browser.cancelDownload { guid, browserContextId }`).
   - Deleting a download's file when its last handle drops: only after the download ends (Chrome writes `<guid>.crdownload` and renames it at the end), so a crawler with a tab per download doesn't fill the disk until the `Browser` drops.
   - `connect()`: an "observe" mode (`behavior: "default"` with `eventsEnabled`, the file found by `filePath`) might touch a person's Chrome less than sending its downloads into the staging directory.
@@ -201,8 +200,8 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
 - [ ] **The WAF bypasses' `with_interception()` fast path rarely speeds anything up.** *(reviews of `582088ee1`, 2026-11-04)* It fires once, on the first sensor 2xx's headers (`Network.responseReceived`), before the page's script has read the body and set the cookie; the probe then finds nothing, and no later sensor response wakes the loop. The Fetch version behaved the same. A fix: signal on each matched request's `Network.loadingFinished`, re-armable (`watch` / `Notify`), and skip CORS preflights (`type: Preflight`). Also: the two `sensor_signal.rs` copies differ only in their URL parts, and `zendriver`'s `imperva` / `datadome` features still imply `interception`.
 
 ### MCP
-- [ ] **`browser_tab_close` leaves some of the tab's work running.** *(reviews of `c4b58b531`, 2026-11-06; several reproduced against real Chrome by gpt-6-astra)* Monitors (`MonitorState` has no `tab_id`; `monitor::start` has the tab, so storing it is cheap); an expectation that `browser_expect_await` already removed from the registry; an expectation registered concurrently (the lock is released between resolving the tab and inserting); a tab that closed by itself before the call (`TabNotFound` returns before `drain_tab_scoped`); and the `expect_dialog` / `expect_download` subscribers, which outlive their aborted MCP task. No test drives `browser_tab_close` with real registrations.
-- [ ] **One lock serialises every tool call.** It's held across CDP calls: a status check waited 3.8 s behind a pending element search, and a dialog can freeze the session. *(MCP #7, R)*
+- [ ] **`browser_tab_close` leaves some of the tab's work running.** *(reviews of `c4b58b531`, 2026-11-06; several reproduced against real Chrome by gpt-6-astra)* Monitors (`MonitorState` has no `tab_id`; `monitor::start` has the tab, so storing it is cheap); an expectation that `browser_expect_await` already removed from the registry; an expectation registered concurrently (the lock is released between resolving the tab and inserting); a tab that closed by itself before the call (`TabNotFound` returns before `drain_tab_scoped`); and the `expect_dialog` subscriber, which outlives its aborted MCP task. (Download expectations are kept on purpose: a matched download outlives its tab.) No test drives `browser_tab_close` with real registrations.
+- [ ] **One lock serialises most tool calls.** It's held across CDP calls: a status check waited 3.8 s behind a pending element search, and a dialog can freeze the session. *(MCP #7, R)* (`browser_wait_for_url`, `browser_expect_await`, and the navigation waits of `browser_click` / `browser_press` already release it while they wait.)
   - Test `mcp`: a status call during a pending find returns quickly.
 - [ ] **`browser_screenshot` with a selector crops the wrong area on a scrolled page,** and `full_page` overrides `selector`. *(MCP #5, #9)* Test `mcp`.
 - [ ] **`browser_type` reports success on elements you can't type into.** *(R)* Test `mcp`.
@@ -210,10 +209,9 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
   - Test: a size budget assertion next to the schema snapshots.
 - [ ] **Page HTML has no size limit** (305 KB on GitHub, 711–734 KB on YouTube). Add a default cap with a truncation marker plus a `max_bytes` input. *(R)* Test `mcp`. This changes I/O, so regenerate the schema snapshots.
 - [ ] **"Suggested next step" hints** aren't where the README says, and many errors have none. *(R)* Test `unit` on the error mapping, plus a docs fix.
-- [ ] **Smaller MCP bugs:** *(MCP #11–#14)*
+- [ ] **Smaller MCP bugs:** *(MCP #11, #12, #14)*
   - a per-launch `stealth_profile` becomes the session default
   - `html_trim` matches tag prefixes and deletes custom elements
-  - `content_type` doesn't replace a differently-cased header
   - stale tool descriptions
 
 ---
@@ -249,9 +247,8 @@ Each item needs a test; `unit` is fine where no browser is involved.
   - `<fieldset disabled>` not treated as disabled
   - polling gives up on transient navigation errors
   - the `lastIndex` resets of `d459e8f1b` have one test, a tab-wide `g` query of elements without children. Nothing tests an element-scoped query (`build_text_regex_fn_body`), the narrowing to descendants (`regex_narrowing_js`: Astra removed its reset, and the test still passed), or the `y` flag.
-- [ ] **Monitor/expect/cookies:** *(MEC #9–#11)*
+- [ ] **Monitor/expect/cookies:** *(MEC #9, #11)*
   - subscriber tasks outlive their expectations
-  - `save_to` has a fixed 30 s total limit
   - `Cookie::expires` is `Some(-1.0)` for session cookies
 - [ ] **Transport/interception:**
   - detach can run before attach finishes *(TI #13)*
