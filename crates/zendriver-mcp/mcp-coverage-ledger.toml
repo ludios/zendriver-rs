@@ -1216,3 +1216,14 @@ excluded = "the state of MatchedDownload::state, which MCP doesn't expose; a sav
 [[entry]]
 api = "zendriver::DownloadProgressState"
 excluded = "re-export of zendriver::expect::download::DownloadProgressState (see there)"
+
+# ── bitflags 2.12's generated `all_named()` ─────────────────────────────────
+# Both are in the baseline since the lockfile update brought bitflags 2.13;
+# recorded here so the decision is written down.
+[[entry]]
+api = "zendriver::input::keyboard::KeyModifiers::all_named"
+excluded = "bitflags-generated constructor of every named modifier; Rust ergonomics, as MCP tools take their modifiers as a list of names"
+
+[[entry]]
+api = "zendriver::input::pointer_state::MouseButtonSet::all_named"
+excluded = "bitflags-generated constructor of every named mouse button; Rust ergonomics, as the set is only read, in InputState::buttons_held"
