@@ -32,7 +32,6 @@ use zendriver_transport::{AccountedRawEvent, Connection, SessionHandle};
 use crate::error::{Result, ZendriverError};
 use crate::frame::Frame;
 use crate::input::InputController;
-use crate::isolated_world::IsolatedWorldCache;
 use crate::load_tracker::{Destination, LoadTracker};
 use crate::navigation::{NavigationExpectation, Target};
 use crate::network_idle::IdleLossPolicy;
@@ -282,7 +281,6 @@ pub struct Tab {
 #[derive(Debug)]
 pub(crate) struct TabInner {
     pub(crate) session: SessionHandle,
-    pub(crate) isolated_world: tokio::sync::Mutex<IsolatedWorldCache>,
     /// Weak ref to the owning `BrowserInner`, e.g. for [`Tab::cookies`] to
     /// reach the browser target. `Weak` breaks the Browser→Tab→Browser
     /// cycle.
@@ -512,7 +510,6 @@ impl Tab {
                 #[cfg(feature = "interception")]
                 browser_intercept: std::sync::OnceLock::new(),
                 session,
-                isolated_world: tokio::sync::Mutex::new(IsolatedWorldCache::default()),
                 browser,
                 input,
                 target_id,
@@ -1298,14 +1295,9 @@ impl Tab {
     /// Runs in a sandbox where page globals are NOT visible — the default for
     /// stealth-safe execution. The result is deserialized into `T`.
     ///
-    /// If the cached isolated-world execution context was destroyed (e.g. by
-    /// a page navigation), the cache is invalidated and the evaluation is
-    /// retried once. One retry is enough: the failure mode this guards
-    /// against is "navigation happened between cache-fetch and `Runtime.evaluate`",
-    /// which is a one-shot race — recreating the world for the new context
-    /// and re-issuing the call clears it. If the same call fails the
-    /// second attempt the page has a real problem (target gone, isolated
-    /// world refused to recreate) and further retries would only mask it.
+    /// This is [`Frame::evaluate`] on the tab's [main frame](Tab::main_frame),
+    /// so it runs in the main frame's current document, and is retried once
+    /// if a navigation destroys that document's context mid-call.
     ///
     /// # Errors
     ///
@@ -1325,44 +1317,7 @@ impl Tab {
     /// # Ok(()) }
     /// ```
     pub async fn evaluate<T: DeserializeOwned>(&self, js: impl AsRef<str>) -> Result<T> {
-        let js = js.as_ref();
-        for attempt in 0..2 {
-            let ctx_id = self.ensure_isolated_world().await?;
-            let res = self
-                .call(
-                    "Runtime.evaluate",
-                    json!({
-                        "expression": js,
-                        "contextId": ctx_id,
-                        "returnByValue": true,
-                        "awaitPromise": true,
-                    }),
-                )
-                .await;
-            match res {
-                Ok(v) => {
-                    if let Some(e) = ZendriverError::js_exception_in(&v) {
-                        return Err(e);
-                    }
-                    let value = v
-                        .get("result")
-                        .and_then(|r| r.get("value"))
-                        .cloned()
-                        .unwrap_or(Value::Null);
-                    return serde_json::from_value(value).map_err(ZendriverError::Serde);
-                }
-                // The execution context we cached was destroyed, typically
-                // by a navigation. Drop it and let `ensure_isolated_world`
-                // mint a new one. `Frame::evaluate` runs the same recovery
-                // off the same predicate so the two cannot drift.
-                Err(ref e) if attempt == 0 && crate::isolated_world::is_stale_context(e) => {
-                    self.inner.isolated_world.lock().await.context_id = None;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        unreachable!()
+        self.main_frame().await?.evaluate(js).await
     }
 
     /// Evaluate a JavaScript expression in the page main world.
@@ -1458,36 +1413,11 @@ impl Tab {
             .unwrap_or(Value::Null))
     }
 
-    /// Ensure an isolated-world execution context exists for this tab's main
-    /// frame, returning its `executionContextId`. Cached after first call.
+    /// The `executionContextId` of zendriver's isolated world in the current
+    /// document of this tab's main frame: [`Frame::ensure_isolated_world`]
+    /// on [`Tab::main_frame`].
     pub(crate) async fn ensure_isolated_world(&self) -> Result<i64> {
-        let mut cache = self.inner.isolated_world.lock().await;
-        if let Some(ctx) = cache.context_id {
-            return Ok(ctx);
-        }
-        // Discover the main frame id.
-        let tree = self.call("Page.getFrameTree", json!({})).await?;
-        let frame_id = tree["frameTree"]["frame"]["id"]
-            .as_str()
-            .ok_or_else(|| ZendriverError::Navigation("no main frame in Page.getFrameTree".into()))?
-            .to_string();
-        let res = self
-            .call(
-                "Page.createIsolatedWorld",
-                json!({
-                    "frameId": frame_id,
-                    "worldName": "zendriver-eval",
-                    "grantUniversalAccess": false,
-                }),
-            )
-            .await?;
-        let ctx_id = res["executionContextId"].as_i64().ok_or_else(|| {
-            ZendriverError::Navigation(
-                "Page.createIsolatedWorld did not return executionContextId".into(),
-            )
-        })?;
-        cache.context_id = Some(ctx_id);
-        Ok(ctx_id)
+        self.main_frame().await?.ensure_isolated_world().await
     }
 
     /// Get the tab's current URL.
@@ -3440,6 +3370,7 @@ impl zendriver_stealth::JsProbe for Tab {
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::test_support::expect;
     use zendriver_transport::testing::MockConnection;
 
     #[tokio::test]
@@ -3546,178 +3477,44 @@ mod tests {
 
     // --- isolated-world evaluate ---------------------------------------
 
+    /// `Tab::evaluate` runs in its main frame's isolated world and looks up
+    /// that world's context on every call: the main frame's id once, then
+    /// one `Page.createIsolatedWorld` per call. A context id kept from an
+    /// earlier call could name a context of another document.
     #[tokio::test]
-    async fn evaluate_isolated_creates_world_then_evaluates() {
+    async fn evaluate_looks_up_the_isolated_world_on_every_call() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         let tab = Tab::new_for_test(sess);
 
-        let fut = tokio::spawn({
-            let t = tab.clone();
-            async move { t.evaluate::<i32>("1+1").await }
-        });
-
-        // 1. Page.getFrameTree → main frame id.
-        let id_tree = mock.expect_cmd("Page.getFrameTree").await;
-        mock.reply(
-            id_tree,
-            json!({ "frameTree": { "frame": { "id": "MAIN_FRAME" } } }),
-        )
-        .await;
-
-        // 2. Page.createIsolatedWorld → executionContextId.
-        let id_world = mock.expect_cmd("Page.createIsolatedWorld").await;
-        assert_eq!(mock.last_sent()["params"]["frameId"], "MAIN_FRAME");
-        assert_eq!(mock.last_sent()["params"]["worldName"], "zendriver-eval");
-        mock.reply(id_world, json!({ "executionContextId": 42 }))
+        for (value, context) in [(1, 7), (2, 8)] {
+            let fut = tokio::spawn({
+                let t = tab.clone();
+                async move { t.evaluate::<i32>(value.to_string()).await }
+            });
+            if value == 1 {
+                let id_tree = expect(&mut mock, "Page.getFrameTree").await;
+                mock.reply(
+                    id_tree,
+                    json!({ "frameTree": { "frame": { "id": "MAIN_FRAME" } } }),
+                )
+                .await;
+            }
+            let id_world = expect(&mut mock, "Page.createIsolatedWorld").await;
+            assert_eq!(mock.last_sent()["params"]["frameId"], "MAIN_FRAME");
+            assert_eq!(mock.last_sent()["params"]["worldName"], "zendriver-eval");
+            mock.reply(id_world, json!({ "executionContextId": context }))
+                .await;
+            let id_eval = expect(&mut mock, "Runtime.evaluate").await;
+            assert_eq!(mock.last_sent()["params"]["expression"], value.to_string());
+            assert_eq!(mock.last_sent()["params"]["contextId"], context);
+            mock.reply(
+                id_eval,
+                json!({ "result": { "value": value, "type": "number" } }),
+            )
             .await;
-
-        // 3. Runtime.evaluate with that contextId.
-        let id_eval = mock.expect_cmd("Runtime.evaluate").await;
-        assert_eq!(mock.last_sent()["params"]["expression"], "1+1");
-        assert_eq!(mock.last_sent()["params"]["contextId"], 42);
-        mock.reply(
-            id_eval,
-            json!({ "result": { "value": 2, "type": "number" } }),
-        )
-        .await;
-
-        let n = fut.await.unwrap().unwrap();
-        assert_eq!(n, 2);
-        conn.shutdown();
-    }
-
-    #[tokio::test]
-    async fn evaluate_caches_context_id_across_calls() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let tab = Tab::new_for_test(sess);
-
-        // First call: full handshake + eval.
-        let fut1 = tokio::spawn({
-            let t = tab.clone();
-            async move { t.evaluate::<i32>("1").await }
-        });
-        let id_tree = mock.expect_cmd("Page.getFrameTree").await;
-        mock.reply(
-            id_tree,
-            json!({ "frameTree": { "frame": { "id": "MAIN_FRAME" } } }),
-        )
-        .await;
-        let id_world = mock.expect_cmd("Page.createIsolatedWorld").await;
-        mock.reply(id_world, json!({ "executionContextId": 7 }))
-            .await;
-        let id_eval1 = mock.expect_cmd("Runtime.evaluate").await;
-        assert_eq!(mock.last_sent()["params"]["contextId"], 7);
-        mock.reply(
-            id_eval1,
-            json!({ "result": { "value": 1, "type": "number" } }),
-        )
-        .await;
-        assert_eq!(fut1.await.unwrap().unwrap(), 1);
-
-        // Second call: must reuse the cached contextId → next outbound
-        // frame should be Runtime.evaluate, with NO Page.getFrameTree or
-        // Page.createIsolatedWorld in between.
-        let fut2 = tokio::spawn({
-            let t = tab.clone();
-            async move { t.evaluate::<i32>("2").await }
-        });
-        let id_eval2 = mock.expect_cmd("Runtime.evaluate").await;
-        assert_eq!(mock.last_sent()["params"]["contextId"], 7);
-        assert_eq!(mock.last_sent()["params"]["expression"], "2");
-        mock.reply(
-            id_eval2,
-            json!({ "result": { "value": 2, "type": "number" } }),
-        )
-        .await;
-        assert_eq!(fut2.await.unwrap().unwrap(), 2);
-
-        conn.shutdown();
-    }
-
-    #[tokio::test]
-    async fn evaluate_recreates_world_after_context_destroyed_error() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let tab = Tab::new_for_test(sess);
-
-        // --- Call 1: establishes cache, succeeds. ---
-        let fut1 = tokio::spawn({
-            let t = tab.clone();
-            async move { t.evaluate::<i32>("1").await }
-        });
-        let id_tree = mock.expect_cmd("Page.getFrameTree").await;
-        mock.reply(
-            id_tree,
-            json!({ "frameTree": { "frame": { "id": "MAIN_FRAME" } } }),
-        )
-        .await;
-        let id_world = mock.expect_cmd("Page.createIsolatedWorld").await;
-        mock.reply(id_world, json!({ "executionContextId": 7 }))
-            .await;
-        let id_eval1 = mock.expect_cmd("Runtime.evaluate").await;
-        mock.reply(
-            id_eval1,
-            json!({ "result": { "value": 1, "type": "number" } }),
-        )
-        .await;
-        assert_eq!(fut1.await.unwrap().unwrap(), 1);
-
-        // --- Call 2: cached contextId is now stale. Runtime.evaluate
-        //     returns -32000 "Cannot find context with specified id";
-        //     evaluate must invalidate the cache, re-run the discovery
-        //     handshake with a NEW contextId, then re-issue Runtime.evaluate.
-        let fut2 = tokio::spawn({
-            let t = tab.clone();
-            async move { t.evaluate::<i32>("2").await }
-        });
-        // First Runtime.evaluate uses cached id 7 → CDP returns error.
-        let id_eval_fail = mock.expect_cmd("Runtime.evaluate").await;
-        assert_eq!(mock.last_sent()["params"]["contextId"], 7);
-        mock.reply_err(
-            id_eval_fail,
-            -32000,
-            "Cannot find context with specified id",
-        )
-        .await;
-
-        // Cache invalidated → discovery handshake re-runs.
-        let id_tree2 = mock.expect_cmd("Page.getFrameTree").await;
-        mock.reply(
-            id_tree2,
-            json!({ "frameTree": { "frame": { "id": "MAIN_FRAME_2" } } }),
-        )
-        .await;
-        let id_world2 = mock.expect_cmd("Page.createIsolatedWorld").await;
-        assert_eq!(mock.last_sent()["params"]["frameId"], "MAIN_FRAME_2");
-        mock.reply(id_world2, json!({ "executionContextId": 99 }))
-            .await;
-
-        // Retried Runtime.evaluate uses the fresh contextId.
-        let id_eval_retry = mock.expect_cmd("Runtime.evaluate").await;
-        assert_eq!(mock.last_sent()["params"]["contextId"], 99);
-        mock.reply(
-            id_eval_retry,
-            json!({ "result": { "value": 2, "type": "number" } }),
-        )
-        .await;
-        assert_eq!(fut2.await.unwrap().unwrap(), 2);
-
-        // --- Call 3: cache is fresh again → straight to Runtime.evaluate.
-        let fut3 = tokio::spawn({
-            let t = tab.clone();
-            async move { t.evaluate::<i32>("3").await }
-        });
-        let id_eval3 = mock.expect_cmd("Runtime.evaluate").await;
-        assert_eq!(mock.last_sent()["params"]["contextId"], 99);
-        mock.reply(
-            id_eval3,
-            json!({ "result": { "value": 3, "type": "number" } }),
-        )
-        .await;
-        assert_eq!(fut3.await.unwrap().unwrap(), 3);
-
+            assert_eq!(fut.await.unwrap().unwrap(), value);
+        }
         conn.shutdown();
     }
 

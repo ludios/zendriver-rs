@@ -26,7 +26,6 @@ use tokio::sync::{Mutex, RwLock};
 use zendriver_transport::SessionHandle;
 
 use crate::error::{Result, ZendriverError};
-use crate::isolated_world::IsolatedWorldCache;
 use crate::load_tracker::next_stop;
 use crate::tab::{Tab, TabInner};
 
@@ -82,12 +81,11 @@ pub(crate) struct FrameInner {
     /// frame shares the owning tab's session; OOPIFs attach to a distinct
     /// child session whose handle is plumbed in at construction.
     pub(crate) session: SessionHandle,
-    /// Per-frame isolated-world cache. Same shape as the tab-level cache —
-    /// [`Frame::evaluate`] populates `executionContextId` on first call
-    /// via `Page.createIsolatedWorld { frameId: self.frame_id }` and reuses
-    /// it on subsequent calls. Distinct from the tab-level cache so that
-    /// per-frame contexts don't collide when the tab has multiple frames.
-    pub(crate) isolated_world: Mutex<IsolatedWorldCache>,
+    /// The `frameId` that Chrome uses for this frame now, once Chrome has
+    /// rejected `frame_id` (see [`Frame::id`]). Set by
+    /// [`Frame::ensure_isolated_world`], so that its later calls skip the
+    /// rejected id. `None` until then.
+    pub(crate) rebound_frame_id: Mutex<Option<String>>,
     /// Weak ref to the owning tab. Upgraded by
     /// [`Frame::tab_for_synthesize`] when the query layer needs to wrap
     /// a `RemoteRef` in an `Element` (the `Element` stores an owned
@@ -120,7 +118,7 @@ impl Frame {
                 url: RwLock::new(url),
                 name,
                 session,
-                isolated_world: Mutex::new(IsolatedWorldCache::default()),
+                rebound_frame_id: Mutex::new(None),
                 tab,
             }),
         }
@@ -259,19 +257,14 @@ impl Frame {
     /// Evaluate JS in an isolated world bound to **this frame**.
     ///
     /// Sandboxed — no page globals visible. Result deserialized into `T`.
-    /// Mirrors [`crate::Tab::evaluate`] but at frame granularity: each
-    /// `Frame` carries its own internal isolated-world cache, so contextIds
-    /// are per-frame and don't collide across sibling frames.
+    /// [`crate::Tab::evaluate`] is this on the tab's main frame.
     ///
-    /// First call dispatches `Page.createIsolatedWorld { frameId, worldName:
-    /// "zendriver-eval" }` on the frame's session and caches the returned
-    /// `executionContextId`. Subsequent calls reuse the cached id.
-    ///
-    /// A navigation inside the frame destroys that context. When Chrome
-    /// answers `Cannot find context with specified id`, the cached id is
-    /// dropped and the call retried once against a freshly created world,
-    /// so a `Frame` handle kept across a navigation keeps working — same
-    /// recovery [`crate::Tab::evaluate`] performs.
+    /// Each call first gets the id of the isolated world's context in the
+    /// frame's current document (see [`Frame::ensure_isolated_world`]), so a
+    /// `Frame` handle kept across a navigation of its frame keeps working.
+    /// If a navigation destroys that context before the expression reaches
+    /// it, Chrome answers `Cannot find context with specified id`, and the
+    /// call is retried once.
     ///
     /// # Errors
     ///
@@ -309,17 +302,14 @@ impl Frame {
             match res {
                 Ok(v) => return Self::extract_value(&v),
                 Err(e) => {
-                    // Convert once here: unlike `Tab::evaluate`, which goes
-                    // through a `Tab::call` wrapper, this dispatches on the
-                    // raw session and gets back a `CallError`.
+                    // The raw session answers with a `CallError`.
                     let e = ZendriverError::from(e);
                     if attempt > 0 || !crate::isolated_world::is_stale_context(&e) {
                         return Err(e);
                     }
-                    // Drop the dead context and let `ensure_isolated_world`
-                    // mint a new one, rediscovering the frame id if the one
-                    // recorded at attach time has since been rewritten.
-                    self.inner.isolated_world.lock().await.context_id = None;
+                    // A navigation destroyed the context after
+                    // `ensure_isolated_world` returned its id; the next
+                    // iteration gets the new document's.
                 }
             }
         }
@@ -557,40 +547,38 @@ impl Frame {
         self.find_all().css(css).many().await
     }
 
-    /// Ensure an isolated-world execution context exists for *this frame*,
-    /// returning its `executionContextId`. Cached after first call.
+    /// The `executionContextId` of zendriver's isolated world in this
+    /// frame's current document, creating the world if needed.
     ///
-    /// Unlike [`crate::tab::Tab::ensure_isolated_world`], we skip the
-    /// `Page.getFrameTree` round-trip — the frame already knows its own
-    /// CDP `frameId`, so we go straight to `Page.createIsolatedWorld`.
+    /// Asks Chrome on every call (one `Page.createIsolatedWorld`), because a
+    /// remembered id can name a different context: a cross-process
+    /// navigation numbers the new process's contexts from 1 again, so an id
+    /// from the previous document can belong to, say, an iframe of the new
+    /// one, and a call with it then runs there without any error. Chrome
+    /// keeps one isolated world per name, so a repeated call returns the
+    /// same context and creates nothing. The same can still happen to the
+    /// returned id if such a navigation commits before the caller uses it,
+    /// but only within that one round trip.
+    ///
+    /// If Chrome has re-attached the frame under a fresh `frameId` (observed
+    /// for `srcdoc` iframes under `--headless=new`, with no `frameDetached`
+    /// in between), it rejects the recorded id with "No frame for given id
+    /// found". Then this finds the live id in the frame tree, remembers it
+    /// for later calls, and retries with it.
     pub(crate) async fn ensure_isolated_world(&self) -> Result<i64> {
-        let mut cache = self.inner.isolated_world.lock().await;
-        if let Some(ctx) = cache.context_id {
-            return Ok(ctx);
-        }
-        // Try the frame_id we recorded at attach time. If Chrome rewrote
-        // it between the `frameAttached` event and now (observed for
-        // `srcdoc` iframes under `--headless=new`, which sometimes
-        // re-attach the iframe with a fresh id without emitting
-        // `frameDetached`), CDP returns "No frame for given id found";
-        // walk the current frame tree, find a child of our recorded
-        // parent, and retry with the live id.
-        let frame_id_for_call = match self.create_isolated_world(&self.inner.frame_id).await {
-            Ok(ctx) => {
-                cache.context_id = Some(ctx);
-                return Ok(ctx);
-            }
+        let rebound = self.inner.rebound_frame_id.lock().await.clone();
+        let frame_id = rebound.as_deref().unwrap_or(&self.inner.frame_id);
+        match self.create_isolated_world(frame_id).await {
             Err(ZendriverError::Cdp {
                 code: -32602,
                 ref message,
                 ..
-            }) if message.contains("No frame for given id") => {
-                self.discover_current_frame_id().await?
-            }
-            Err(e) => return Err(e),
-        };
-        let ctx = self.create_isolated_world(&frame_id_for_call).await?;
-        cache.context_id = Some(ctx);
+            }) if message.contains("No frame for given id") => {}
+            other => return other,
+        }
+        let live = self.discover_current_frame_id().await?;
+        let ctx = self.create_isolated_world(&live).await?;
+        *self.inner.rebound_frame_id.lock().await = Some(live);
         Ok(ctx)
     }
 
@@ -617,15 +605,15 @@ impl Frame {
     /// Find the frame id Chrome currently uses for this frame, by locating
     /// it in the live `Page.getFrameTree`.
     ///
-    /// Only the isolated-world cache is rebound by the result.
+    /// Only [`FrameInner::rebound_frame_id`] records the result.
     /// [`FrameInner::frame_id`] is immutable, so [`Frame::id`] keeps
     /// returning the id Chrome rejected, and so does anything filtering on
     /// it — notably [`Frame::wait_for_load`], whose
     /// `Page.frameStoppedLoading` filter can then never match and always
     /// burns its full timeout. `evaluate` / `find` recover because they
-    /// route through the cache; nothing that reads the id does. Making
-    /// `frame_id` interior-mutable would fix that too, and is a separate
-    /// change.
+    /// go through [`Frame::ensure_isolated_world`]; nothing that reads the
+    /// id does. Making `frame_id` interior-mutable would fix that too, and
+    /// is a separate change.
     ///
     /// The probe runs on the transport's default call budget
     /// ([`zendriver_transport::DEFAULT_CALL_TIMEOUT`]), like every other CDP
@@ -802,14 +790,12 @@ mod tests {
         )
     }
 
-    /// First `Frame::evaluate` call dispatches `Page.createIsolatedWorld`
-    /// (using the frame's own `frameId`, skipping the `Page.getFrameTree`
-    /// round-trip that `Tab::evaluate` needs) and caches the returned
-    /// `executionContextId`. Second call must reuse the cached id — next
-    /// outbound frame is `Runtime.evaluate`, with NO intervening
-    /// `Page.createIsolatedWorld`.
+    /// Every `Frame::evaluate` call dispatches `Page.createIsolatedWorld`
+    /// with the frame's own `frameId`, and evaluates in the context it
+    /// returns. A context id kept from an earlier call could name a context
+    /// of another document.
     #[tokio::test]
-    async fn evaluate_caches_context_id_across_calls() {
+    async fn evaluate_looks_up_the_isolated_world_on_every_call() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         let frame = frame_on(sess, "FRAME_A");
@@ -834,15 +820,18 @@ mod tests {
         .await;
         assert_eq!(fut1.await.unwrap().unwrap(), 1);
 
-        // --- Call 2: cached → straight to Runtime.evaluate. No second
-        //     Page.createIsolatedWorld is expected; the next outbound
-        //     frame is Runtime.evaluate itself.
+        // --- Call 2: the same handshake again, then the context it
+        //     returned.
         let fut2 = tokio::spawn({
             let f = frame.clone();
             async move { f.evaluate::<i32>("2").await }
         });
+        let id_world2 = next_cmd(&mut mock, "Page.createIsolatedWorld").await;
+        assert_eq!(mock.last_sent()["params"]["frameId"], "FRAME_A");
+        mock.reply(id_world2, json!({ "executionContextId": 8 }))
+            .await;
         let id_eval2 = next_cmd(&mut mock, "Runtime.evaluate").await;
-        assert_eq!(mock.last_sent()["params"]["contextId"], 7);
+        assert_eq!(mock.last_sent()["params"]["contextId"], 8);
         assert_eq!(mock.last_sent()["params"]["expression"], "2");
         mock.reply(
             id_eval2,
@@ -854,14 +843,9 @@ mod tests {
         conn.shutdown();
     }
 
-    /// A navigation inside the frame destroys the cached execution
-    /// context. `Frame::evaluate` must then do what `Tab::evaluate` does:
-    /// drop the dead `contextId`, create a fresh isolated world and retry
-    /// once, transparently.
-    ///
-    /// Without it a `Frame` handle is permanently broken by the first
-    /// navigation of its own iframe — `evaluate` returns the same error
-    /// forever, while the identical call on the tab recovers.
+    /// A navigation inside the frame can destroy the context between
+    /// `Page.createIsolatedWorld` and `Runtime.evaluate`. `Frame::evaluate`
+    /// must then look the world up again and retry once, transparently.
     #[tokio::test]
     async fn evaluate_recreates_the_isolated_world_after_a_stale_context() {
         let (mut mock, conn) = MockConnection::pair();
@@ -1241,6 +1225,36 @@ mod tests {
         mock.reply(id_retry, json!({ "executionContextId": 99 }))
             .await;
         assert_eq!(fut.await.unwrap().unwrap(), 99);
+        conn.shutdown();
+    }
+
+    /// After a recovery, later calls go straight to the live id, instead of
+    /// being rejected on the recorded one and walking the frame tree again.
+    #[tokio::test]
+    async fn recovery_remembers_the_live_id() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let frame = stale_frame(sess, None, "");
+
+        let fut = tokio::spawn({
+            let f = frame.clone();
+            async move { f.ensure_isolated_world().await }
+        });
+        reject_then_serve_tree(&mut mock, json!([tree_frame("LIVE", "", "")])).await;
+        let id_retry = next_cmd(&mut mock, "Page.createIsolatedWorld").await;
+        mock.reply(id_retry, json!({ "executionContextId": 3 }))
+            .await;
+        assert_eq!(fut.await.unwrap().unwrap(), 3);
+
+        let fut = tokio::spawn({
+            let f = frame.clone();
+            async move { f.ensure_isolated_world().await }
+        });
+        let id_world = next_cmd(&mut mock, "Page.createIsolatedWorld").await;
+        assert_eq!(mock.last_sent()["params"]["frameId"], "LIVE");
+        mock.reply(id_world, json!({ "executionContextId": 4 }))
+            .await;
+        assert_eq!(fut.await.unwrap().unwrap(), 4);
         conn.shutdown();
     }
 

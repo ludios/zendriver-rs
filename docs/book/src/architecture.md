@@ -169,10 +169,13 @@ scope. This means:
 For the main-world escape hatch, use `evaluate_main(...)`. It dispatches
 the same `Runtime.evaluate` but targets the page's default context.
 
-The isolated world is allocated lazily on first `evaluate()` and cached
-per tab. After navigation Chrome invalidates the context; the next
-`evaluate()` call re-allocates transparently. Frames each have their
-own isolated world (allocated per frame contextId).
+Each frame has its own isolated world, and `tab.evaluate(...)` uses the
+main frame's. Every call asks Chrome for the world's context in the
+frame's current document (`Page.createIsolatedWorld`, which returns the
+existing context when there is one), rather than reusing a context id
+from an earlier call. After a cross-site navigation the page runs in a
+new renderer process, which numbers its contexts from 1 again, so an old
+id can name a context of the new page, such as an iframe's.
 
 ## Why these choices
 
