@@ -310,14 +310,18 @@ pub(crate) async fn check_stable(el: &Element) -> Result<bool> {
 
 /// `true` iff the element is not disabled. Disabled means any of:
 ///
-/// - The element or an ancestor matches CSS `:disabled`, which is Chrome's
-///   own answer. Besides a control's own `disabled` attribute, it covers a
-///   control inside a disabled `<fieldset>` (outside that fieldset's first
-///   `<legend>`) and an `<option>` in a disabled `<optgroup>`. A disabled
-///   `<fieldset>` ancestor alone doesn't count, so that a control in its
-///   first `<legend>` stays enabled; an ancestor control (a `<span>` inside a
-///   disabled `<button>`) does.
-/// - The element or an ancestor has `aria-disabled="true"`, in any case.
+/// - The element matches CSS `:disabled`, which is Chrome's own answer.
+///   Besides a control's own `disabled` attribute, it covers a control
+///   inside a disabled `<fieldset>` (outside that fieldset's first
+///   `<legend>`) and an `<option>` in a disabled `<optgroup>`.
+/// - An ancestor that is not a `<fieldset>` matches `:disabled`, as a
+///   disabled `<button>` does for a `<span>` inside it. (A disabled
+///   fieldset counts only through the first rule, so that a control in its
+///   first `<legend>` stays enabled.)
+/// - Of the element and its ancestors, the nearest one whose
+///   `aria-disabled` is `true` or `false` (in any mix of upper and lower
+///   case) has `true`. So `aria-disabled="false"` on the element overrides
+///   `aria-disabled="true"` on a container, as in Playwright.
 /// - The element is an autonomous custom element (its name has a `-`) with
 ///   a `disabled` attribute. `:disabled` ignores such an element unless it
 ///   is form-associated, and its JavaScript `disabled` property, which the
@@ -325,7 +329,8 @@ pub(crate) async fn check_stable(el: &Element) -> Result<bool> {
 ///   check runs. Component libraries commonly reflect that property to the
 ///   attribute.
 ///
-/// The ancestor walk stops at the element's shadow root.
+/// The ancestors are those in the element's own tree: the walk doesn't
+/// leave the shadow root that contains the element.
 pub(crate) async fn check_enabled(el: &Element) -> Result<bool> {
     // `Element.prototype.closest`, not `el.closest`: a form's named control
     // (`<input name="closest">`) hides the form's own method, and its
@@ -340,8 +345,10 @@ pub(crate) async fn check_enabled(el: &Element) -> Result<bool> {
             const name = el.localName;
             const custom = typeof name === 'string' && name.includes('-');
             if (custom && proto.hasAttribute.call(el, 'disabled')) return false;
-            const selector = ':disabled:not(fieldset), [aria-disabled="true" i]';
-            return proto.closest.call(el, selector) === null;
+            if (proto.closest.call(el, ':disabled:not(fieldset)') !== null) return false;
+            const aria = proto.closest.call(
+                el, '[aria-disabled="true" i], [aria-disabled="false" i]');
+            return aria === null || !proto.matches.call(aria, '[aria-disabled="true" i]');
         }
     "#;
     let res = el.call_on_main(js, json!([])).await?;

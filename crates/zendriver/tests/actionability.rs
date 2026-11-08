@@ -13,11 +13,13 @@ use zendriver_testkit::axum::routing::get;
 use zendriver_testkit::{FixtureServer, eval, launch_for_test, load};
 
 /// Elements that are disabled through their own attribute (a custom
-/// element's included), through an ancestor (a `<fieldset>`, an `<optgroup>`, a `<button>`, an
-/// `aria-disabled` container), or through `aria-disabled` in upper case;
-/// and enabled elements next to them, among them a control in a disabled
-/// fieldset's first `<legend>`, an element that isn't a control, and a
-/// form whose control named `closest` hides the form's own `closest`.
+/// element's included), through an ancestor (a `<fieldset>`, an
+/// `<optgroup>`, a `<button>`, an `aria-disabled` container), or through
+/// `aria-disabled` in upper case; and enabled elements next to them, among
+/// them a control in a disabled fieldset's first `<legend>`, a control
+/// whose `aria-disabled="false"` overrides its container's `true`, an
+/// element that isn't a control, and a form whose control named
+/// `closest` hides the form's own `closest`.
 const DISABLED_PAGE: &str = r#"<!doctype html>
 <button id="enabled">Enabled</button>
 <button id="own" disabled>Its own attribute</button>
@@ -31,7 +33,10 @@ const DISABLED_PAGE: &str = r#"<!doctype html>
   <option id="option">Outside it</option>
 </select>
 <button disabled><span id="in-button">In a disabled button</span></button>
-<div aria-disabled="true"><button id="in-aria-group">In an aria-disabled group</button></div>
+<div aria-disabled="true">
+  <button id="in-aria-group">In an aria-disabled group</button>
+  <button id="aria-false" aria-disabled="false">Overrides its group</button>
+</div>
 <my-switch id="custom" disabled>A custom element</my-switch>
 <my-switch id="custom-enabled">A custom element</my-switch>
 <form id="form"><input name="closest"></form>
@@ -66,6 +71,7 @@ async fn is_enabled_follows_the_disabled_states_of_html_and_aria() {
         ("option", true),
         ("in-button", false),
         ("in-aria-group", false),
+        ("aria-false", true),
         ("custom", false),
         ("custom-enabled", true),
         ("form", true),
@@ -90,17 +96,24 @@ async fn a_click_waits_for_its_fieldset_to_be_enabled() {
     load(&tab, &server.url("127.0.0.1", "/disabled")).await;
     eval(
         &tab,
-        "document.getElementById('in-fieldset').onclick = () => { window.clicked = true; }; \
-         setTimeout(() => { document.getElementById('fieldset').disabled = false; }, 500); true",
+        "document.getElementById('in-fieldset').onclick = () => { window.clicked = true; }; true",
     )
     .await;
 
     let button = tab.find().css("#in-fieldset").one().await.expect("button");
-    tokio::time::timeout(Duration::from_secs(10), button.click())
+    let click = tokio::spawn(async move { button.click().await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!click.is_finished(), "the click went ahead while disabled");
+    eval(
+        &tab,
+        "document.getElementById('fieldset').disabled = false; true",
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), click)
         .await
         .expect("click within 10 s")
+        .expect("click task")
         .expect("click");
-    // A click on the disabled button would have fired no click event.
     assert_eq!(eval(&tab, "window.clicked === true").await, true);
     browser.close().await;
 }

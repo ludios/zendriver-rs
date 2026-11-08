@@ -325,19 +325,22 @@ impl Element {
     ///
     /// The element is disabled when any of these holds:
     ///
-    /// - It or an ancestor other than a `<fieldset>` matches CSS
-    ///   `:disabled`. So a control inside a disabled `<fieldset>` is
-    ///   disabled unless it is inside that fieldset's first `<legend>`, and
-    ///   so is an `<option>` in a disabled `<optgroup>` and a `<span>`
-    ///   inside a disabled `<button>`.
-    /// - It or an ancestor has `aria-disabled="true"`, in any case.
+    /// - It matches CSS `:disabled`. So a control inside a disabled
+    ///   `<fieldset>` is disabled unless it is inside that fieldset's first
+    ///   `<legend>`, and so is an `<option>` in a disabled `<optgroup>`.
+    /// - An ancestor that is not a `<fieldset>` matches `:disabled`, as a
+    ///   disabled `<button>` does for a `<span>` inside it.
+    /// - Of the element and its ancestors, the nearest one whose
+    ///   `aria-disabled` is `true` or `false` (in any mix of upper and
+    ///   lower case) has `true`.
     /// - It is a custom element (its name has a `-`) with a `disabled`
     ///   attribute. `:disabled` ignores a custom element unless it is
     ///   form-associated, and the check runs in zendriver's isolated world,
     ///   which can't see a `disabled` property that the page's JavaScript
     ///   defines; component libraries commonly reflect it to the attribute.
     ///
-    /// The ancestor walk stops at the element's shadow root. An element for
+    /// The ancestors are those in the element's own tree: the walk doesn't
+    /// leave the shadow root that contains the element. An element for
     /// which none of these holds is enabled.
     ///
     /// # Examples
