@@ -27,18 +27,26 @@ use crate::query::{BoundingBox, PageBox};
 
 /// The smallest axis-aligned rectangle around `quad`, a `DOM.getBoxModel`
 /// quad (`[x1, y1, x2, y2, x3, y3, x4, y4]`, its four corners), or `None`
-/// when `quad` isn't eight numbers.
+/// when `quad` isn't exactly eight numbers.
 fn border_box(quad: &Value) -> Option<BoundingBox> {
-    let coords: Vec<f64> = quad.as_array()?.iter().filter_map(Value::as_f64).collect();
+    let coords: Vec<f64> = quad
+        .as_array()?
+        .iter()
+        .map(Value::as_f64)
+        .collect::<Option<_>>()?;
     if coords.len() != 8 {
         return None;
     }
-    let xs = coords.iter().step_by(2);
-    let ys = coords.iter().skip(1).step_by(2);
-    let left = xs.clone().copied().fold(f64::INFINITY, f64::min);
-    let right = xs.copied().fold(f64::NEG_INFINITY, f64::max);
-    let top = ys.clone().copied().fold(f64::INFINITY, f64::min);
-    let bottom = ys.copied().fold(f64::NEG_INFINITY, f64::max);
+    let mut left = f64::INFINITY;
+    let mut top = f64::INFINITY;
+    let mut right = f64::NEG_INFINITY;
+    let mut bottom = f64::NEG_INFINITY;
+    for corner in coords.chunks_exact(2) {
+        left = left.min(corner[0]);
+        right = right.max(corner[0]);
+        top = top.min(corner[1]);
+        bottom = bottom.max(corner[1]);
+    }
     Some(BoundingBox {
         x: left,
         y: top,
@@ -203,10 +211,12 @@ impl Element {
     /// — Chrome reports this as `-32000 "Could not compute box model"` which
     /// is mapped to `None` rather than bubbling.
     ///
-    /// The box is the element's border box, the box that
-    /// `getBoundingClientRect()` reports: the smallest rectangle around the
-    /// four corners of `DOM.getBoxModel`'s `border` quad, which a CSS
-    /// transform can rotate. (`DOM.getBoxModel`, unlike
+    /// The box is the element's border box: the smallest rectangle around
+    /// the four corners of `DOM.getBoxModel`'s `border` quad, which a CSS
+    /// transform can rotate. Its coordinates are those of the top-level
+    /// page's viewport, so for a top-level element it is the box that
+    /// `getBoundingClientRect()` reports, and for an element in an iframe,
+    /// that box moved by the iframe's position. (`DOM.getBoxModel`, unlike
     /// `DOM.getContentQuads`, brings the page's layout up to date first, so
     /// the box is current even in a background tab, which renders no
     /// frames.)
@@ -451,7 +461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bounding_box_parses_dom_get_box_model_content_quad() {
+    async fn bounding_box_is_the_border_quads_box() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         let tab = Tab::new_for_test(sess);
@@ -504,6 +514,8 @@ mod tests {
         };
         assert_eq!(border_box(&diamond), Some(expected));
         assert_eq!(border_box(&json!([1.0, 2.0, 3.0])), None);
+        let stray = json!([60.0, 0.0, 120.0, 60.0, 60.0, 120.0, 0.0, 60.0, "x"]);
+        assert_eq!(border_box(&stray), None);
         assert_eq!(border_box(&Value::Null), None);
     }
 

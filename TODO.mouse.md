@@ -154,7 +154,7 @@ The durations mix the model with how it's played back. ghost-cursor's are 16.7 m
   - Replace the `bezier_path_seed_42` snapshot.
   - Tags: `unit`.
 - [ ] **3. `click` and `hover` end where the cursor comes to rest** (decision 3).
-  - **First fix `Element::bounding_box`.** It takes its origin from the content box's top-left corner (`DOM.getBoxModel`'s `content` quad), but its width and height from the border box (`model.width/height`). Its box is therefore shifted by the padding and border, and that already moves today's "center" off the center.
+  - `Element::bounding_box` is the border box since `b58d326dd` (it used to mix the content box's origin with the border box's size), so its centre is the element's.
   - **Order of steps:**
     1. Gate on visible, stable and enabled.
     2. Read the box.
