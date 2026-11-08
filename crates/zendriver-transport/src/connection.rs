@@ -921,9 +921,8 @@ where
 /// Spawn the actor with a custom `observer_timeout` **and** a
 /// caller-controlled accounted-bus capacity. `pub(crate)` — reached through
 /// [`spawn_actor_with_observers_and_timeout`] (which fixes the capacity at
-/// [`EVENT_BUS_CAPACITY`]) for production/general test code, and through
-/// `testing::MockConnection::pair_with_accounted_capacity` for downstream
-/// crates that need to force a deterministic
+/// [`EVENT_BUS_CAPACITY`]) for production/general test code, and directly
+/// by this crate's tests that force a deterministic
 /// [`AccountedRawEvent::Lagged`] by overflowing a small accounted bus
 /// without pushing thousands of frames through the real 1024-deep one.
 pub(crate) fn spawn_actor_with_observers_timeout_and_capacity<S>(
@@ -1929,9 +1928,7 @@ mod tests {
     /// capacity, so lag tests can force a broadcast overflow deterministically
     /// without pushing thousands of frames through the real
     /// [`EVENT_BUS_CAPACITY`] (1024). Thin wrapper over
-    /// [`spawn_actor_with_observers_timeout_and_capacity`], the same
-    /// entry point `testing::MockConnection::pair_with_accounted_capacity`
-    /// uses for downstream crates.
+    /// [`spawn_actor_with_observers_timeout_and_capacity`].
     fn spawn_actor_with_accounted_capacity<S>(ws: S, accounted_capacity: usize) -> Connection
     where
         S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>

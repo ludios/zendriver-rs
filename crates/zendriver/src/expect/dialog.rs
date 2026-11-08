@@ -225,10 +225,10 @@ impl Future for DialogExpectation {
             Poll::Ready(Ok(Err(e))) => return Poll::Ready(Err(e)),
             Poll::Ready(Err(_)) => {
                 // Sender dropped without sending anything — the watching
-                // task ended with no boundary and no match observed. The
-                // accounted stream ends a generation with a `Disconnected`
-                // or `Shutdown` boundary, so this arm is defensive. Surface
-                // as timeout: same observable shape as a genuine no-show.
+                // task ended with no end and no match observed. The
+                // session's events always end with an `Err` saying why,
+                // so this arm is defensive. Surface as timeout: same
+                // observable shape as a genuine no-show.
                 return Poll::Ready(Err(ZendriverError::Timeout(self.timeout)));
             }
             Poll::Pending => {}
@@ -345,7 +345,7 @@ mod tests {
     }
 
     /// Register an expectation, then simulate a transport teardown
-    /// (`AccountedRawEvent::Disconnected`, via `MockConnection::disconnect`)
+    /// (`SessionEnd::Disconnected`, via `MockConnection::disconnect`)
     /// before any dialog opens. The wait must resolve with
     /// `EventStreamIncomplete`, not `Timeout` — we lost the ability to
     /// observe the event, we didn't observe its genuine absence.

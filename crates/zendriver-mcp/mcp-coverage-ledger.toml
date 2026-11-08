@@ -607,6 +607,10 @@ api = "zendriver::SessionHandle::events"
 excluded = "Stream-returning subscription; not a request/response tool"
 
 [[entry]]
+api = "zendriver::SessionHandle::subscribe"
+excluded = "Stream-returning subscription; not a request/response tool"
+
+[[entry]]
 api = "zendriver::SessionEvents"
 excluded = "Stream-returning subscription; not a request/response tool"
 
