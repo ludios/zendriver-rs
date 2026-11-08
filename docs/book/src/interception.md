@@ -241,10 +241,10 @@ terminal method or rule action that Chrome refused (say, for a header
 name with a space), and a rule whose closure panicked. Failing it, rather
 than continuing it, keeps an entry that was meant to block or rewrite
 the request from silently letting the original through. And if the
-tab's interception ever falls so far behind that it loses events (a
-pause it never saw would stay paused), it disables and re-enables
-`Fetch`, which continues every paused request, those a stream holds
-included. When the tab's socket closes or its session detaches, its
+tab's interception ever falls so far behind that the queue of its `Fetch`
+events overflows (thousands unread, as when a closure blocks; a pause it
+never saw would stay paused), it disables and re-enables `Fetch`, which
+continues every paused request, those a stream holds included. When the tab's socket closes or its session detaches, its
 entries are dropped, which ends their streams.
 
 ## Proxy credentials

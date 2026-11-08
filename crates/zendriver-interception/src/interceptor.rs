@@ -47,13 +47,15 @@
 //!    dropped unanswered, a stream dropped with pauses unread. No other
 //!    entry is tried.
 //!
-//! If the multiplexer falls so far behind that the connection drops some
-//! of its events, it disables `Fetch` and enables it again: a pause it
-//! missed would otherwise stay paused, and `Fetch.disable` continues every
-//! paused request, including those a stream holds (whose release then
-//! fails). When the session's socket dies, is shut, or is replaced by a
-//! reconnect, or the session detaches from its target, the entries are
-//! dropped, which ends their streams.
+//! The multiplexer reads the session's `Fetch` events in order and without
+//! gaps. If it falls so far behind that their queue overflows (thousands
+//! of them unread, as when a closure blocks), it subscribes again and
+//! disables `Fetch` and enables it again: a pause it missed would otherwise
+//! stay paused, and `Fetch.disable` continues every paused request,
+//! including those a stream holds (whose release then fails). When the
+//! session's socket dies, is shut, or is replaced by a reconnect, or the
+//! session detaches from its target, the entries are dropped, which ends
+//! their streams.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -628,9 +630,8 @@ pub(crate) enum Command {
     Answered(u64),
 }
 
-/// A session's `Fetch` events, in order, until one `Err` says why they
-/// stopped (see [`session_events`]).
-type SessionEvents = Pin<Box<dyn Stream<Item = Result<Arc<RawEvent>, SessionEnd>> + Send>>;
+/// A session's `Fetch` events, in order (see [`fetch_events`]).
+type FetchEvents = Pin<Box<dyn Stream<Item = Result<Arc<RawEvent>, SessionEnd>> + Send>>;
 
 /// How long the multiplexer remembers having answered a proxy challenge with
 /// the credentials. Chrome repeats a challenge whose credentials the proxy
@@ -706,21 +707,20 @@ fn auth_response(
     })
 }
 
-/// `session`'s `Fetch` events ([`SessionHandle::events`]), in order, until
-/// one `Err` says why they stopped (for example, the session detached).
-/// The returned stream also ends at once, with no `Err`, when the socket is
-/// shut or replaced (either cancels the socket's shutdown token), skipping
-/// the events still queued, since no answer to them could be sent.
-fn session_events(session: &SessionHandle) -> SessionEvents {
+/// `session`'s `Fetch` events ([`SessionHandle::events`]), in order. The
+/// stream ends after an `Err` that says why the events stopped (for
+/// example, the session detached), or at once, with no `Err`, when the
+/// socket is shut or replaced (either cancels the socket's shutdown token),
+/// skipping the events still queued, since no answer to them could be
+/// sent.
+fn fetch_events(session: &SessionHandle) -> FetchEvents {
     let shut = session.connection().shutdown_token().cancelled_owned();
     Box::pin(session.events(&["Fetch."]).take_until(shut))
 }
 
 /// The next of `events`, or `None` if they ended. Never ready while there
 /// are no events to read.
-async fn next_event(
-    events: &mut Option<SessionEvents>,
-) -> Option<Result<Arc<RawEvent>, SessionEnd>> {
+async fn next_event(events: &mut Option<FetchEvents>) -> Option<Result<Arc<RawEvent>, SessionEnd>> {
     match events {
         Some(events) => events.next().await,
         None => std::future::pending().await,
@@ -876,9 +876,9 @@ struct Mux {
     /// The entries, in the order a paused request walks them.
     slots: Vec<Slot>,
     proxy_auth: Option<ProxyAuth>,
-    /// The session's events, subscribed to while there are entries or
-    /// credentials.
-    events: Option<SessionEvents>,
+    /// The session's `Fetch` events, subscribed to while `Fetch` is on (or
+    /// may be: after a change that Chrome refused).
+    events: Option<FetchEvents>,
     answered: Answered,
     /// The pauses decided and not answered yet, by token.
     held: HashMap<u64, Hold>,
@@ -1118,7 +1118,7 @@ impl Mux {
     /// rollback to settle ([`unsubscribe_if_idle`](Self::unsubscribe_if_idle)).
     async fn apply(&mut self) -> Result<(), InterceptionError> {
         if self.events.is_none() && !self.is_idle() {
-            self.events = Some(session_events(&self.session));
+            self.events = Some(fetch_events(&self.session));
         }
         let held_open = !self.held.is_empty();
         let applied = configure(
@@ -1149,15 +1149,19 @@ impl Mux {
         }
     }
 
-    /// The events overflowed their queue, so a request paused since may
-    /// have been missed, and would stay paused for good: disable `Fetch`,
-    /// which continues every request still paused (including those a
-    /// stream holds), subscribe again, and enable `Fetch` again.
+    /// The `Fetch` events overflowed their queue, so a request paused after
+    /// the queue filled may have been missed, and would stay paused for
+    /// good: subscribe again, then disable `Fetch`, which continues every
+    /// request still paused (including those a stream holds), then
+    /// configure `Fetch` as the entries need. Subscribing first means that
+    /// no pause is missed if Chrome refuses the `Fetch.disable`; a pause it
+    /// does release can still reach the multiplexer, whose answer then
+    /// fails, with a warning.
     async fn recover(&mut self) {
         warn!(
-            "interception: its Fetch events overflowed their queue; disabling Fetch, which continues every paused request, then enabling it again"
+            "interception: the multiplexer's Fetch events overflowed their queue; disabling Fetch, which continues every paused request"
         );
-        self.events = None;
+        self.events = Some(fetch_events(&self.session));
         match self.session.call("Fetch.disable", json!({})).await {
             // It released every pause.
             Ok(_) => self.held.clear(),
@@ -1314,7 +1318,7 @@ async fn run(
                 Some(Ok(event)) => mux.on_event(&event),
                 Some(Err(SessionEnd::Overflowed)) => mux.recover().await,
                 // Any other end: the session detached, or its socket died or
-                // was shut or replaced (a new socket doesn't have it).
+                // was shut or replaced.
                 Some(Err(_)) | None => mux.end(),
             },
         }
@@ -2063,6 +2067,45 @@ mod tests {
                 { "urlPattern": "*/b/*", "requestStage": "Request" },
             ])
         );
+
+        // It subscribed again: a pause after the recovery is answered.
+        pause(&mock, "R9", "https://x.test/a/1", json!({})).await;
+        assert_eq!(
+            answered(&mut mock, "Fetch.failRequest").await,
+            json!({ "requestId": "R9", "errorReason": "Failed" })
+        );
+        conn.shutdown();
+    }
+
+    /// Other events of the session, and other sessions' `Fetch` events,
+    /// never reach the multiplexer's queue, so however many arrive while it
+    /// waits for Chrome, they don't make it disable `Fetch`.
+    #[tokio::test]
+    async fn other_traffic_leaves_fetch_alone() {
+        let (mut mock, conn) = MockConnection::pair_with_session_queue_capacity(4);
+        let interceptor = Interceptor::new(SessionHandle::new(conn.clone(), "S1"));
+        let first = vec![rule("*/a/*", Action::Block(AbortReason::Failed))];
+        let (_first, _) = applied(&mut mock, interceptor.insert(first, Position::Last)).await;
+
+        let second = vec![rule("*/b/*", Action::Block(AbortReason::Failed))];
+        let second = tokio::spawn({
+            let interceptor = interceptor.clone();
+            async move { interceptor.insert(second, Position::Last).await }
+        });
+        let id = mock.expect_cmd("Fetch.enable").await;
+        for i in 0..10 {
+            mock.emit_event_for_session("Network.dataReceived", json!({}), "S1")
+                .await;
+            let paused =
+                json!({ "requestId": format!("X{i}"), "request": { "url": "https://x.test/a/1" } });
+            mock.emit_event_for_session("Fetch.requestPaused", paused, "S2")
+                .await;
+        }
+        mock.reply(id, json!({})).await;
+        let _second = second.await.unwrap().unwrap();
+
+        let sent = sent_until_quiet(&mut mock).await;
+        assert!(sent.is_empty(), "{sent:?}");
         conn.shutdown();
     }
 
