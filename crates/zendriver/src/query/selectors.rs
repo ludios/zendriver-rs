@@ -183,8 +183,8 @@ impl SelectorKind {
 /// function instead of hand-rolling the
 /// `contextId` dance per resolver.
 async fn eval_expr_in_scope(scope: &QueryScope<'_>, expression: String) -> Result<Value> {
-    let session = scope.session();
-    for attempt in 0..2 {
+    let expression = expression.as_str();
+    crate::isolated_world::retry_once_on_stale_context(|| async move {
         let mut params = json!({
             "expression": expression,
             "returnByValue": false,
@@ -192,17 +192,9 @@ async fn eval_expr_in_scope(scope: &QueryScope<'_>, expression: String) -> Resul
         if let Some(id) = scope.execution_context_id().await? {
             params["contextId"] = json!(id);
         }
-        match session.call("Runtime.evaluate", params).await {
-            Ok(v) => return Ok(v),
-            Err(e) => {
-                let e = ZendriverError::from(e);
-                if attempt > 0 || !crate::isolated_world::is_stale_context(&e) {
-                    return Err(e);
-                }
-            }
-        }
-    }
-    unreachable!("the retry loop returns on both the Ok and the second-attempt Err arm")
+        Ok(scope.session().call("Runtime.evaluate", params).await?)
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------

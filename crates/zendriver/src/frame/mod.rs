@@ -17,7 +17,7 @@
 //! # Ok(()) }
 //! ```
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -27,17 +27,13 @@ use tokio::sync::{Mutex, RwLock};
 use zendriver_transport::SessionHandle;
 
 use crate::error::{Result, ZendriverError};
+use crate::isolated_world::retry_once_on_stale_context;
 use crate::load_tracker::next_stop;
 use crate::tab::{Tab, TabInner};
 
 pub mod lifecycle;
 pub mod oopif;
 pub(crate) mod tree;
-
-/// The object group of the remote objects that
-/// [`Frame::evaluate_main`] makes to find an iframe's main world, so that
-/// one `Runtime.releaseObjectGroup` releases them.
-const MAIN_WORLD_LOOKUP: &str = "zendriver-main-world-lookup";
 
 /// Default wait window for [`Frame::wait_for_load`]. Mirrors the constant
 /// in [`crate::tab::Tab::wait_for_load`] so single-frame and tab-level
@@ -301,36 +297,33 @@ impl Frame {
     /// ```
     pub async fn evaluate<T: DeserializeOwned>(&self, js: impl AsRef<str>) -> Result<T> {
         let js = js.as_ref();
-        for attempt in 0..2 {
+        let session = &self.inner.session;
+        let res = retry_once_on_stale_context(|| async move {
             let ctx_id = self.ensure_isolated_world().await?;
-            let res = self
-                .inner
-                .session
-                .call(
-                    "Runtime.evaluate",
-                    json!({
-                        "expression": js,
-                        "contextId": ctx_id,
-                        "returnByValue": true,
-                        "awaitPromise": true,
-                    }),
-                )
-                .await;
-            match res {
-                Ok(v) => return Self::extract_value(&v),
-                Err(e) => {
-                    // The raw session answers with a `CallError`.
-                    let e = ZendriverError::from(e);
-                    if attempt > 0 || !crate::isolated_world::is_stale_context(&e) {
-                        return Err(e);
-                    }
-                    // A navigation destroyed the context after
-                    // `ensure_isolated_world` returned its id; the next
-                    // iteration looks up the new document's context.
-                }
-            }
+            let params = json!({
+                "expression": js,
+                "contextId": ctx_id,
+                "returnByValue": true,
+                "awaitPromise": true,
+            });
+            Ok(session.call("Runtime.evaluate", params).await?)
+        })
+        .await?;
+        Self::extract_value(&res)
+    }
+
+    /// Whether this frame is the top frame of its CDP session, where
+    /// `Runtime.evaluate` with no `contextId` runs in the frame's main
+    /// world: the tab's main frame, or an OOPIF, which zendriver registers
+    /// with a session of its own (and registers no frame under it there).
+    fn is_session_root(&self) -> bool {
+        if self.is_main() {
+            return true;
         }
-        unreachable!("the retry loop returns on both the Ok and the second-attempt Err arm")
+        let Some(tab) = self.tab_for_synthesize() else {
+            return false;
+        };
+        tab.session().session_id() != self.inner.session.session_id()
     }
 
     /// The `executionContextId` of the main world of this frame's current
@@ -341,75 +334,107 @@ impl Frame {
     /// frame's `document`. `DOM.resolveNode` with no context id wraps that
     /// document in the main world of the document's own frame, and V8
     /// writes that world's context id into the id of the object it returns
-    /// (see [`crate::isolated_world::context_id_of_object`]). Both objects are
-    /// in the [`MAIN_WORLD_LOOKUP`] object group, for the caller to release.
+    /// (see [`crate::isolated_world::context_id_of_object`]). The lookup's
+    /// objects are in an object group of their own, which this releases
+    /// before it returns, best effort.
     ///
     /// Asks Chrome on every call, for the reason given on
     /// [`Frame::ensure_isolated_world`].
     ///
     /// # Errors
     ///
-    /// The error of any of the calls, or [`ZendriverError::Navigation`] when
-    /// a reply lacks what it should hold.
+    /// The error of any of the calls; [`ZendriverError::JsException`] if
+    /// reading `document` throws; or [`ZendriverError::Navigation`] when a
+    /// reply lacks what it should hold, and (with a message that
+    /// [`crate::isolated_world::is_stale_context`] recognizes) when the node
+    /// that `DOM.resolveNode` wraps is no document, as after a navigation
+    /// into another renderer process gave its backend node id to another
+    /// node.
     async fn main_world_context_id(&self) -> Result<i64> {
+        static NEXT_LOOKUP: AtomicU64 = AtomicU64::new(0);
         let session = &self.inner.session;
-        let missing = |what: &str| {
-            ZendriverError::Navigation(format!("frame {}: {what}", self.inner.frame_id))
-        };
-        let isolated = self.ensure_isolated_world().await?;
-        let document = session
+        let group = format!(
+            "zendriver-main-world-lookup-{}",
+            NEXT_LOOKUP.fetch_add(1, Ordering::Relaxed)
+        );
+        let found: Result<i64> = async {
+            let isolated = self.ensure_isolated_world().await?;
+            let missing = |what: &str| ZendriverError::Navigation(format!("frame {}: {what}", self.id()));
+            let reply = session
+                .call(
+                    "Runtime.evaluate",
+                    json!({ "expression": "document", "contextId": isolated, "objectGroup": group }),
+                )
+                .await?;
+            if let Some(e) = ZendriverError::js_exception_in(&reply) {
+                return Err(e);
+            }
+            let isolated_document = reply["result"]["objectId"]
+                .as_str()
+                .ok_or_else(|| missing("no object for its document"))?;
+            let described = session
+                .call("DOM.describeNode", json!({ "objectId": isolated_document }))
+                .await?;
+            let backend_node_id = described["node"]["backendNodeId"].as_i64().ok_or_else(|| {
+                missing("DOM.describeNode returned no backendNodeId for its document")
+            })?;
+            let resolved = session
+                .call(
+                    "DOM.resolveNode",
+                    json!({ "backendNodeId": backend_node_id, "objectGroup": group }),
+                )
+                .await?;
+            let main_document = &resolved["object"];
+            if main_document["description"] != "#document" {
+                return Err(ZendriverError::Navigation(format!(
+                    "Cannot find context of frame {}: its document's backend node id now names \
+                     another node",
+                    self.id()
+                )));
+            }
+            let main_document = main_document["objectId"]
+                .as_str()
+                .ok_or_else(|| missing("DOM.resolveNode returned no objectId for its document"))?;
+            crate::isolated_world::context_id_of_object(main_document)
+        }
+        .await;
+        // Best effort: a handle left behind only holds memory until its
+        // document goes away.
+        let _ = session
             .call(
-                "Runtime.evaluate",
-                json!({
-                    "expression": "document",
-                    "contextId": isolated,
-                    "objectGroup": MAIN_WORLD_LOOKUP,
-                }),
+                "Runtime.releaseObjectGroup",
+                json!({ "objectGroup": group }),
             )
-            .await?;
-        let document = document["result"]["objectId"]
-            .as_str()
-            .ok_or_else(|| missing("no object for its document"))?;
-        let described = session
-            .call("DOM.describeNode", json!({ "objectId": document }))
-            .await?;
-        let document = described["node"]["backendNodeId"].as_i64().ok_or_else(|| {
-            missing("DOM.describeNode returned no backendNodeId for its document")
-        })?;
-        let resolved = session
-            .call(
-                "DOM.resolveNode",
-                json!({ "backendNodeId": document, "objectGroup": MAIN_WORLD_LOOKUP }),
-            )
-            .await?;
-        let main = resolved["object"]["objectId"]
-            .as_str()
-            .ok_or_else(|| missing("DOM.resolveNode returned no objectId for its document"))?;
-        crate::isolated_world::context_id_of_object(main)
+            .await;
+        found
     }
 
     /// Evaluate JS in this frame's **main world** (page globals visible).
     ///
     /// Escape hatch when isolated-world semantics don't fit. Dispatches
-    /// `Runtime.evaluate` on the frame's session. For the tab's main frame
-    /// it sends no `contextId`; for an iframe it sends the id of the
+    /// `Runtime.evaluate` on the frame's session. For the top frame of that
+    /// session (the tab's main frame, or an OOPIF on a session of its own)
+    /// it sends no `contextId`; for any other iframe it sends the id of the
     /// iframe's main world, which it looks up first without
     /// `Runtime.enable`. `js` is a script, as for
     /// [`crate::Tab::evaluate_main`]: its completion value (for a script
     /// that ends with an expression, that expression's value) is the
     /// result.
     ///
-    /// On an iframe, a navigation can destroy the context between its
-    /// lookup and the evaluation; the call then looks the context up again
-    /// once and retries, as [`Frame::evaluate`] does.
+    /// On such an iframe, a navigation can destroy a context that the call
+    /// looked up before the call uses it; the call then looks its contexts
+    /// up again once and retries, as [`Frame::evaluate`] does.
     ///
     /// # Errors
     ///
     /// [`ZendriverError::JsException`] when the script throws, and
     /// [`ZendriverError::Serde`] when the result can't be decoded into `T`.
-    /// On an iframe, also the error of a CDP call of the lookup, for example
-    /// when the iframe is gone (a [`ZendriverError::FrameNotFound`] when
-    /// its id can't be recovered).
+    /// Otherwise the error of a CDP call (such as [`ZendriverError::Cdp`] or
+    /// [`ZendriverError::CdpTimeout`]): of the evaluation, or of the lookup,
+    /// for example when the iframe is gone (a
+    /// [`ZendriverError::FrameNotFound`] when its id can't be recovered).
+    /// The lookup can also fail with [`ZendriverError::Navigation`] when a
+    /// reply lacks what it should hold.
     ///
     /// # Examples
     ///
@@ -423,38 +448,25 @@ impl Frame {
     /// # Ok(()) }
     /// ```
     pub async fn evaluate_main<T: DeserializeOwned>(&self, js: impl AsRef<str>) -> Result<T> {
+        let js = js.as_ref();
         let session = &self.inner.session;
-        let mut params = json!({
-            "expression": js.as_ref(),
-            "returnByValue": true,
-            "awaitPromise": true,
-        });
-        if self.inner.parent_frame_id.is_none() {
-            let res = session.call("Runtime.evaluate", params).await?;
-            return Self::extract_value(&res);
-        }
-        for attempt in 0..2 {
-            params["contextId"] = json!(self.main_world_context_id().await?);
-            let res = session.call("Runtime.evaluate", params.clone()).await;
-            // Best effort: a handle left behind only holds memory until its
-            // document goes away.
-            let _ = session
-                .call(
-                    "Runtime.releaseObjectGroup",
-                    json!({ "objectGroup": MAIN_WORLD_LOOKUP }),
-                )
-                .await;
-            match res {
-                Ok(v) => return Self::extract_value(&v),
-                Err(e) => {
-                    let e = ZendriverError::from(e);
-                    if attempt > 0 || !crate::isolated_world::is_stale_context(&e) {
-                        return Err(e);
-                    }
-                }
-            }
-        }
-        unreachable!("the retry loop returns on both the Ok and the second-attempt Err arm")
+        let res = if self.is_session_root() {
+            let params = json!({ "expression": js, "returnByValue": true, "awaitPromise": true });
+            session.call("Runtime.evaluate", params).await?
+        } else {
+            retry_once_on_stale_context(|| async move {
+                let context_id = self.main_world_context_id().await?;
+                let params = json!({
+                    "expression": js,
+                    "contextId": context_id,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                });
+                Ok(session.call("Runtime.evaluate", params).await?)
+            })
+            .await?
+        };
+        Self::extract_value(&res)
     }
 
     /// The frame's current document HTML.
@@ -1060,56 +1072,93 @@ mod tests {
         conn.shutdown();
     }
 
-    /// On an iframe, `Frame::evaluate_main` finds the iframe's main world
-    /// through its isolated world: `document` there, its backend node id,
-    /// `DOM.resolveNode` with no context id, and the context id in the id
-    /// of the object that comes back. It evaluates there, then releases
-    /// the lookup's objects.
-    #[tokio::test]
-    async fn evaluate_main_on_an_iframe_evaluates_in_its_main_world() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let frame = Frame::new(
+    /// A `Frame` for the iframe `CHILD` under `TOP`, on `session`, with no
+    /// tab.
+    fn iframe_on(session: SessionHandle) -> Frame {
+        Frame::new(
             "CHILD".to_string(),
             Some("TOP".to_string()),
             String::new(),
             None,
-            sess,
+            session,
             Weak::new(),
-        );
-        let fut = tokio::spawn(async move { frame.evaluate_main::<i32>("1+1").await });
+        )
+    }
 
-        let id = next_cmd(&mut mock, "Page.createIsolatedWorld").await;
+    /// Serve the main-world lookup of [`Frame::main_world_context_id`] for
+    /// the frame `CHILD`, answering that the main world's context id is
+    /// `context`, and return the lookup's object group.
+    async fn serve_main_world_lookup(mock: &mut MockConnection, context: i64) -> String {
+        let id = next_cmd(mock, "Page.createIsolatedWorld").await;
         assert_eq!(mock.last_sent()["params"]["frameId"], "CHILD");
         mock.reply(id, json!({ "executionContextId": 7 })).await;
-        let id = next_cmd(&mut mock, "Runtime.evaluate").await;
-        assert_eq!(mock.last_sent()["params"]["expression"], "document");
-        assert_eq!(mock.last_sent()["params"]["contextId"], 7);
+        let id = next_cmd(mock, "Runtime.evaluate").await;
+        let params = mock.last_sent()["params"].clone();
+        assert_eq!(params["expression"], "document");
+        assert_eq!(params["contextId"], 7);
+        let group = params["objectGroup"].as_str().unwrap().to_string();
         mock.reply(id, json!({ "result": { "objectId": "1.7.1" } }))
             .await;
-        let id = next_cmd(&mut mock, "DOM.describeNode").await;
+        let id = next_cmd(mock, "DOM.describeNode").await;
         assert_eq!(mock.last_sent()["params"]["objectId"], "1.7.1");
         mock.reply(id, json!({ "node": { "backendNodeId": 40 } }))
             .await;
-        let id = next_cmd(&mut mock, "DOM.resolveNode").await;
-        assert_eq!(mock.last_sent()["params"]["backendNodeId"], 40);
-        assert!(
-            mock.last_sent()["params"]
-                .get("executionContextId")
-                .is_none()
-        );
-        mock.reply(id, json!({ "object": { "objectId": "1.3.2" } }))
-            .await;
+        let id = next_cmd(mock, "DOM.resolveNode").await;
+        let params = mock.last_sent()["params"].clone();
+        assert_eq!(params["backendNodeId"], 40);
+        assert!(params.get("executionContextId").is_none());
+        assert_eq!(params["objectGroup"], group.as_str());
+        let object = json!({ "objectId": format!("1.{context}.2"), "description": "#document" });
+        mock.reply(id, json!({ "object": object })).await;
+        let id = next_cmd(mock, "Runtime.releaseObjectGroup").await;
+        assert_eq!(mock.last_sent()["params"]["objectGroup"], group.as_str());
+        mock.reply(id, json!({})).await;
+        group
+    }
+
+    /// On an iframe, `Frame::evaluate_main` finds the iframe's main world
+    /// through its isolated world: `document` there, its backend node id,
+    /// `DOM.resolveNode` with no context id, and the context id in the id
+    /// of the object that comes back. It releases the lookup's objects,
+    /// then evaluates there.
+    #[tokio::test]
+    async fn evaluate_main_on_an_iframe_evaluates_in_its_main_world() {
+        let (mut mock, conn) = MockConnection::pair();
+        let frame = iframe_on(SessionHandle::new(conn.clone(), "S1"));
+        let fut = tokio::spawn(async move { frame.evaluate_main::<i32>("1+1").await });
+
+        serve_main_world_lookup(&mut mock, 3).await;
         let id = next_cmd(&mut mock, "Runtime.evaluate").await;
         assert_eq!(mock.last_sent()["params"]["expression"], "1+1");
         assert_eq!(mock.last_sent()["params"]["contextId"], 3);
         mock.reply(id, json!({ "result": { "value": 2, "type": "number" } }))
             .await;
-        let id = next_cmd(&mut mock, "Runtime.releaseObjectGroup").await;
-        assert_eq!(mock.last_sent()["params"]["objectGroup"], MAIN_WORLD_LOOKUP);
-        mock.reply(id, json!({})).await;
 
         assert_eq!(fut.await.unwrap().unwrap(), 2);
+        conn.shutdown();
+    }
+
+    /// When a navigation destroys the main world between the lookup and the
+    /// evaluation, `Frame::evaluate_main` looks it up again, in an object
+    /// group of its own, and evaluates there; it retries only once.
+    #[tokio::test]
+    async fn evaluate_main_on_an_iframe_retries_a_stale_context_once() {
+        let (mut mock, conn) = MockConnection::pair();
+        let frame = iframe_on(SessionHandle::new(conn.clone(), "S1"));
+        let fut = tokio::spawn(async move { frame.evaluate_main::<i32>("1+1").await });
+
+        let mut groups = Vec::new();
+        for context in [3, 4] {
+            groups.push(serve_main_world_lookup(&mut mock, context).await);
+            let id = next_cmd(&mut mock, "Runtime.evaluate").await;
+            assert_eq!(mock.last_sent()["params"]["contextId"], context);
+            mock.reply_err(id, -32000, "Cannot find context with specified id")
+                .await;
+        }
+
+        let err = fut.await.unwrap().unwrap_err();
+        assert!(crate::isolated_world::is_stale_context(&err), "{err:?}");
+        assert_ne!(groups[0], groups[1]);
         conn.shutdown();
     }
 
