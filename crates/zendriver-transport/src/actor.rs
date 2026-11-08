@@ -166,6 +166,31 @@ fn socket_death_expected(
         })
 }
 
+/// Ends a generation in the connection's [`Routes`] when the actor of that
+/// generation stops, however it stops: when it returns, panics, or its task
+/// is dropped (as a runtime shutting down does).
+struct RoutesEnder {
+    /// `None` once ended, or if the actor runs without a connection.
+    routes: Option<Arc<Mutex<Routes>>>,
+    generation: u64,
+}
+
+impl RoutesEnder {
+    /// End the generation now, for the reason `end`, unless it was already
+    /// ended.
+    fn end(&mut self, end: SessionEnd) {
+        if let Some(routes) = self.routes.take() {
+            routes::lock(&routes).end_generation(self.generation, end);
+        }
+    }
+}
+
+impl Drop for RoutesEnder {
+    fn drop(&mut self) {
+        self.end(SessionEnd::Shutdown);
+    }
+}
+
 /// Runs the actor loop until `shutdown` is cancelled or the WS dies.
 ///
 /// Generic over the WS sink + stream so tests can drive in-memory streams
@@ -204,6 +229,10 @@ pub(crate) async fn run_actor<S>(
     // gone already, or in a test that runs the actor without one.
     let routes: Option<Arc<Mutex<Routes>>> =
         weak_inner.upgrade().map(|inner| Arc::clone(&inner.routes));
+    let mut routes_ender = RoutesEnder {
+        routes: routes.clone(),
+        generation: accounted.generation,
+    };
     // Per-generation monotonic counter for `AccountedRawEvent::Event::sequence`.
     // Reset to 1 on every actor run (a fresh call to `run_actor`, i.e. every
     // reconnect); only advances when `accounted_tx` actually has a
@@ -347,6 +376,16 @@ pub(crate) async fn run_actor<S>(
                                 }}
                             }
                             Ok(CdpInbound::Event { method, params, session_id }) => {
+                                // A session attached through another one
+                                // ends with it, without a detach of its own.
+                                if method == "Target.attachedToTarget" {
+                                    let child = params["sessionId"].as_str();
+                                    if let (Some(routes), Some(parent), Some(child)) =
+                                        (&routes, &session_id, child)
+                                    {
+                                        routes::lock(routes).attach(accounted.generation, parent, child);
+                                    }
+                                }
                                 // Branch on target-lifecycle events before broadcasting.
                                 if method == "Target.attachedToTarget" && !observers.is_empty() {
                                     match serde_json::from_value::<TargetAttached>(params.clone()) {
@@ -355,9 +394,11 @@ pub(crate) async fn run_actor<S>(
                                                 let conn = Connection { inner: strong };
                                                 let timeout_dur = conn.observer_timeout();
                                                 let observers_clone = observers.clone();
+                                                let generation = accounted.generation;
                                                 tokio::spawn(async move {
                                                     handle_target_attached(
                                                         conn,
+                                                        generation,
                                                         ev,
                                                         observers_clone,
                                                         timeout_dur,
@@ -396,7 +437,8 @@ pub(crate) async fn run_actor<S>(
                                             // or finds it here, never neither
                                             // (see `SessionHandle::subscribe_accounted`).
                                             if let Some(routes) = &routes {
-                                                routes::lock(routes).detach(&ev.session_id);
+                                                routes::lock(routes)
+                                                    .detach(accounted.generation, &ev.session_id);
                                             }
                                             if !observers.is_empty() {
                                                 // Mirror the `attachedToTarget` path:
@@ -500,42 +542,36 @@ pub(crate) async fn run_actor<S>(
     // of it (see `Connection::subscribe_raw_accounted`). Recorded before
     // `cmd_rx` drops (when this function returns), so a call that finds the
     // command channel closed learns why (see `actor_gone_error`).
+    let ended = if drain_code == crate::connection::DISCONNECTED_CODE {
+        GenerationEnd::SocketDied
+    } else {
+        GenerationEnd::ShutDown
+    };
     if let Some(inner) = weak_inner.upgrade() {
         let mut end = inner
             .generation_end
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if inner.generation.load(std::sync::atomic::Ordering::Relaxed) == accounted.generation {
-            let ended = if drain_code == crate::connection::DISCONNECTED_CODE {
-                GenerationEnd::SocketDied
-            } else {
-                GenerationEnd::ShutDown
-            };
             *end = Some(ended);
             let _ = accounted.tx.send(ended.announcement(accounted.generation));
         }
+        // Under the same lock, so that both announce the same end. (`Routes`
+        // keeps its own generation, so this does nothing if a reconnect
+        // replaced this actor.)
+        routes_ender.end(ended.into());
     }
-
-    // Outside `generation_end`'s lock: `Routes` keeps its own generation, so
-    // this does nothing if a reconnect has replaced this actor.
-    if let Some(routes) = &routes {
-        let end = if drain_code == crate::connection::DISCONNECTED_CODE {
-            SessionEnd::Disconnected
-        } else {
-            SessionEnd::Shutdown
-        };
-        routes::lock(routes).end_generation(accounted.generation, end);
-    }
+    // If the connection is gone.
+    routes_ender.end(ended.into());
 
     // Drain pending into transport errors so callers don't hang. `drain_code`
     // is a reserved sentinel matched by `Connection::call_raw`: it surfaces
     // drained pendings as `TransportError::Shutdown` (clean shutdown) or
     // `TransportError::Disconnected` (unexpected ws death) rather than a
     // generic `Rpc` error.
-    let message = if drain_code == crate::connection::DISCONNECTED_CODE {
-        "connection lost"
-    } else {
-        "connection shut down"
+    let message = match ended {
+        GenerationEnd::SocketDied => "connection lost",
+        GenerationEnd::ShutDown => "connection shut down",
     };
     for (_id, call) in pending.drain() {
         let _ = call.reply.send(Err(CdpRpcError {
@@ -579,6 +615,7 @@ pub(crate) async fn run_actor<S>(
 /// process is tearing down and the calls are moot.
 async fn handle_target_attached(
     conn: Connection,
+    generation: u64,
     ev: TargetAttached,
     observers: Vec<Arc<dyn TargetObserver>>,
     observer_timeout: Duration,
@@ -589,6 +626,7 @@ async fn handle_target_attached(
             session_id: &session_id,
             target_info: &ev.target_info,
             conn: &conn,
+            generation,
         };
         let name = obs.name();
         let fut = obs.on_target_attached(paused);

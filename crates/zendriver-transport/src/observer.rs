@@ -124,6 +124,9 @@ pub struct PausedSession<'a> {
     /// Decoded `targetInfo` payload (target id, kind, url, ...).
     pub target_info: &'a TargetInfo,
     pub(crate) conn: &'a Connection,
+    /// The [`Connection::connection_generation`] whose socket attached the
+    /// session.
+    pub(crate) generation: u64,
 }
 
 impl<'a> PausedSession<'a> {
@@ -139,9 +142,25 @@ impl<'a> PausedSession<'a> {
             .await
     }
 
+    /// A handle to the newly attached session, for an observer that keeps
+    /// one (e.g. zendriver's `TabRegistrar`). Unlike
+    /// [`SessionHandle::new`](crate::SessionHandle::new), it knows which
+    /// socket attached the session, so if a
+    /// [`Connection::reconnect`] replaced that socket before this call, its
+    /// [`events`](crate::SessionHandle::events) end at once with
+    /// [`SessionEnd::Reconnected`](crate::SessionEnd::Reconnected).
+    #[must_use]
+    pub fn session_handle(&self) -> crate::SessionHandle {
+        crate::SessionHandle::in_generation(
+            self.conn.clone(),
+            self.session_id.to_owned(),
+            self.generation,
+        )
+    }
+
     /// The underlying [`Connection`]. Observers that need to spawn
-    /// additional [`crate::SessionHandle`]s (e.g. zendriver's
-    /// `TabRegistrar`) clone this to bind a fresh handle for the newly
+    /// additional [`crate::SessionHandle`]s clone this to bind a fresh
+    /// handle; [`Self::session_handle`] is the handle for the newly
     /// attached `sessionId`.
     #[must_use]
     pub fn connection(&self) -> &'a Connection {

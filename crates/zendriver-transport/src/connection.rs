@@ -251,6 +251,15 @@ pub(crate) enum GenerationEnd {
     ShutDown,
 }
 
+impl From<GenerationEnd> for crate::routes::SessionEnd {
+    fn from(end: GenerationEnd) -> Self {
+        match end {
+            GenerationEnd::SocketDied => Self::Disconnected,
+            GenerationEnd::ShutDown => Self::Shutdown,
+        }
+    }
+}
+
 impl GenerationEnd {
     /// The announcement, on the accounted bus, that generation `generation`
     /// ended this way.

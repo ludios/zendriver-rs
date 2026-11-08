@@ -2654,8 +2654,7 @@ impl TargetObserver for TabRegistrar {
                 // the tabs registry for a matching frame_id (preferring
                 // `opener_frame_id` when present, falling back to
                 // `target_id`).
-                let conn = session.connection().clone();
-                let new_session = SessionHandle::new(conn, session.session_id.to_string());
+                let new_session = session.session_handle();
                 crate::frame::oopif::register_oopif_frame(
                     &browser,
                     session.target_info,
@@ -2712,8 +2711,7 @@ impl TargetObserver for TabRegistrar {
                     }
                 }
 
-                let conn = session.connection().clone();
-                let new_session = SessionHandle::new(conn, session.session_id.to_string());
+                let new_session = session.session_handle();
                 let input = InputController::new(self.input_profile.clone());
                 let weak_inner = Arc::downgrade(&browser);
                 // Give this tab its own CDP socket for its traffic (falls back to

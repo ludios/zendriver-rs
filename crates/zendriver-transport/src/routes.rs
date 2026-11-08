@@ -16,6 +16,7 @@ use std::task::{Context, Poll, ready};
 use futures::Stream;
 use futures::stream::FusedStream;
 use tokio::sync::mpsc::{self, error::TrySendError};
+use tracing::warn;
 
 use crate::frame::RawEvent;
 
@@ -107,12 +108,14 @@ struct Route {
     /// The methods the subscriber asked for: an entry ending in `.` stands
     /// for every method of that domain.
     methods: Box<[&'static str]>,
+    /// The sending end of the subscriber's queue.
     queue: mpsc::Sender<RawEvent>,
     /// Shared with the subscriber's [`SessionEvents`].
     end: Arc<OnceLock<SessionEnd>>,
 }
 
 impl Route {
+    /// Whether the subscriber asked for the events of method `method`.
     fn wants(&self, method: &str) -> bool {
         self.methods.iter().any(|wanted| {
             if wanted.ends_with('.') {
@@ -152,9 +155,15 @@ pub(crate) struct Routes {
     /// The subscribers, by the `sessionId` of their session (`None` for the
     /// connection's root session).
     by_session: HashMap<Option<String>, Vec<Route>>,
-    /// The sessions that Chrome has detached. Grows by one entry per
-    /// detached session over the connection's life.
+    /// The sessions of the current generation that Chrome has detached.
     detached: HashSet<String>,
+    /// The sessions of the current generation attached through another
+    /// session (`Target.attachedToTarget` arriving on that session), by that
+    /// parent session. Chrome sends no detach for them when their parent
+    /// detaches: they end with it.
+    children: HashMap<String, Vec<String>>,
+    /// The parent of each session in [`Self::children`].
+    parents: HashMap<String, String>,
     /// The size of each new subscriber's queue.
     capacity: usize,
 }
@@ -167,6 +176,8 @@ impl Routes {
             ended: None,
             by_session: HashMap::new(),
             detached: HashSet::new(),
+            children: HashMap::new(),
+            parents: HashMap::new(),
             capacity: SESSION_QUEUE_CAPACITY,
         }
     }
@@ -175,6 +186,7 @@ impl Routes {
     /// one overflow.
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn set_capacity(&mut self, capacity: usize) {
+        assert!(capacity > 0, "a queue needs room for at least one event");
         self.capacity = capacity;
     }
 
@@ -186,35 +198,43 @@ impl Routes {
     /// Add a subscriber to the events of the session `session_id` whose
     /// method is one of `methods`.
     ///
-    /// `handle_generation` is the generation in which the subscriber's
-    /// handle to the session was made: a flat session made in an earlier
-    /// generation is gone.
+    /// `handle_generation` is the generation in which the session was
+    /// attached: a flat session of an earlier generation is gone.
+    ///
+    /// A subscription to a session that has ended ends at once, with the
+    /// first reason that applies: `Reconnected` if the session belongs to an
+    /// earlier generation, `Detached` if Chrome detached it, and otherwise
+    /// the end of the current generation.
     pub(crate) fn subscribe(
         &mut self,
         session_id: Option<&str>,
         handle_generation: u64,
         methods: &[&'static str],
     ) -> SessionEvents {
-        let mut end = self.ended;
-        if end.is_none() && session_id.is_some_and(|id| self.detached.contains(id)) {
-            end = Some(SessionEnd::Detached);
-        }
-        if end.is_none() && session_id.is_some() && handle_generation != self.generation {
+        let mut end = None;
+        if session_id.is_some() && handle_generation != self.generation {
             end = Some(SessionEnd::Reconnected);
+        } else if session_id.is_some_and(|id| self.detached.contains(id)) {
+            end = Some(SessionEnd::Detached);
+        } else if let Some(ended) = self.ended {
+            end = Some(ended);
         }
         if let Some(end) = end {
             return SessionEvents::ended(end);
         }
 
+        // Forget the subscribers that went away, which `dispatch` notices
+        // only when an event of their session arrives.
+        self.by_session.retain(|_, routes| {
+            routes.retain(|route| !route.queue.is_closed());
+            !routes.is_empty()
+        });
         let (queue, receiver) = mpsc::channel(self.capacity);
         let end = Arc::new(OnceLock::new());
         let routes = self
             .by_session
             .entry(session_id.map(str::to_owned))
             .or_default();
-        // Forget the subscribers that went away, which `dispatch` notices
-        // only when an event they asked for arrives.
-        routes.retain(|route| !route.queue.is_closed());
         routes.push(Route {
             methods: methods.into(),
             queue,
@@ -236,12 +256,21 @@ impl Routes {
             return;
         };
         routes.retain(|route| {
+            if route.queue.is_closed() {
+                return false;
+            }
             if !route.wants(&event.method) {
                 return true;
             }
             match route.queue.try_send(event.clone()) {
                 Ok(()) => true,
                 Err(TrySendError::Full(_)) => {
+                    warn!(
+                        session_id = ?event.session_id,
+                        methods = ?route.methods,
+                        capacity = route.queue.max_capacity(),
+                        "a subscriber of a session's events left its queue full; ending its stream",
+                    );
                     let _ = route.end.set(SessionEnd::Overflowed);
                     false
                 }
@@ -253,14 +282,46 @@ impl Routes {
         }
     }
 
-    /// Chrome detached the session `session_id`: end its subscribers'
-    /// streams, and those of later subscribers.
-    pub(crate) fn detach(&mut self, session_id: &str) {
-        let key = Some(session_id.to_owned());
-        for route in self.by_session.remove(&key).into_iter().flatten() {
-            route.finish(SessionEnd::Detached);
+    /// The actor of generation `generation` received the attach of session
+    /// `child` on session `parent`.
+    pub(crate) fn attach(&mut self, generation: u64, parent: &str, child: &str) {
+        if generation != self.generation {
+            return;
         }
-        self.detached.insert(session_id.to_owned());
+        self.children
+            .entry(parent.to_owned())
+            .or_default()
+            .push(child.to_owned());
+        self.parents.insert(child.to_owned(), parent.to_owned());
+    }
+
+    /// The actor of generation `generation` received the detach of session
+    /// `session_id`: end its subscribers' streams, and those of later
+    /// subscribers, and do the same for the sessions attached through it,
+    /// whose ends Chrome doesn't report.
+    pub(crate) fn detach(&mut self, generation: u64, session_id: &str) {
+        if generation != self.generation {
+            return;
+        }
+        if let Some(parent) = self.parents.remove(session_id) {
+            if let Some(siblings) = self.children.get_mut(&parent) {
+                siblings.retain(|sibling| sibling != session_id);
+            }
+        }
+        let mut ending = vec![session_id.to_owned()];
+        while let Some(id) = ending.pop() {
+            ending.extend(self.children.remove(&id).into_iter().flatten());
+            self.parents.remove(&id);
+            for route in self
+                .by_session
+                .remove(&Some(id.clone()))
+                .into_iter()
+                .flatten()
+            {
+                route.finish(SessionEnd::Detached);
+            }
+            self.detached.insert(id);
+        }
     }
 
     /// The actor of generation `generation` stopped, for the reason `end`
@@ -276,7 +337,8 @@ impl Routes {
     }
 
     /// A reconnect started generation `generation`: end every stream of
-    /// the previous one.
+    /// the previous one, and forget its sessions (a later subscription to
+    /// one of them ends because of its generation).
     pub(crate) fn start_generation(&mut self, generation: u64) {
         assert!(
             generation > self.generation,
@@ -285,9 +347,14 @@ impl Routes {
         );
         self.generation = generation;
         self.ended = None;
+        self.detached.clear();
+        self.children.clear();
+        self.parents.clear();
         self.finish_all(SessionEnd::Reconnected);
     }
 
+    /// End every subscriber's stream, for the reason `end`, and forget the
+    /// subscribers.
     fn finish_all(&mut self, end: SessionEnd) {
         for route in self.by_session.drain().flat_map(|(_, routes)| routes) {
             route.finish(end);
@@ -334,7 +401,7 @@ mod tests {
         routes.dispatch(1, &event("Page.frameAttached", Some("S1")));
         routes.dispatch(1, &event("Network.loadingFinished", Some("S1")));
         routes.dispatch(1, &event("Network.loadingFinished", None));
-        routes.detach("S1");
+        routes.detach(1, "S1");
         let (methods, end) = drain(events).await;
         assert_eq!(
             methods,
@@ -379,7 +446,7 @@ mod tests {
     #[tokio::test]
     async fn a_subscription_after_its_sessions_end_ends_at_once() {
         let mut routes = Routes::new();
-        routes.detach("S1");
+        routes.detach(1, "S1");
         let (methods, end) = drain(routes.subscribe(Some("S1"), 1, &["Page."])).await;
         assert!(methods.is_empty());
         assert_eq!(end, SessionEnd::Detached);
@@ -428,7 +495,73 @@ mod tests {
     async fn a_new_subscription_forgets_the_subscribers_that_went_away() {
         let mut routes = Routes::new();
         drop(routes.subscribe(Some("S1"), 1, &["Page.rare"]));
-        let _kept = routes.subscribe(Some("S1"), 1, &["Page.rare"]);
+        let _kept = routes.subscribe(Some("S2"), 1, &["Page.rare"]);
+        assert!(!routes.by_session.contains_key(&Some("S1".to_owned())));
+    }
+
+    #[tokio::test]
+    async fn any_event_of_the_session_forgets_the_subscribers_that_went_away() {
+        let mut routes = Routes::new();
+        let _kept = routes.subscribe(Some("S1"), 1, &["Page.other"]);
+        drop(routes.subscribe(Some("S1"), 1, &["Page.rare"]));
+        routes.dispatch(1, &event("Page.other", Some("S1")));
         assert_eq!(routes.by_session[&Some("S1".to_owned())].len(), 1);
+    }
+
+    #[tokio::test]
+    async fn detaching_a_session_ends_the_sessions_attached_through_it() {
+        let mut routes = Routes::new();
+        routes.attach(1, "P", "C");
+        routes.attach(1, "C", "G");
+        routes.attach(1, "Q", "D");
+        let child = routes.subscribe(Some("C"), 1, &["Page."]);
+        let grandchild = routes.subscribe(Some("G"), 1, &["Page."]);
+        let mut other = routes.subscribe(Some("D"), 1, &["Page."]);
+        routes.detach(1, "P");
+        assert_eq!(drain(child).await.1, SessionEnd::Detached);
+        assert_eq!(drain(grandchild).await.1, SessionEnd::Detached);
+        let (_, end) = drain(routes.subscribe(Some("G"), 1, &["Page."])).await;
+        assert_eq!(end, SessionEnd::Detached);
+        routes.dispatch(1, &event("Page.a", Some("D")));
+        assert_eq!(other.next().await.unwrap().unwrap().method, "Page.a");
+    }
+
+    #[tokio::test]
+    async fn a_child_that_detaches_leaves_its_parent_alone() {
+        let mut routes = Routes::new();
+        routes.attach(1, "P", "C");
+        let mut parent = routes.subscribe(Some("P"), 1, &["Page."]);
+        routes.detach(1, "C");
+        assert!(routes.children["P"].is_empty());
+        assert!(routes.parents.is_empty());
+        routes.dispatch(1, &event("Page.a", Some("P")));
+        assert_eq!(parent.next().await.unwrap().unwrap().method, "Page.a");
+    }
+
+    #[tokio::test]
+    async fn a_replaced_actor_can_neither_attach_nor_detach() {
+        let mut routes = Routes::new();
+        routes.start_generation(2);
+        let mut events = routes.subscribe(Some("S1"), 2, &["Page."]);
+        routes.attach(1, "S1", "C");
+        routes.detach(1, "S1");
+        assert!(routes.children.is_empty());
+        routes.dispatch(2, &event("Page.a", Some("S1")));
+        assert_eq!(events.next().await.unwrap().unwrap().method, "Page.a");
+    }
+
+    #[tokio::test]
+    async fn a_late_subscription_ends_with_its_sessions_own_end() {
+        let mut routes = Routes::new();
+        routes.detach(1, "S1");
+        routes.end_generation(1, SessionEnd::Shutdown);
+        let (_, end) = drain(routes.subscribe(Some("S1"), 1, &["Page."])).await;
+        assert_eq!(end, SessionEnd::Detached);
+
+        let mut routes = Routes::new();
+        routes.start_generation(2);
+        routes.end_generation(2, SessionEnd::Disconnected);
+        let (_, end) = drain(routes.subscribe(Some("S1"), 1, &["Page."])).await;
+        assert_eq!(end, SessionEnd::Reconnected);
     }
 }

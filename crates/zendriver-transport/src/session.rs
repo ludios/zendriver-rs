@@ -33,21 +33,32 @@ struct Inner {
     conn: Connection,
     /// `Some(id)` for a flat session; `None` for a root (per-target) session.
     session_id: Option<String>,
-    /// The [`Connection::connection_generation`] when this handle was made.
-    /// A flat session doesn't survive a [`Connection::reconnect`], so a
-    /// handle made before one names a session that is gone.
+    /// The [`Connection::connection_generation`] whose socket attached the
+    /// session. A flat session doesn't survive a [`Connection::reconnect`],
+    /// so a handle of an earlier generation names a session that is gone.
     generation: u64,
 }
 
 impl SessionHandle {
     /// Construct a flat handle around `conn` scoped to `session_id` (a session
     /// multiplexed over a shared, flattened browser socket).
+    ///
+    /// The session is taken to belong to the connection's current socket.
+    /// An observer should build its handle with
+    /// [`PausedSession::session_handle`](crate::PausedSession::session_handle)
+    /// instead, which knows the socket that attached the session.
     pub fn new(conn: Connection, session_id: impl Into<String>) -> Self {
         let generation = conn.connection_generation();
+        Self::in_generation(conn, session_id.into(), generation)
+    }
+
+    /// A flat handle to the session `session_id`, attached by the socket of
+    /// the connection's generation `generation`.
+    pub(crate) fn in_generation(conn: Connection, session_id: String, generation: u64) -> Self {
         Self {
             inner: Arc::new(Inner {
                 conn,
-                session_id: Some(session_id.into()),
+                session_id: Some(session_id),
                 generation,
             }),
         }
@@ -121,7 +132,8 @@ impl SessionHandle {
     ///
     /// # Panics
     ///
-    /// Panics if `methods` is empty.
+    /// Panics if `methods` is empty, or if one of its entries has no `.` or
+    /// has a `*`.
     ///
     /// # Examples
     ///
@@ -140,6 +152,12 @@ impl SessionHandle {
             !methods.is_empty(),
             "a subscription needs at least one method"
         );
+        for method in methods {
+            assert!(
+                method.contains('.') && !method.contains('*'),
+                "{method:?} is neither a method (\"Page.frameAttached\") nor a domain (\"Page.\")"
+            );
+        }
         routes::lock(&self.inner.conn.inner.routes).subscribe(
             self.session_id(),
             self.inner.generation,
@@ -243,6 +261,7 @@ mod tests {
     use super::*;
     use crate::connection::spawn_actor;
     use crate::connection::test_only::duplex_pair;
+    use crate::observer::{ObserverError, PausedSession, TargetObserver};
     use crate::routes::SessionEnd;
     use crate::testing::MockConnection;
     use serde_json::json;
@@ -513,13 +532,97 @@ mod tests {
     #[tokio::test]
     async fn events_overflow_ends_the_stream() {
         let (mock, conn) = MockConnection::pair_with_session_queue_capacity(2);
-        let sess = SessionHandle::new(conn, "S1");
+        let sess = SessionHandle::new(conn.clone(), "S1");
         let mut events = sess.events(&["Page."]);
+        // The actor fills the queues before it broadcasts an event, so once
+        // the broadcast has every event, each has met the full queue.
+        let mut broadcast = conn.subscribe_raw();
         for method in ["Page.a", "Page.b", "Page.c", "Page.d"] {
             mock.emit_event_for_session(method, json!({}), "S1").await;
+        }
+        for _ in 0..4 {
+            broadcast.next().await;
         }
         let (methods, end) = drain(&mut events).await;
         assert_eq!(methods, ["Page.a", "Page.b"]);
         assert_eq!(end, SessionEnd::Overflowed);
+    }
+
+    /// Through the actor: Chrome sends no detach for a session attached
+    /// through another one when that one detaches, so its stream ends with
+    /// its parent's.
+    #[tokio::test]
+    async fn events_of_a_child_session_end_with_its_parent() {
+        let (mock, conn) = MockConnection::pair();
+        let mut child = SessionHandle::new(conn.clone(), "C").events(&["Page."]);
+        mock.emit_event_for_session("Target.attachedToTarget", json!({ "sessionId": "C" }), "P")
+            .await;
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "P" }))
+            .await;
+        assert_eq!(drain(&mut child).await.1, SessionEnd::Detached);
+    }
+
+    /// Through the actor: when every handle to the connection is dropped,
+    /// the actor stops, and the streams end.
+    #[tokio::test]
+    async fn events_end_when_the_connection_is_dropped() {
+        let (_mock, conn) = MockConnection::pair();
+        let mut events = SessionHandle::new(conn, "S1").events(&["Page."]);
+        assert_eq!(drain(&mut events).await.1, SessionEnd::Shutdown);
+    }
+
+    /// An observer that, once released, hands out the handle of the
+    /// session it saw attach.
+    struct HandleKeeper {
+        release: Arc<tokio::sync::Notify>,
+        handle: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<SessionHandle>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TargetObserver for HandleKeeper {
+        async fn on_target_attached(
+            &self,
+            session: PausedSession<'_>,
+        ) -> Result<(), ObserverError> {
+            self.release.notified().await;
+            let sender = self.handle.lock().unwrap().take().unwrap();
+            let _ = sender.send(session.session_handle());
+            Ok(())
+        }
+
+        fn name(&self) -> &'static str {
+            "handle-keeper"
+        }
+    }
+
+    /// A handle that an observer builds after a reconnect, for a session
+    /// that the replaced socket attached, names a session that is gone.
+    #[tokio::test]
+    async fn a_paused_sessions_handle_knows_its_socket() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (handle_tx, handle_rx) = tokio::sync::oneshot::channel();
+        let keeper = HandleKeeper {
+            release: Arc::clone(&release),
+            handle: std::sync::Mutex::new(Some(handle_tx)),
+        };
+        let (mut mock, conn) = MockConnection::pair_with_observers(vec![Arc::new(keeper)]);
+        let mut broadcast = conn.subscribe_raw();
+        mock.emit_event(
+            "Target.attachedToTarget",
+            json!({
+                "sessionId": "S9",
+                "targetInfo": { "targetId": "T9", "type": "page", "url": "about:blank" },
+                "waitingForDebugger": true,
+            }),
+        )
+        .await;
+        broadcast.next().await;
+        mock.reconnect(&conn);
+        release.notify_one();
+        let handle = handle_rx.await.unwrap();
+        assert_eq!(
+            drain(&mut handle.events(&["Page."])).await.1,
+            SessionEnd::Reconnected
+        );
     }
 }
