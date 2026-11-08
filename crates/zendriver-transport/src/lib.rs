@@ -16,8 +16,8 @@
 //!   and `Element`s hold one.
 //! - [`SessionHandle`] — a connection scoped to a particular CDP `sessionId`.
 //!   Its [`events`](session::SessionHandle::events) stream delivers the
-//!   session's events in order, with none lost ([`SessionEvents`],
-//!   ending with a [`SessionEnd`]).
+//!   session's events in order and without gaps ([`SessionEvents`]), until
+//!   one [`SessionEnd`] says why it stopped.
 //! - [`CdpCommand`] / [`CdpInbound`] / [`CdpRpcError`] / [`RawEvent`] — wire
 //!   types.
 //! - [`AccountedRawEvent`] — opt-in loss-accounted alternative to
@@ -49,7 +49,6 @@ pub mod session;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-// Re-exports added as types land in later Phase 1 tasks:
 pub use connection::{
     Connection, DEFAULT_CALL_TIMEOUT, DEFAULT_OBSERVER_TIMEOUT, connect, connect_with_observers,
     spawn_actor, spawn_actor_with_observers,

@@ -163,7 +163,7 @@ pub use zendriver_stealth::{
 // the crate SEMVER.md steers them away from.
 pub use zendriver_transport::{
     AccountedRawEvent, CallError, Connection, ObserverError, ObserverFailurePolicy, PausedSession,
-    SessionHandle, TargetInfo, TargetObserver, TransportError,
+    SessionEnd, SessionEvents, SessionHandle, TargetInfo, TargetObserver, TransportError,
 };
 
 /// Network interception API re-exports.

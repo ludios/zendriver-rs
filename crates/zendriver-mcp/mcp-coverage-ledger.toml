@@ -605,6 +605,23 @@ excluded = "Stream-returning subscription; not a request/response tool"
 api = "zendriver::AccountedRawEvent"
 excluded = "Stream-returning subscription; not a request/response tool"
 
+# ── Ordered, gap-free per-session event streams (2026-11-08) ─────────────────
+[[entry]]
+api = "zendriver::SessionHandle::events"
+excluded = "Stream-returning subscription; not a request/response tool"
+
+[[entry]]
+api = "zendriver::SessionEvents"
+excluded = "Stream-returning subscription; not a request/response tool"
+
+[[entry]]
+api = "zendriver::SessionEnd"
+excluded = "Stream-returning subscription; not a request/response tool"
+
+[[entry]]
+api = "zendriver::PausedSession::session_handle"
+excluded = "constructor on the TargetObserver argument; advanced transport surface, no distinct MCP tool"
+
 [[entry]]
 api = "zendriver::Connection::expect_disconnect"
 excluded = "sets only the level at which the transport logs a socket's death; browser_close already declares the death of every socket that it ends"

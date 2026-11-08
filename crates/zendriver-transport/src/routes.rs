@@ -1,12 +1,13 @@
-//! Ordered, lossless delivery of each session's events to the subscribers
-//! of [`SessionHandle::events`](crate::session::SessionHandle::events).
+//! Delivery of each session's events, in order and without gaps, to the
+//! subscribers of [`SessionHandle::events`](crate::session::SessionHandle::events).
 //!
-//! The actor hands every event to [`Routes::dispatch`], which puts it on the
+//! The actor hands every event to `Routes::dispatch`, which puts it on the
 //! queue of each subscriber of the event's session that asked for its
 //! method. Each subscriber has its own bounded queue, so a slow subscriber
-//! holds up nobody else, and a subscriber that falls
-//! [`SESSION_QUEUE_CAPACITY`] events behind loses its stream (with
-//! [`SessionEnd::Overflowed`]) rather than some of its events.
+//! holds up nobody else. A subscriber whose queue is full when an event
+//! arrives gets no more events: its stream ends with
+//! [`SessionEnd::Overflowed`] once it has read the queued ones, so it never
+//! sees a gap in what it does get.
 
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
@@ -22,7 +23,8 @@ use crate::frame::RawEvent;
 
 /// How many events one subscriber of
 /// [`SessionHandle::events`](crate::session::SessionHandle::events) may have
-/// waiting before its stream ends with [`SessionEnd::Overflowed`].
+/// waiting: an event that arrives while its queue holds this many ends its
+/// stream with [`SessionEnd::Overflowed`].
 ///
 /// A queue holds only the methods its subscriber asked for, and the
 /// subscribers that want an event share one copy of it. A subscriber that
@@ -31,7 +33,7 @@ use crate::frame::RawEvent;
 pub const SESSION_QUEUE_CAPACITY: usize = 4096;
 
 /// Why a stream of [`SessionHandle::events`](crate::session::SessionHandle::events)
-/// ended: no event of its session will come after this.
+/// ended: the stream yields nothing after it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SessionEnd {
     /// Chrome detached the session (`Target.detachedFromTarget`), for
@@ -47,13 +49,16 @@ pub enum SessionEnd {
     Shutdown,
     /// [`Connection::reconnect`](crate::connection::Connection::reconnect)
     /// moved the connection to a new socket. A flat session doesn't exist
-    /// on the new socket; the connection's root session does, but the
-    /// events sent while the connection had no socket are gone.
+    /// on the new socket. The connection's root session does, and a new
+    /// subscription gets its events from the moment it is made; the root
+    /// session's events between this end and that moment are not delivered
+    /// to anyone.
     #[error("the connection moved to a new socket")]
     Reconnected,
-    /// The subscriber had [`SESSION_QUEUE_CAPACITY`] events waiting when
-    /// another one arrived, so the stream ended instead of skipping that
-    /// event. Every event before it was delivered.
+    /// The subscriber's queue was full (it held
+    /// [`SESSION_QUEUE_CAPACITY`] events, unless a test set another size)
+    /// when another event arrived, so the stream ended instead of skipping
+    /// that event. Every event before it was delivered.
     #[error("the subscriber fell too far behind the session's events")]
     Overflowed,
 }
@@ -61,7 +66,7 @@ pub enum SessionEnd {
 /// The stream returned by
 /// [`SessionHandle::events`](crate::session::SessionHandle::events): the
 /// session's events, as `Ok`, in the order Chrome sent them, then one `Err`
-/// saying why they ended.
+/// saying why this stream stopped.
 #[derive(Debug)]
 pub struct SessionEvents {
     /// The subscriber's queue; `None` once the stream has yielded its end.

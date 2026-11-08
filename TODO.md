@@ -246,7 +246,7 @@ Each item needs a test; `unit` is fine where no browser is involved.
   - `Cookie::expires` is `Some(-1.0)` for session cookies
 - [ ] **Transport/interception:**
   - detach can run before attach finishes *(TI #13)*
-  - the connection's record of detached sessions (`detached_sessions`, since `07727d301`) gains one session id per detach and never loses one, so it grows for the connection's whole life. Bound it, e.g. to the sessions that some `SessionHandle` still refers to.
+  - the connection's record of detached sessions (`Routes::detached` in `zendriver-transport`) gains one session id per detach and loses them only at a reconnect, so it grows for the life of the connection's socket. Bound it, e.g. to the sessions that some `SessionHandle` still refers to.
 - [ ] **Fetcher/WAF:** *(FW #6–#10)*
   - zip symlink directory creation (`unit` with a crafted zip)
   - partial downloads left behind

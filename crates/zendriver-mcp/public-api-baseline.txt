@@ -53,6 +53,8 @@ pub use zendriver::ResourceType
 pub use zendriver::ResponseInfo
 pub use zendriver::ResponseOverrides
 pub use zendriver::Seed
+pub use zendriver::SessionEnd
+pub use zendriver::SessionEvents
 pub use zendriver::SessionHandle
 pub use zendriver::ShaderPrecision
 pub use zendriver::Strategy

@@ -103,27 +103,35 @@ impl SessionHandle {
             .await
     }
 
-    /// Subscribe to this session's events whose method is one of `methods`,
-    /// in the order Chrome sent them, with none lost. An entry of `methods`
-    /// that ends in `.` (such as `"Network."`) stands for every method of
-    /// that domain; any other entry stands for one method.
+    /// Subscribe to this session's events whose method is one of `methods`.
+    /// An entry of `methods` that ends in `.` (such as `"Network."`) stands
+    /// for every method of that domain; any other entry stands for one
+    /// method.
     ///
     /// The stream yields `Ok` for each such event that arrives after this
-    /// call, and then one `Err` saying why no more will come
-    /// ([`SessionEnd`](crate::routes::SessionEnd)), and then ends:
+    /// call, in the order Chrome sent them, and then one `Err`
+    /// ([`SessionEnd`](crate::routes::SessionEnd)) saying why this stream
+    /// stopped, and then ends. It skips none of those events before the
+    /// `Err`. The reasons:
     ///
-    /// - `Detached`: Chrome detached the session (a flat session only).
+    /// - `Detached`: Chrome detached the session, or the session it was
+    ///   attached through (a flat session only).
     /// - `Disconnected` / `Shutdown`: the connection's socket died, or the
     ///   connection was shut down.
     /// - `Reconnected`: [`Connection::reconnect`] moved the connection to a
-    ///   new socket. A flat session doesn't exist there; the root session
-    ///   does, but a new subscription is needed for its events there, and
-    ///   the events sent in between are lost.
-    /// - `Overflowed`: [`SESSION_QUEUE_CAPACITY`](crate::routes::SESSION_QUEUE_CAPACITY)
-    ///   events were waiting to be read when another arrived. The stream
-    ///   ends rather than skip it.
+    ///   new socket. A flat session doesn't exist there. The root session
+    ///   does: a new subscription gets its events from the moment it is
+    ///   made, and the root session's events between this end and that
+    ///   moment are not delivered to anyone.
+    /// - `Overflowed`: the stream's queue was full (it held
+    ///   [`SESSION_QUEUE_CAPACITY`](crate::routes::SESSION_QUEUE_CAPACITY)
+    ///   events, unless a test set another size) when another event
+    ///   arrived. The stream ends rather than skip that event.
     ///
-    /// A subscription made after its session's end yields that end at once.
+    /// A subscription made after its session ended yields an end at once:
+    /// `Reconnected` if a reconnect came after the handle's session was
+    /// attached, `Detached` if Chrome detached the session, and otherwise the
+    /// reason the connection's current socket stopped.
     ///
     /// Unlike [`Self::subscribe`] and [`Self::subscribe_accounted`], which
     /// filter one broadcast of every event of the connection, each stream
@@ -139,11 +147,16 @@ impl SessionHandle {
     ///
     /// ```no_run
     /// use futures::StreamExt;
+    /// use zendriver_transport::SessionEnd;
     ///
     /// # async fn example(session: zendriver_transport::SessionHandle) {
     /// let mut frames = session.events(&["Page.frameAttached", "Page.frameDetached"]);
-    /// while let Some(Ok(event)) = frames.next().await {
-    ///     println!("{}: {}", event.method, event.params["frameId"]);
+    /// while let Some(next) = frames.next().await {
+    ///     match next {
+    ///         Ok(event) => println!("{}: {}", event.method, event.params["frameId"]),
+    ///         Err(SessionEnd::Detached) => println!("the session is gone"),
+    ///         Err(end) => eprintln!("stopped before the session ended: {end}"),
+    ///     }
     /// }
     /// # }
     /// ```
@@ -438,8 +451,9 @@ mod tests {
         }
     }
 
-    /// Through the actor: a session's stream gets its methods of its
-    /// session, in the order sent, and ends at its detach.
+    /// Through the actor: a stream gets the methods it asked for, of its own
+    /// session only, in the order they were sent, and ends when the session
+    /// detaches.
     #[tokio::test]
     async fn events_come_in_order_and_end_at_the_detach() {
         let (mock, conn) = MockConnection::pair();
@@ -504,7 +518,7 @@ mod tests {
     }
 
     /// Through the actor: the socket's death and a shutdown end every
-    /// stream, and later subscriptions at once.
+    /// stream, and a later subscription ends at once with the same reason.
     #[tokio::test]
     async fn events_end_with_the_connection() {
         let (mock, conn) = MockConnection::pair();

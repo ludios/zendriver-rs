@@ -44,16 +44,19 @@ commands and inbound events.
 ## The CDP transport actor
 
 `zendriver-transport` runs one Tokio task per WebSocket connection to
-Chrome. All command sends go through a
-`mpsc::UnboundedSender`; every public handle holds a `Connection`
-clone that wraps that sender. The actor task:
+Chrome. All command sends go through a bounded `mpsc::Sender` (64
+commands; a call's timeout covers its wait for room); every public
+handle holds a `Connection` clone that wraps that sender. The actor
+task:
 
 1. Reads commands from the channel, attaches a monotonically-increasing
    `id`, and writes them to the socket.
 2. Reads frames from the socket, decodes them into `CdpInbound` (either
    a response to a command or an event), and routes them.
-3. For responses: looks up the pending `oneshot::Sender` in a
-   `HashMap<id, oneshot::Sender<Result<Value>>>` and resolves it.
+3. For responses: looks up the pending call by its `id` and resolves
+   its `oneshot::Sender`. Each pending call also records its session,
+   so that when Chrome detaches a session, the actor fails that
+   session's pending calls at once.
 4. For events: puts each event on the queue of every subscriber of its
    session that asked for its method (`SessionHandle::events`). A
    subscriber gets those events in the order Chrome sent them, with no
