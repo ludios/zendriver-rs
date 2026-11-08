@@ -133,7 +133,7 @@ Also for this round:
   - `BrowserContext::set_download_path`, and `set_download_path` exporting completed files by copy (Astra's design) if `filePath` (Chrome 138+) turns out not to be enough.
 - [ ] **`expect_response(...).body()` reads before the body has arrived.** Wait for `loadingFinished`. *(R4, MEC #7)* Test `chrome` with the trickled-body fixture.
 - [ ] **File-chooser intercept left on after an error.** Disable it on the error path. *(MEC #4)* Test `chrome`.
-- [ ] **Monitor `Lagged` clears the URL map.** *(MEC #5)* `stream_bodies` chunks can also arrive out of order. *(MEC #6)* Tests `chrome` (or `unit` with a forced small buffer).
+- [ ] **Monitor: `stream_bodies` chunks can arrive out of order.** *(MEC #6)* Test `chrome`.
 - [ ] **From the 2026-11-06 reviews of the detach work (older problems, not fixed):**
   - A monitor's body-streaming tasks hold its output channel, so chunks can follow its terminal `Shutdown` / `Disconnected` boundary, and the stream doesn't return `None` until they finish.
   - Interception: dropping the last `Interceptor` and rule handles closes the command queue while an answer task (which holds only a weak sender) is pending, so `Mux::close` disables `Fetch` before a rejected `Fetch.fulfillRequest`'s fallback `Fetch.failRequest` runs (reproduced with `MockConnection` by a reviewer).

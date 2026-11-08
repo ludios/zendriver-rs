@@ -154,7 +154,8 @@ subscriber. The correlation map is bounded (10k in-flight requests).
 
 `Http` exchanges are assembled by correlating `requestWillBeSent` →
 `responseReceived` → `loadingFinished` / `loadingFailed` by `requestId`. The
-correlator rides the transport's loss-accounted event stream, so instead of
+correlator reads its tab's events in order and without gaps, until its
+subscription ends with a reason, so instead of
 ever silently stitching a possibly-bogus "complete" exchange across a gap,
 silently evicting a stuck correlation entry, or silently skipping a payload
 it couldn't decode, every one of those cases surfaces as an explicit
@@ -163,13 +164,13 @@ same stream:
 
 | Variant | Emitted when | The correlator also… |
 |---------|--------------|------------------------|
-| `Lagged { missed, generation }` | this subscription fell behind the connection's accounted event bus | clears all in-flight correlation state — a gap means any partial exchange spanning it can't be trusted |
-| `Reconnected { previous, generation }` | the transport re-established a fresh WebSocket | clears all in-flight correlation state — nothing from the old socket will ever complete |
+| `Lagged { missed, generation }` | the consumer read so slowly that the monitor's queue of 4,096 unread events overflowed; `missed` is a lower bound | clears all in-flight correlation state — a gap means any partial exchange spanning it can't be trusted — then subscribes again and keeps running |
+| `Reconnected { previous, generation }` | the transport re-established a fresh WebSocket, where the tab's session doesn't exist | clears state, then **ends the monitor task** — see below |
 | `Disconnected { generation }` | the transport's WebSocket died unexpectedly | clears state, then **ends the monitor task** — see below |
 | `Shutdown { generation }` | the tab's connection was shut down before the monitor saw its WebSocket die, or Chrome detached the tab's session: for a tab with its own socket, `tab.close()`, the drop of the tab's last handle, or `browser.reconnect()` retiring the tab; for a tab on the browser's socket, the tab's closing (by `tab.close()` or otherwise), `browser.close()`, or the drop of the browser | clears state, then **ends the monitor task** — see below |
 | `CorrelationEvicted { url }` | the in-flight correlation map exceeded its 10k bound | evicts one entry (previously silent beyond a `tracing` warning) |
 | `DecodeFailed` | a CDP payload didn't match the shape expected for its method | skips that one event only — no raw payload is ever included |
-| `Unknown` | a future transport-level variant this correlator doesn't yet recognize | conservatively clears state, but keeps running |
+| `Unknown` | never emitted any more (it was the fallback for a kind of gap the correlator didn't know) | — |
 
 `DeliveryBoundary` events bypass any [`MonitorBuilder::url_pattern`] filter —
 they describe the monitor's own health, not a specific exchange. A consumer
@@ -181,15 +182,15 @@ before; it just loses the ability to tell "nothing happened" apart from
 match event {
     zendriver::NetworkEvent::DeliveryBoundary(b) => {
         eprintln!("network monitor gap: {b:?}");
-        // Decide whether to resync, alert, or (for `Disconnected` or
-        // `Shutdown`) restart the monitor.
+        // Decide whether to resync, alert, or (for `Disconnected`,
+        // `Reconnected` or `Shutdown`) restart the monitor.
     }
     _ => { /* handle the fully-observed variants as usual */ }
 }
 ```
 
-**`Disconnected` and `Shutdown` end the monitor task — fail closed.** There
-is no automatic reconnect: once either boundary is emitted, the correlator
+**`Disconnected`, `Reconnected` and `Shutdown` end the monitor task — fail
+closed.** There is no automatic reconnect: once one of them is emitted, the correlator
 task returns and the [`NetworkMonitor`] stream ends (`None` on the next
 poll), dropping any exchange still in flight. A consumer that wants to keep
 observing across a transport blip must call `tab.monitor()...start()` again

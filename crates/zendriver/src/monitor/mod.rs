@@ -11,17 +11,17 @@
 //! contract, including its graceful degrade on Chrome versions that don't
 //! support it.
 //!
-//! The correlator subscribes to the session's loss-accounted event stream
-//! ([`zendriver_transport::SessionHandle::subscribe_accounted`]), so a
-//! delivery gap (a lagging subscriber, a transport reconnect, disconnect, or
-//! shutdown),
+//! The correlator subscribes to the session's events
+//! ([`zendriver_transport::SessionHandle::events`]), which come in order
+//! and without gaps until the subscription ends with a reason. So a
+//! delivery gap (an overflow of that subscription's queue when the
+//! consumer reads slowly, a transport reconnect, disconnect, or shutdown),
 //! a correlation-map eviction past [`MAX_TRACKED`], or an undecodable
 //! payload is surfaced as an explicit [`NetworkEvent::DeliveryBoundary`]
 //! instead of silently stitching a possibly-bogus "complete" exchange,
 //! silently dropping an entry, or silently skipping a malformed event. See
 //! [`NetworkDeliveryBoundary`] for the full set of boundaries and
-//! [`MonitorBuilder::start`] for the `Disconnected` / `Shutdown` end
-//! contract.
+//! [`MonitorBuilder::start`] for the end contract.
 
 mod events;
 
@@ -34,11 +34,12 @@ use std::task::{Context, Poll};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::{Stream, StreamExt};
+use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
-use zendriver_transport::{AccountedRawEvent, CallError, SessionHandle};
+use zendriver_transport::{CallError, RawEvent, SessionEnd, SessionHandle};
 
 use crate::url_matcher::UrlMatcher;
 use events::{
@@ -128,22 +129,22 @@ pub enum NetworkEvent {
     DeliveryBoundary(NetworkDeliveryBoundary),
 }
 
-/// A delivery-loss boundary observed on the monitor's underlying
-/// loss-accounted CDP event stream, or in its own in-memory correlation
-/// bookkeeping.
+/// A delivery-loss boundary observed on the monitor's subscription to its
+/// tab's events, or in its own in-memory correlation bookkeeping.
 ///
 /// [`NetworkEvent::Http`] exchanges are assembled by correlating
 /// `requestWillBeSent` → `responseReceived` → `loadingFinished` /
 /// `loadingFailed` by `requestId`. If any leg of that correlation is lost —
-/// a broadcast-bus lag, a transport reconnect, disconnect, or shutdown, a
+/// an overflow of the subscription's queue, a transport reconnect,
+/// disconnect, or shutdown, a
 /// correlation-map eviction, or an undecodable payload — an exchange
 /// assembled across the gap would be silently wrong: a bogus "complete"
 /// exchange missing its response, or worse, a response glued onto an
 /// unrelated later request that reused the same `requestId`. Every such gap
 /// now surfaces as one of these variants instead, and the correlator clears
 /// its in-flight state on `Lagged` / `Reconnected` / `Disconnected` /
-/// `Shutdown` / `Unknown` so a partial exchange spanning the gap is never
-/// emitted as complete.
+/// `Shutdown` so a partial exchange spanning the gap is never emitted as
+/// complete.
 ///
 /// `DeliveryBoundary` events bypass any [`MonitorBuilder::url_pattern`]
 /// filter — they describe the monitor's own health, not a specific
@@ -151,21 +152,25 @@ pub enum NetworkEvent {
 /// the fact that data was lost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkDeliveryBoundary {
-    /// This monitor's subscription to the connection's accounted event bus
-    /// fell behind and `missed` events were overwritten before the
-    /// correlator could process them. Any HTTP exchange in flight when this
-    /// fires is unrecoverable — its correlation state is cleared rather than
-    /// risk emitting a possibly-bogus completed [`NetworkEvent::Http`].
+    /// This monitor fell so far behind its tab's events (because its
+    /// consumer reads slowly) that the queue of its subscription to them
+    /// overflowed, and it subscribed again: the events in between are lost.
+    /// Any HTTP exchange in flight when this fires is unrecoverable — its
+    /// correlation state is cleared rather than risk emitting a
+    /// possibly-bogus completed [`NetworkEvent::Http`].
     Lagged {
-        /// Number of events this subscription missed.
+        /// How many events the monitor is known to have missed: at least
+        /// this many. (The subscription counts the one that found its queue
+        /// full, not the ones that came before the new subscription.)
         missed: u64,
         /// Connection generation active when the loss was detected.
         generation: u64,
     },
     /// The underlying transport re-established a fresh WebSocket
-    /// (`Connection::reconnect`). All in-flight correlation state from the
-    /// previous connection is cleared — a `loadingFinished` for a request
-    /// seen before the reconnect will never arrive on the new socket.
+    /// (`Connection::reconnect`), where the tab's session doesn't exist.
+    /// Like `Disconnected`, it ends the monitor task, and any exchange still
+    /// in flight is dropped. To keep observing after a reconnect, start a
+    /// new monitor on a tab from [`crate::Browser::tabs`].
     Reconnected {
         /// Generation of the connection actor that was replaced.
         previous: u64,
@@ -210,13 +215,8 @@ pub enum NetworkDeliveryBoundary {
     /// payload is intentionally never included here — only the fact that
     /// something was lost.
     DecodeFailed,
-    /// A conservative default for any future
-    /// [`AccountedRawEvent`](zendriver_transport::AccountedRawEvent) variant
-    /// this correlator doesn't yet know how to interpret. Treated like a
-    /// delivery gap — correlation state is cleared — but unlike
-    /// [`Self::Disconnected`] and [`Self::Shutdown`] the monitor task keeps
-    /// running, since an unrecognized variant isn't known to mean the
-    /// transport is gone.
+    /// No longer emitted: it was the default for a kind of delivery loss
+    /// that the correlator didn't know, and it now knows every kind.
     Unknown,
 }
 
@@ -488,8 +488,9 @@ impl MonitorBuilder {
     /// The correlator task runs until the monitor is dropped,
     /// [`NetworkMonitor::stop`] is called, or — **fail closed** — the
     /// underlying transport reports
-    /// [`NetworkDeliveryBoundary::Disconnected`] or
-    /// [`NetworkDeliveryBoundary::Shutdown`]. In those two cases the task
+    /// [`NetworkDeliveryBoundary::Disconnected`],
+    /// [`NetworkDeliveryBoundary::Reconnected`], or
+    /// [`NetworkDeliveryBoundary::Shutdown`]. In those three cases the task
     /// emits that boundary event and then ends; the stream returns `None` on
     /// the next poll. (A monitor started after the session's detach, or
     /// after the connection's end, gets the boundary at once.) There is no
@@ -504,17 +505,18 @@ impl MonitorBuilder {
     /// Currently infallible, but returns [`crate::Result`] so that setup
     /// that needs a CDP round-trip can surface errors without an API break.
     pub async fn start(self) -> crate::Result<NetworkMonitor> {
-        // Subscribed here, not in the task: the accounted bus is a `broadcast`
-        // receiver that only sees frames sent after it registers, so the
-        // subscription must exist when this returns for an event that arrives
-        // right after to be seen. (`Network.enable` was the tab's job, at its
-        // creation.)
-        let events = self.session.subscribe_accounted();
+        // Subscribed here, not in the task: a subscription gets only the
+        // events that arrive after it, so it must exist when this returns
+        // for an event that arrives right after to be seen.
+        // (`Network.enable` was the tab's job, at its creation.)
+        let generation = self.session.connection().connection_generation();
+        let events = Box::pin(self.session.events(MONITORED_METHODS));
         let (tx, rx) = mpsc::channel(CHANNEL_CAP);
         let cancel = CancellationToken::new();
         let task = tokio::spawn(run_monitor(
             self.session,
             events,
+            generation,
             self.url_pattern,
             self.stream_bodies,
             tx,
@@ -567,26 +569,45 @@ impl Stream for NetworkMonitor {
 /// `responseReceived` arrives. Completed on `loadingFinished` / `loadingFailed`.
 type PartialExchange = (MonitoredRequest, Option<MonitoredResponse>);
 
-/// The correlator task. Drives `events` — the session's loss-accounted CDP
-/// event subscription, which [`MonitorBuilder::start`] registers before it
-/// returns — dispatching by `method` and correlating
-/// `requestId`s into completed [`NetworkExchange`]s plus WebSocket /
-/// EventSource notifications.
+/// The methods of the events that the correlator reads.
+const MONITORED_METHODS: &[&str] = &[
+    "Network.requestWillBeSent",
+    "Network.responseReceived",
+    "Network.dataReceived",
+    "Network.loadingFinished",
+    "Network.loadingFailed",
+    "Network.webSocketCreated",
+    "Network.webSocketFrameSent",
+    "Network.webSocketFrameReceived",
+    "Network.webSocketClosed",
+    "Network.eventSourceMessageReceived",
+];
+
+/// The session's events that a [`run_monitor`] reads: its subscription of
+/// [`MONITORED_METHODS`], or, in a test, a stand-in for one.
+type MonitoredEvents = Pin<Box<dyn Stream<Item = Result<Arc<RawEvent>, SessionEnd>> + Send>>;
+
+/// The correlator task. Drives `events` — the session's subscription to
+/// [`MONITORED_METHODS`], which [`MonitorBuilder::start`] registers before
+/// it returns — dispatching by `method` and correlating `requestId`s into
+/// completed [`NetworkExchange`]s plus WebSocket / EventSource
+/// notifications.
 ///
 /// A single subscription (rather than several typed subscriptions in a
 /// `tokio::select!`) is deliberate: `select!` picks a ready arm at random and
 /// can deliver `loadingFinished` before the matching `requestWillBeSent`,
-/// dropping the exchange. One stream preserves CDP's wire order — this mirrors
-/// [`crate::network_idle`].
+/// dropping the exchange. One stream preserves CDP's wire order.
 ///
-/// Because `events` comes from [`SessionHandle::subscribe_accounted`] (rather
-/// than the plain `subscribe_raw`), a lag, reconnect, or disconnect is reported
-/// as an explicit [`AccountedRawEvent`] instead of vanishing; that is what makes
-/// delivery loss observable at all. See [`NetworkDeliveryBoundary`] for how
-/// each case is handled.
+/// The subscription skips no event before its end, and its end says why
+/// (see [`NetworkDeliveryBoundary`] for how each end is reported). After an
+/// overflow, the correlator subscribes again and goes on.
+///
+/// `generation` is the connection generation in which `events` was
+/// subscribed.
 async fn run_monitor(
     session: SessionHandle,
-    mut events: impl Stream<Item = AccountedRawEvent> + Send + Unpin + 'static,
+    mut events: MonitoredEvents,
+    mut generation: u64,
     filter: Option<UrlMatcher>,
     stream_bodies: bool,
     tx: mpsc::Sender<NetworkEvent>,
@@ -624,282 +645,9 @@ async fn run_monitor(
         tokio::select! {
             () = cancel.cancelled() => return,
             next = events.next() => {
-                let Some(acc) = next else { return };
-                match acc {
-                    AccountedRawEvent::Event { event: ev, .. } => {
-                        match ev.method.as_str() {
-                            "Network.requestWillBeSent" => {
-                                let Ok(p) = serde_json::from_value::<RequestWillBeSent>(ev.params) else {
-                                    if emit_decode_failed(&tx).await {
-                                        return;
-                                    }
-                                    continue;
-                                };
-                                urls.insert(p.request_id.clone(), p.request.url.clone());
-                                track_order(&mut order, &urls, p.request_id.clone());
-                                if urls.len() > MAX_TRACKED {
-                                    let evicted = evict_oldest(&mut urls, &mut partial, &mut order);
-                                    if let Some(url) = evicted {
-                                        if emit_boundary(&tx, NetworkDeliveryBoundary::CorrelationEvicted { url })
-                                            .await
-                                        {
-                                            return;
-                                        }
-                                    }
-                                }
-                                // Enable streaming as early as possible — right
-                                // when the request is first observed, before
-                                // it's even sent on the wire — rather than
-                                // waiting for `responseReceived`. Empirically
-                                // (real-Chrome testing against a local mock
-                                // server), `responseReceived` leaves too
-                                // little headroom: `Network.streamResourceContent`
-                                // is a CDP round-trip via a spawned task, and
-                                // Chrome rejects it with `-32602 Request with
-                                // the provided ID has already finished
-                                // loading` for a fast (especially loopback)
-                                // response that reaches `loadingFinished`
-                                // before that call lands. Enabling this early
-                                // costs nothing extra: `bufferedData` on the
-                                // enable reply still covers whatever bytes
-                                // arrived in the meantime, so no data is lost
-                                // either way — only the odds of winning the
-                                // race improve.
-                                //
-                                // The `warned_stream_unsupported` clause below
-                                // is the "old Chrome" gate: once one
-                                // `streamResourceContent` call has come back
-                                // "method not found", skip future enable
-                                // attempts — the whole-body `body()` path is
-                                // the fallback, and there's no point
-                                // re-spending a doomed CDP round-trip per
-                                // request. Only that error latches the flag; a
-                                // lost `-32602` race is per-request and leaves
-                                // streaming on.
-                                if stream_bodies
-                                    && !warned_stream_unsupported.load(Ordering::Relaxed)
-                                    && !streaming.contains(&p.request_id)
-                                    && filter_allows(filter.as_ref(), Some(p.request.url.as_str()))
-                                {
-                                    streaming.insert(p.request_id.clone());
-                                    // Fire-and-forget *here*: the correlator
-                                    // must keep draining events rather than
-                                    // wait on a CDP round-trip, so this handle
-                                    // is dropped and no test can join it
-                                    // through the correlator. The handle exists
-                                    // for tests that call
-                                    // `spawn_stream_resource_content` directly.
-                                    drop(spawn_stream_resource_content(
-                                        &session,
-                                        &tx,
-                                        &warned_stream_unsupported,
-                                        &warned_stream_error,
-                                        p.request_id.clone(),
-                                    ));
-                                }
-                                let req = MonitoredRequest {
-                                    url: p.request.url,
-                                    method: p.request.method,
-                                    headers: p.request.headers,
-                                    post_data: p.request.post_data,
-                                };
-                                partial.insert(p.request_id, (req, None));
-                            }
-                            "Network.responseReceived" => {
-                                let Ok(p) = serde_json::from_value::<ResponseReceived>(ev.params) else {
-                                    if emit_decode_failed(&tx).await {
-                                        return;
-                                    }
-                                    continue;
-                                };
-                                if let Some(entry) = partial.get_mut(&p.request_id) {
-                                    entry.1 = Some(MonitoredResponse {
-                                        status: p.response.status,
-                                        status_text: p.response.status_text,
-                                        headers: p.response.headers,
-                                        mime_type: p.response.mime_type,
-                                    });
-                                }
-                            }
-                            "Network.dataReceived" if stream_bodies => {
-                                let Ok(p) = serde_json::from_value::<DataReceived>(ev.params) else {
-                                    if emit_decode_failed(&tx).await {
-                                        return;
-                                    }
-                                    continue;
-                                };
-                                // `data` is populated only when streaming was
-                                // enabled for this requestId — absent for the
-                                // vast majority of `dataReceived` events
-                                // (Chrome fires it as progress info for every
-                                // in-flight request regardless).
-                                let Some(data) = p.data else { continue };
-                                match BASE64.decode(&data) {
-                                    Ok(chunk) => {
-                                        if tx
-                                            .send(NetworkEvent::HttpData { request_id: p.request_id, chunk })
-                                            .await
-                                            .is_err()
-                                        {
-                                            return;
-                                        }
-                                    }
-                                    Err(_) => {
-                                        if emit_decode_failed(&tx).await {
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
-                            "Network.loadingFinished" => {
-                                let Ok(p) = serde_json::from_value::<RequestIdOnly>(ev.params) else {
-                                    if emit_decode_failed(&tx).await {
-                                        return;
-                                    }
-                                    continue;
-                                };
-                                if let Some((req, resp)) = partial.remove(&p.request_id) {
-                                    if filter_allows(filter.as_ref(), Some(&req.url)) {
-                                        let exchange = NetworkExchange {
-                                            request: req,
-                                            response: resp,
-                                            error: None,
-                                            request_id: p.request_id.clone(),
-                                            session: session.clone(),
-                                        };
-                                        if tx.send(NetworkEvent::Http(exchange)).await.is_err() {
-                                            return;
-                                        }
-                                    }
-                                }
-                                urls.remove(&p.request_id);
-                                streaming.remove(&p.request_id);
-                            }
-                            "Network.loadingFailed" => {
-                                let Ok(p) = serde_json::from_value::<LoadingFailed>(ev.params) else {
-                                    if emit_decode_failed(&tx).await {
-                                        return;
-                                    }
-                                    continue;
-                                };
-                                if let Some((req, resp)) = partial.remove(&p.request_id) {
-                                    if filter_allows(filter.as_ref(), Some(&req.url)) {
-                                        let exchange = NetworkExchange {
-                                            request: req,
-                                            response: resp,
-                                            error: Some(p.error_text),
-                                            request_id: p.request_id.clone(),
-                                            session: session.clone(),
-                                        };
-                                        if tx.send(NetworkEvent::Http(exchange)).await.is_err() {
-                                            return;
-                                        }
-                                    }
-                                }
-                                urls.remove(&p.request_id);
-                                streaming.remove(&p.request_id);
-                            }
-                            "Network.webSocketCreated" => {
-                                let Ok(p) = serde_json::from_value::<WebSocketCreated>(ev.params) else {
-                                    if emit_decode_failed(&tx).await {
-                                        return;
-                                    }
-                                    continue;
-                                };
-                                urls.insert(p.request_id.clone(), p.url.clone());
-                                track_order(&mut order, &urls, p.request_id.clone());
-                                if urls.len() > MAX_TRACKED {
-                                    let evicted = evict_oldest(&mut urls, &mut partial, &mut order);
-                                    if let Some(url) = evicted {
-                                        if emit_boundary(&tx, NetworkDeliveryBoundary::CorrelationEvicted { url })
-                                            .await
-                                        {
-                                            return;
-                                        }
-                                    }
-                                }
-                                if filter_allows(filter.as_ref(), Some(&p.url))
-                                    && tx
-                                        .send(NetworkEvent::WebSocketOpen {
-                                            request_id: p.request_id,
-                                            url: p.url,
-                                        })
-                                        .await
-                                        .is_err()
-                                    {
-                                        return;
-                                    }
-                            }
-                            "Network.webSocketFrameSent" | "Network.webSocketFrameReceived" => {
-                                let direction = if ev.method.ends_with("Sent") {
-                                    FrameDirection::Sent
-                                } else {
-                                    FrameDirection::Received
-                                };
-                                let Ok(p) = serde_json::from_value::<WebSocketFrameEvent>(ev.params) else {
-                                    if emit_decode_failed(&tx).await {
-                                        return;
-                                    }
-                                    continue;
-                                };
-                                if filter_allows(filter.as_ref(), urls.get(&p.request_id).map(String::as_str))
-                                    && tx
-                                        .send(NetworkEvent::WebSocketFrame {
-                                            request_id: p.request_id,
-                                            direction,
-                                            opcode: p.response.opcode,
-                                            payload: p.response.payload_data,
-                                        })
-                                        .await
-                                        .is_err()
-                                    {
-                                        return;
-                                    }
-                            }
-                            "Network.webSocketClosed" => {
-                                let Ok(p) = serde_json::from_value::<RequestIdOnly>(ev.params) else {
-                                    if emit_decode_failed(&tx).await {
-                                        return;
-                                    }
-                                    continue;
-                                };
-                                if filter_allows(filter.as_ref(), urls.get(&p.request_id).map(String::as_str))
-                                    && tx
-                                        .send(NetworkEvent::WebSocketClose {
-                                            request_id: p.request_id.clone(),
-                                        })
-                                        .await
-                                        .is_err()
-                                    {
-                                        return;
-                                    }
-                                urls.remove(&p.request_id);
-                            }
-                            "Network.eventSourceMessageReceived" => {
-                                let Ok(p) = serde_json::from_value::<EventSourceMessage>(ev.params) else {
-                                    if emit_decode_failed(&tx).await {
-                                        return;
-                                    }
-                                    continue;
-                                };
-                                if filter_allows(filter.as_ref(), urls.get(&p.request_id).map(String::as_str))
-                                    && tx
-                                        .send(NetworkEvent::EventSourceMessage {
-                                            request_id: p.request_id,
-                                            event_name: p.event_name,
-                                            event_id: p.event_id,
-                                            data: p.data,
-                                        })
-                                        .await
-                                        .is_err()
-                                    {
-                                        return;
-                                    }
-                            }
-                            _ => {}
-                        }
-                    }
-                    AccountedRawEvent::Lagged { generation, missed } => {
+                let ev = match next {
+                    Some(Ok(ev)) => ev,
+                    Some(Err(SessionEnd::Overflowed)) => {
                         // A partial exchange spanning this gap can never be
                         // proven complete — clear it rather than risk
                         // stitching a bogus "complete" `Http` across the
@@ -907,59 +655,318 @@ async fn run_monitor(
                         partial.clear();
                         urls.clear();
                         streaming.clear();
-                        if emit_boundary(&tx, NetworkDeliveryBoundary::Lagged { missed, generation }).await {
+                        generation = session.connection().connection_generation();
+                        events = Box::pin(session.events(MONITORED_METHODS));
+                        let boundary = NetworkDeliveryBoundary::Lagged { missed: 1, generation };
+                        if emit_boundary(&tx, boundary).await {
                             return;
                         }
+                        continue;
                     }
-                    // coverage: exercised end-to-end by
-                    // `reconnected_mid_exchange_clears_partial_and_emits_boundary`
-                    // (its own arm, structurally mirroring `Lagged` above) —
-                    // keep that test if this arm's handling ever diverges from
-                    // `Lagged` (e.g. reconnect-specific resume semantics).
-                    AccountedRawEvent::Reconnected { previous, generation } => {
-                        partial.clear();
-                        urls.clear();
-                        streaming.clear();
-                        if emit_boundary(&tx, NetworkDeliveryBoundary::Reconnected { previous, generation }).await {
-                            return;
-                        }
-                    }
-                    AccountedRawEvent::Disconnected { generation }
-                    | AccountedRawEvent::Shutdown { generation } => {
-                        partial.clear();
-                        urls.clear();
-                        streaming.clear();
-                        let boundary = if matches!(acc, AccountedRawEvent::Disconnected { .. }) {
-                            NetworkDeliveryBoundary::Disconnected { generation }
-                        } else {
-                            NetworkDeliveryBoundary::Shutdown { generation }
-                        };
+                    Some(Err(end)) => {
                         // Fail closed: report the boundary, then end the
                         // task regardless of whether the send succeeded —
-                        // the connection is gone either way, so there is
+                        // the session is gone either way, so there is
                         // nothing more this correlator can observe. A
                         // consumer that wants to keep watching must start a
                         // fresh monitor.
-                        let _ = emit_boundary(&tx, boundary).await;
+                        let _ = emit_boundary(&tx, end_boundary(end, &session, generation)).await;
                         return;
                     }
-                    // Conservative default for any future `AccountedRawEvent`
-                    // variant. `AccountedRawEvent` has exactly the five
-                    // variants above today, so this arm is unreachable until
-                    // the transport crate adds one — kept so that addition
-                    // is a silent (if degraded) fallback here instead of a
-                    // compile break.
-                    #[allow(unreachable_patterns)]
-                    _ => {
-                        partial.clear();
-                        urls.clear();
-                        streaming.clear();
-                        if emit_boundary(&tx, NetworkDeliveryBoundary::Unknown).await {
-                            return;
+                    None => return,
+                };
+                match ev.method.as_str() {
+                    "Network.requestWillBeSent" => {
+                        let Ok(p) = RequestWillBeSent::deserialize(&ev.params) else {
+                            if emit_decode_failed(&tx).await {
+                                return;
+                            }
+                            continue;
+                        };
+                        urls.insert(p.request_id.clone(), p.request.url.clone());
+                        track_order(&mut order, &urls, p.request_id.clone());
+                        if urls.len() > MAX_TRACKED {
+                            let evicted = evict_oldest(&mut urls, &mut partial, &mut order);
+                            if let Some(url) = evicted {
+                                if emit_boundary(&tx, NetworkDeliveryBoundary::CorrelationEvicted { url })
+                                    .await
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                        // Enable streaming as early as possible — right
+                        // when the request is first observed, before
+                        // it's even sent on the wire — rather than
+                        // waiting for `responseReceived`. Empirically
+                        // (real-Chrome testing against a local mock
+                        // server), `responseReceived` leaves too
+                        // little headroom: `Network.streamResourceContent`
+                        // is a CDP round-trip via a spawned task, and
+                        // Chrome rejects it with `-32602 Request with
+                        // the provided ID has already finished
+                        // loading` for a fast (especially loopback)
+                        // response that reaches `loadingFinished`
+                        // before that call lands. Enabling this early
+                        // costs nothing extra: `bufferedData` on the
+                        // enable reply still covers whatever bytes
+                        // arrived in the meantime, so no data is lost
+                        // either way — only the odds of winning the
+                        // race improve.
+                        //
+                        // The `warned_stream_unsupported` clause below
+                        // is the "old Chrome" gate: once one
+                        // `streamResourceContent` call has come back
+                        // "method not found", skip future enable
+                        // attempts — the whole-body `body()` path is
+                        // the fallback, and there's no point
+                        // re-spending a doomed CDP round-trip per
+                        // request. Only that error latches the flag; a
+                        // lost `-32602` race is per-request and leaves
+                        // streaming on.
+                        if stream_bodies
+                            && !warned_stream_unsupported.load(Ordering::Relaxed)
+                            && !streaming.contains(&p.request_id)
+                            && filter_allows(filter.as_ref(), Some(p.request.url.as_str()))
+                        {
+                            streaming.insert(p.request_id.clone());
+                            // Fire-and-forget *here*: the correlator
+                            // must keep draining events rather than
+                            // wait on a CDP round-trip, so this handle
+                            // is dropped and no test can join it
+                            // through the correlator. The handle exists
+                            // for tests that call
+                            // `spawn_stream_resource_content` directly.
+                            drop(spawn_stream_resource_content(
+                                &session,
+                                &tx,
+                                &warned_stream_unsupported,
+                                &warned_stream_error,
+                                p.request_id.clone(),
+                            ));
+                        }
+                        let req = MonitoredRequest {
+                            url: p.request.url,
+                            method: p.request.method,
+                            headers: p.request.headers,
+                            post_data: p.request.post_data,
+                        };
+                        partial.insert(p.request_id, (req, None));
+                    }
+                    "Network.responseReceived" => {
+                        let Ok(p) = ResponseReceived::deserialize(&ev.params) else {
+                            if emit_decode_failed(&tx).await {
+                                return;
+                            }
+                            continue;
+                        };
+                        if let Some(entry) = partial.get_mut(&p.request_id) {
+                            entry.1 = Some(MonitoredResponse {
+                                status: p.response.status,
+                                status_text: p.response.status_text,
+                                headers: p.response.headers,
+                                mime_type: p.response.mime_type,
+                            });
                         }
                     }
+                    "Network.dataReceived" if stream_bodies => {
+                        let Ok(p) = DataReceived::deserialize(&ev.params) else {
+                            if emit_decode_failed(&tx).await {
+                                return;
+                            }
+                            continue;
+                        };
+                        // `data` is populated only when streaming was
+                        // enabled for this requestId — absent for the
+                        // vast majority of `dataReceived` events
+                        // (Chrome fires it as progress info for every
+                        // in-flight request regardless).
+                        let Some(data) = p.data else { continue };
+                        match BASE64.decode(&data) {
+                            Ok(chunk) => {
+                                if tx
+                                    .send(NetworkEvent::HttpData { request_id: p.request_id, chunk })
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            Err(_) => {
+                                if emit_decode_failed(&tx).await {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    "Network.loadingFinished" => {
+                        let Ok(p) = RequestIdOnly::deserialize(&ev.params) else {
+                            if emit_decode_failed(&tx).await {
+                                return;
+                            }
+                            continue;
+                        };
+                        if let Some((req, resp)) = partial.remove(&p.request_id) {
+                            if filter_allows(filter.as_ref(), Some(&req.url)) {
+                                let exchange = NetworkExchange {
+                                    request: req,
+                                    response: resp,
+                                    error: None,
+                                    request_id: p.request_id.clone(),
+                                    session: session.clone(),
+                                };
+                                if tx.send(NetworkEvent::Http(exchange)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        urls.remove(&p.request_id);
+                        streaming.remove(&p.request_id);
+                    }
+                    "Network.loadingFailed" => {
+                        let Ok(p) = LoadingFailed::deserialize(&ev.params) else {
+                            if emit_decode_failed(&tx).await {
+                                return;
+                            }
+                            continue;
+                        };
+                        if let Some((req, resp)) = partial.remove(&p.request_id) {
+                            if filter_allows(filter.as_ref(), Some(&req.url)) {
+                                let exchange = NetworkExchange {
+                                    request: req,
+                                    response: resp,
+                                    error: Some(p.error_text),
+                                    request_id: p.request_id.clone(),
+                                    session: session.clone(),
+                                };
+                                if tx.send(NetworkEvent::Http(exchange)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        urls.remove(&p.request_id);
+                        streaming.remove(&p.request_id);
+                    }
+                    "Network.webSocketCreated" => {
+                        let Ok(p) = WebSocketCreated::deserialize(&ev.params) else {
+                            if emit_decode_failed(&tx).await {
+                                return;
+                            }
+                            continue;
+                        };
+                        urls.insert(p.request_id.clone(), p.url.clone());
+                        track_order(&mut order, &urls, p.request_id.clone());
+                        if urls.len() > MAX_TRACKED {
+                            let evicted = evict_oldest(&mut urls, &mut partial, &mut order);
+                            if let Some(url) = evicted {
+                                if emit_boundary(&tx, NetworkDeliveryBoundary::CorrelationEvicted { url })
+                                    .await
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                        if filter_allows(filter.as_ref(), Some(&p.url))
+                            && tx
+                                .send(NetworkEvent::WebSocketOpen {
+                                    request_id: p.request_id,
+                                    url: p.url,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                    }
+                    "Network.webSocketFrameSent" | "Network.webSocketFrameReceived" => {
+                        let direction = if ev.method.ends_with("Sent") {
+                            FrameDirection::Sent
+                        } else {
+                            FrameDirection::Received
+                        };
+                        let Ok(p) = WebSocketFrameEvent::deserialize(&ev.params) else {
+                            if emit_decode_failed(&tx).await {
+                                return;
+                            }
+                            continue;
+                        };
+                        if filter_allows(filter.as_ref(), urls.get(&p.request_id).map(String::as_str))
+                            && tx
+                                .send(NetworkEvent::WebSocketFrame {
+                                    request_id: p.request_id,
+                                    direction,
+                                    opcode: p.response.opcode,
+                                    payload: p.response.payload_data,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                    }
+                    "Network.webSocketClosed" => {
+                        let Ok(p) = RequestIdOnly::deserialize(&ev.params) else {
+                            if emit_decode_failed(&tx).await {
+                                return;
+                            }
+                            continue;
+                        };
+                        if filter_allows(filter.as_ref(), urls.get(&p.request_id).map(String::as_str))
+                            && tx
+                                .send(NetworkEvent::WebSocketClose {
+                                    request_id: p.request_id.clone(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        urls.remove(&p.request_id);
+                    }
+                    "Network.eventSourceMessageReceived" => {
+                        let Ok(p) = EventSourceMessage::deserialize(&ev.params) else {
+                            if emit_decode_failed(&tx).await {
+                                return;
+                            }
+                            continue;
+                        };
+                        if filter_allows(filter.as_ref(), urls.get(&p.request_id).map(String::as_str))
+                            && tx
+                                .send(NetworkEvent::EventSourceMessage {
+                                    request_id: p.request_id,
+                                    event_name: p.event_name,
+                                    event_id: p.event_id,
+                                    data: p.data,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                    }
+                    _ => {}
                 }
             }
+        }
+    }
+}
+
+/// The boundary that reports the end `end` of the monitor's subscription,
+/// which was made in the connection generation `generation`, on `session`.
+/// `end` is one that leaves nothing more to observe (not `Overflowed`).
+fn end_boundary(
+    end: SessionEnd,
+    session: &SessionHandle,
+    generation: u64,
+) -> NetworkDeliveryBoundary {
+    match end {
+        SessionEnd::Disconnected => NetworkDeliveryBoundary::Disconnected { generation },
+        SessionEnd::Reconnected => NetworkDeliveryBoundary::Reconnected {
+            previous: generation,
+            generation: session.connection().connection_generation(),
+        },
+        SessionEnd::Detached | SessionEnd::Shutdown | SessionEnd::Overflowed => {
+            NetworkDeliveryBoundary::Shutdown { generation }
         }
     }
 }
@@ -1319,8 +1326,7 @@ mod tests {
     }
 
     /// Spawn a monitor over a caller-supplied `(MockConnection, Connection)`
-    /// pair — which lets a test force a deterministic `Lagged` boundary via
-    /// [`MockConnection::pair_with_accounted_capacity`] — with
+    /// pair, with
     /// [`MonitorBuilder::stream_bodies`] set to `stream_bodies`, and return
     /// the live monitor plus the mock (to emit events) and connection (to
     /// shut down).
@@ -2090,40 +2096,44 @@ mod tests {
         conn.shutdown();
     }
 
-    /// A `Lagged` boundary arriving while a request is mid-exchange must
-    /// clear its partial correlation state and surface as a
+    /// An overflow of the monitor's subscription while a request is
+    /// mid-exchange must clear its partial correlation state and surface as a
     /// `DeliveryBoundary::Lagged` — never as a stitched-together "complete"
-    /// `Http` exchange. Forces the gap deterministically the same way
-    /// `wait_for_idle_opts_strict_aborts_on_lagged_boundary` (`tab.rs`) and
-    /// `expect_request_returns_event_stream_incomplete_on_lagged_boundary`
-    /// (`expect/request.rs`) do: a 2-slot accounted bus overflowed by 5
-    /// unrelated events pushed before the correlator's subscriber polls them.
+    /// `Http` exchange — and the monitor must subscribe again and go on.
+    /// Driven through `run_monitor` with a stand-in first subscription,
+    /// since a real queue overflows only when the correlator stops reading.
     #[tokio::test]
-    async fn lagged_mid_exchange_clears_partial_and_emits_boundary() {
-        let (mut monitor, mock, conn) =
-            spawn_monitor_with(MockConnection::pair_with_accounted_capacity(2), None, false).await;
-
-        // Start (but never finish) an exchange.
-        mock.emit_event_for_session(
-            "Network.requestWillBeSent",
-            json!({
+    async fn an_overflow_mid_exchange_clears_partial_and_emits_lagged() {
+        let (mock, conn) = MockConnection::pair();
+        let session = SessionHandle::new(conn.clone(), SID);
+        let request = RawEvent {
+            method: "Network.requestWillBeSent".into(),
+            params: json!({
                 "requestId": "mid1",
                 "request": { "url": "https://example.com/mid", "method": "GET" }
             }),
-            SID,
-        )
-        .await;
-        // Give the correlator a chance to actually drain and correlate that
-        // single event (well under the 2-slot capacity) before the overflow
-        // below — otherwise this test couldn't distinguish "the entry was
-        // cleared by the Lagged handler" from "the entry was never inserted
-        // because it, too, was lost in the overflow".
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Overflow the 2-slot accounted bus with unrelated events.
-        for i in 0..5u32 {
-            mock.emit_event("Test.dummy", json!({ "i": i })).await;
-        }
+            session_id: Some(SID.into()),
+        };
+        let first: MonitoredEvents = Box::pin(futures::stream::iter([
+            Ok(Arc::new(request)),
+            Err(SessionEnd::Overflowed),
+        ]));
+        let (tx, rx) = mpsc::channel(CHANNEL_CAP);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(run_monitor(
+            session,
+            first,
+            1,
+            None,
+            false,
+            tx,
+            cancel.clone(),
+        ));
+        let mut monitor = NetworkMonitor {
+            rx,
+            cancel,
+            _task: task,
+        };
 
         match next_event(&mut monitor).await {
             NetworkEvent::DeliveryBoundary(NetworkDeliveryBoundary::Lagged {
@@ -2131,7 +2141,7 @@ mod tests {
                 missed,
             }) => {
                 assert_eq!(generation, 1);
-                assert!(missed > 0, "expected a nonzero missed count, got {missed}");
+                assert_eq!(missed, 1);
             }
             other => panic!("expected DeliveryBoundary::Lagged, got {other:?}"),
         }
@@ -2147,17 +2157,35 @@ mod tests {
         .await;
         assert_no_event(&mut monitor).await;
 
+        // The new subscription correlates a whole exchange.
+        for (method, params) in [
+            (
+                "Network.requestWillBeSent",
+                json!({
+                    "requestId": "after",
+                    "request": { "url": "https://example.com/after", "method": "GET" }
+                }),
+            ),
+            ("Network.loadingFinished", json!({ "requestId": "after" })),
+        ] {
+            mock.emit_event_for_session(method, params, SID).await;
+        }
+        match next_event(&mut monitor).await {
+            NetworkEvent::Http(exchange) => {
+                assert_eq!(exchange.request.url, "https://example.com/after");
+            }
+            other => panic!("expected the exchange after the gap, got {other:?}"),
+        }
+
         monitor.stop();
         conn.shutdown();
     }
 
-    /// A `Reconnected` boundary mid-exchange must clear correlation state (so
-    /// no exchange is stitched across the socket swap) and surface an explicit
-    /// `DeliveryBoundary::Reconnected`. Gives the `Reconnected` arm its own
-    /// end-to-end coverage, distinct from the structurally-identical `Lagged`
-    /// arm it mirrors.
+    /// A reconnect mid-exchange must surface an explicit
+    /// `DeliveryBoundary::Reconnected` and end the monitor: the tab's
+    /// session doesn't exist on the new socket.
     #[tokio::test]
-    async fn reconnected_mid_exchange_clears_partial_and_emits_boundary() {
+    async fn reconnected_mid_exchange_emits_boundary_and_ends_monitor_task() {
         let (mut monitor, mut mock, conn) = spawn_monitor(None).await;
 
         // Start (but never finish) an exchange, and give the correlator a
@@ -2188,18 +2216,11 @@ mod tests {
             other => panic!("expected DeliveryBoundary::Reconnected, got {other:?}"),
         }
 
-        // The matching `loadingFinished` for the pre-reconnect request (emitted
-        // over the new socket) must NOT stitch into a bogus "complete"
-        // exchange — the partial entry was cleared on the boundary.
-        mock.emit_event_for_session(
-            "Network.loadingFinished",
-            json!({ "requestId": "recon1" }),
-            SID,
-        )
-        .await;
-        assert_no_event(&mut monitor).await;
-
-        monitor.stop();
+        // The task ended: the stream closes (`None`), it does not hang.
+        let next = tokio::time::timeout(Duration::from_secs(2), monitor.next())
+            .await
+            .expect("monitor stream did not end within 2s after Reconnected");
+        assert!(next.is_none(), "expected the monitor to end, got {next:?}");
         conn.shutdown();
     }
 
@@ -2476,9 +2497,8 @@ mod tests {
     }
 
     /// Every `NetworkDeliveryBoundary` variant is constructible, `Debug`,
-    /// `Clone`, and `Eq` — including `Unknown`, which the live correlator
-    /// tests above can't exercise: it is a defensive fallback, unreachable
-    /// while `AccountedRawEvent` has exactly its current five variants.
+    /// `Clone`, and `Eq` — including `Unknown`, which the correlator no
+    /// longer emits.
     #[test]
     fn network_delivery_boundary_variants_construct_and_debug() {
         let variants = [

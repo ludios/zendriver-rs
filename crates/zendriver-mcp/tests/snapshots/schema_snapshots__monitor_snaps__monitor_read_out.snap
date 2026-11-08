@@ -179,7 +179,7 @@ $defs:
           - event_name
           - event_id
           - data
-      - description: "A delivery-loss boundary on the monitor's underlying event stream (or\nits own correlation bookkeeping) — a wire mirror of\n`zendriver::NetworkDeliveryBoundary`. Previously these losses were\nsilent; they're now explicit events on the same stream. A\n`disconnected` or `shutdown` boundary means the underlying lib-side\nmonitor's correlator task has ended — no further events will be\nbuffered for this handle; start a new monitor to resume."
+      - description: "A delivery-loss boundary on the monitor's underlying event stream (or\nits own correlation bookkeeping) — a wire mirror of\n`zendriver::NetworkDeliveryBoundary`. Previously these losses were\nsilent; they're now explicit events on the same stream. A\n`disconnected`, `reconnected` or `shutdown` boundary means the\nunderlying lib-side monitor's correlator task has ended — no further\nevents will be buffered for this handle; start a new monitor to\nresume."
         type: object
         properties:
           boundary:
@@ -196,7 +196,7 @@ $defs:
             type: string
             const: delivery_boundary
           missed:
-            description: "Present for `lagged`: number of events this subscription missed."
+            description: "Present for `lagged`: how many events the monitor is known to have\nmissed (at least this many)."
             type:
               - integer
               - "null"
