@@ -7,15 +7,14 @@
 //!
 //! ## Wiring
 //!
-//! Each [`crate::Tab`] owns one background task. At construction time the
-//! task:
-//! 1. Subscribes to the three `Page.frame*` events, in one subscription
-//!    so that they are applied in the order Chrome sent them, BEFORE
-//!    awaiting `Page.enable` — avoids the race where Chrome fires events
-//!    between the enable reply and our subscription registration.
-//! 2. Fires `Page.enable` once on the tab's session so Chrome starts
+//! Each [`crate::Tab`] owns one background task. [`crate::Tab::new`]
+//! subscribes to the three `Page.frame*` events ([`subscribe`]), in one
+//! subscription so that they are applied in the order Chrome sent them,
+//! before it spawns the task, so that no event between the two is missed.
+//! The task:
+//! 1. Fires `Page.enable` once on the tab's session so Chrome starts
 //!    emitting `Page.frame*` events.
-//! 3. Loops over the events, mutating the registry:
+//! 2. Loops over the events, mutating the registry:
 //!    - `Page.frameAttached` — construct a new [`crate::Frame`] sharing
 //!      the tab's session (same-origin sub-frame; OOPIF frames arrive
 //!      through the [`crate::frame::oopif`] observer path on their own
@@ -28,14 +27,17 @@
 //! Chrome reports each frame under one id for the frame's whole life (the
 //! id is the frame tree node's DevTools token, which a move to another
 //! process keeps), so applying the events in order keeps the registry
-//! equal to Chrome's frame tree.
+//! equal to the frames that this session hosts. (A frame that moves to
+//! another process is detached with `reason: "swap"`, and so leaves the
+//! registry, though it still exists in another target.)
 //!
 //! ## Nothing in the loop may await a CDP round-trip
 //!
 //! While the loop waits, no other frame event is applied, so the registry
 //! falls behind Chrome's frame tree (the events wait in the subscription's
-//! queue, and the subscription ends if the queue fills). Keep the loop to
-//! registry mutation; spawn anything that talks to Chrome.
+//! queue; should it overflow, the task logs a warning and subscribes again,
+//! and the registry may then hold frames that are gone, or lack new ones).
+//! Keep the loop to registry mutation; spawn anything that talks to Chrome.
 //!
 //! The task runs until its [`tokio_util::sync::CancellationToken`] fires —
 //! typically when the owning Tab is dropped — or the session's events end.
@@ -51,7 +53,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{trace, warn};
-use zendriver_transport::{RawEvent, SessionHandle};
+use zendriver_transport::{RawEvent, SessionEnd, SessionEvents, SessionHandle};
 
 use crate::frame::Frame;
 use crate::tab::TabInner;
@@ -93,8 +95,39 @@ struct NavigatedFrameInner {
     name: Option<String>,
 }
 
+/// The methods of the events the lifecycle subscriber applies.
+const FRAME_EVENTS: &[&str] = &[
+    "Page.frameAttached",
+    "Page.frameDetached",
+    "Page.frameNavigated",
+];
+
+/// Subscribe to `session`'s events that [`run`] applies.
+pub(crate) fn subscribe(session: &SessionHandle) -> SessionEvents {
+    session.events(FRAME_EVENTS)
+}
+
+/// `event`'s params as a `T`, or `None` (with a warning naming the
+/// session `session_id`) if they don't fit.
+fn decode<T: DeserializeOwned>(event: &RawEvent, session_id: Option<&str>) -> Option<T> {
+    match T::deserialize(&event.params) {
+        Ok(decoded) => Some(decoded),
+        Err(e) => {
+            warn!(
+                method = %event.method,
+                ?session_id,
+                error = %e,
+                "frame::lifecycle: unreadable frame event; ignoring it"
+            );
+            None
+        }
+    }
+}
+
 /// Drive the lifecycle subscriber until `cancel` fires or the session's
 /// events end.
+///
+/// `events` is `session`'s subscription made by [`subscribe`].
 ///
 /// `frames` is the [`RwLock`]-protected registry shared with the owning
 /// [`TabInner`]. `tab_weak` is the [`Weak<TabInner>`] handed to each
@@ -105,29 +138,23 @@ struct NavigatedFrameInner {
 /// so the subscriber keeps running on a previously-enabled Page domain.
 pub(crate) async fn run(
     session: SessionHandle,
+    mut events: SessionEvents,
     frames: Arc<RwLock<HashMap<String, Frame>>>,
     tab_weak: Weak<TabInner>,
     cancel: CancellationToken,
 ) {
-    // One subscription for the three methods, so that the events are
-    // applied in the order Chrome sent them.
-    let mut events = session.events(&[
-        "Page.frameAttached",
-        "Page.frameDetached",
-        "Page.frameNavigated",
-    ]);
-
-    // Fire-and-forget `Page.enable`: the mock harness never replies to this
-    // call, and in production the subscription above is already
+    // Fire-and-forget `Page.enable`: the subscription is already
     // registered, so awaiting the response would only serialize the first
     // arriving event behind the enable round-trip.
     //
-    // Cancellation-aware: an unanswered call sits on the transport's
-    // default budget ([`zendriver_transport::DEFAULT_CALL_TIMEOUT`], 180s),
-    // and nothing spawned here may outlive the Tab that owns it by that
-    // much while holding a session clone.
+    // Cancelled when this function returns, however it returns: an
+    // unanswered call sits on the transport's default budget
+    // ([`zendriver_transport::DEFAULT_CALL_TIMEOUT`], 180s), and nothing
+    // spawned here may outlive the task that owns it by that much while
+    // holding a session clone.
     let enable_session = session.clone();
-    let enable_cancel = cancel.clone();
+    let enable_cancel = cancel.child_token();
+    let _stop_enable = enable_cancel.clone().drop_guard();
     tokio::spawn(async move {
         tokio::select! {
             () = enable_cancel.cancelled() => {}
@@ -149,15 +176,23 @@ pub(crate) async fn run(
         };
         let event = match event {
             Some(Ok(event)) => event,
+            Some(Err(SessionEnd::Overflowed)) => {
+                warn!(
+                    session_id = ?session.session_id(),
+                    "frame::lifecycle: the frame events overflowed their queue; subscribing again, so the tab's frames may be out of date"
+                );
+                events = subscribe(&session);
+                continue;
+            }
             Some(Err(end)) => {
-                trace!(%end, "frame::lifecycle: the session's events ended, exiting");
+                trace!(%end, session_id = ?session.session_id(), "frame::lifecycle: the session's events ended, exiting");
                 return;
             }
             None => return,
         };
         match event.method.as_str() {
             "Page.frameAttached" => {
-                let Some(ev) = decode::<FrameAttachedEvent>(&event) else {
+                let Some(ev) = decode::<FrameAttachedEvent>(&event, session.session_id()) else {
                     continue;
                 };
                 let frame = Frame::new(
@@ -171,7 +206,7 @@ pub(crate) async fn run(
                 frames.write().await.insert(ev.frame_id, frame);
             }
             "Page.frameNavigated" => {
-                let Some(ev) = decode::<FrameNavigatedEvent>(&event) else {
+                let Some(ev) = decode::<FrameNavigatedEvent>(&event, session.session_id()) else {
                     continue;
                 };
                 let frame_id = ev.frame.id;
@@ -284,23 +319,12 @@ pub(crate) async fn run(
                 }
             }
             "Page.frameDetached" => {
-                let Some(ev) = decode::<FrameDetachedEvent>(&event) else {
+                let Some(ev) = decode::<FrameDetachedEvent>(&event, session.session_id()) else {
                     continue;
                 };
                 frames.write().await.remove(&ev.frame_id);
             }
             _ => {}
-        }
-    }
-}
-
-/// `event`'s params as a `T`, or `None` (with a warning) if they don't fit.
-fn decode<T: DeserializeOwned>(event: &RawEvent) -> Option<T> {
-    match T::deserialize(&event.params) {
-        Ok(decoded) => Some(decoded),
-        Err(e) => {
-            warn!(method = %event.method, error = %e, "frame::lifecycle: unreadable frame event; ignoring it");
-            None
         }
     }
 }
@@ -320,16 +344,28 @@ mod tests {
     /// events routed to its own session.
     const SESSION: &str = "S1";
 
-    /// Spawn the subscriber on a mock connection and drain its startup
-    /// `Page.enable`. Once that command has landed the `Page.frame*`
-    /// subscription is registered, so any later `emit_event_for_session`
-    /// reaches the loop.
+    /// Spawn the subscriber on a mock connection, subscribed before the
+    /// spawn as `Tab::new` does, and drain its startup `Page.enable`.
     async fn start() -> (MockConnection, Connection, Registry, CancellationToken) {
-        let (mut mock, conn) = MockConnection::pair();
+        start_on(MockConnection::pair()).await
+    }
+
+    /// [`start`] on the mock connection `pair`.
+    async fn start_on(
+        pair: (MockConnection, Connection),
+    ) -> (MockConnection, Connection, Registry, CancellationToken) {
+        let (mut mock, conn) = pair;
         let session = SessionHandle::new(conn.clone(), SESSION);
         let frames: Registry = Arc::new(RwLock::new(HashMap::new()));
         let cancel = CancellationToken::new();
-        tokio::spawn(run(session, frames.clone(), Weak::new(), cancel.clone()));
+        let events = subscribe(&session);
+        tokio::spawn(run(
+            session,
+            events,
+            frames.clone(),
+            Weak::new(),
+            cancel.clone(),
+        ));
         let id = tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Page.enable"))
             .await
             .expect("frame lifecycle did not send Page.enable within 2s");
@@ -399,6 +435,32 @@ mod tests {
         conn.shutdown();
     }
 
+    /// After its queue overflows, the subscriber subscribes again and goes
+    /// on applying events.
+    #[tokio::test]
+    async fn an_overflow_subscribes_again() {
+        let (mock, conn, frames, cancel) =
+            start_on(MockConnection::pair_with_session_queue_capacity(2)).await;
+        // The actor fills the queues before it broadcasts an event, so once
+        // the broadcast has every attach, the queue has overflowed.
+        let mut broadcast = conn.subscribe_raw();
+        for i in 0..5 {
+            attach(&mock, &format!("LOST{i}"), "P").await;
+        }
+        for _ in 0..5 {
+            broadcast.next().await;
+        }
+        // Until the subscriber has read the queue's two attaches and its
+        // end, an attach could still find the old, full queue.
+        wait_for(&frames, |m| m.len() == 2).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        attach(&mock, "AFTER", "P").await;
+        wait_for(&frames, |m| m.contains_key("AFTER")).await;
+
+        cancel.cancel();
+        conn.shutdown();
+    }
+
     /// Two iframes under one parent, neither navigated yet, are two frames:
     /// Chrome never reports one frame under two ids, so a second attach
     /// leaves the first alone and asks Chrome nothing.
@@ -409,6 +471,9 @@ mod tests {
         attach(&mock, "F2", "P").await;
         let map = wait_for(&frames, |m| m.contains_key("F2")).await;
         assert!(map.contains_key("F1"));
+        // Long enough for anything that the attaches spawned to talk to
+        // Chrome.
+        tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(mock.try_recv_cmd(), None);
 
         cancel.cancel();

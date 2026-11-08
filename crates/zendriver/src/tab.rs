@@ -334,9 +334,8 @@ pub(crate) struct TabInner {
     /// Cancellation token for the frame lifecycle subscriber task. Mirror
     /// of [`TabInner::network_cancel`]: fires on [`Drop`] so the spawned
     /// task exits cleanly when the last clone of this Tab goes away. The
-    /// task selects on this token alongside the three `Page.frame*`
-    /// subscriber streams so cancellation unblocks the select even if no
-    /// events are arriving.
+    /// task selects on this token alongside its `Page.frame*` subscription
+    /// so cancellation unblocks the select even if no events are arriving.
     pub(crate) frame_lifecycle_cancel: tokio_util::sync::CancellationToken,
     /// The main frame's loading state, followed since just before the last
     /// navigation that zendriver started ([`Tab::goto`], [`Tab::back`],
@@ -363,7 +362,7 @@ impl Drop for TabInner {
         self.network_cancel.cancel();
         // Signal the spawned `frame::lifecycle::run` task to exit. Same
         // posture as `network_cancel` above — the task selects on this
-        // token alongside the three `Page.frame*` subscriber streams.
+        // token alongside its `Page.frame*` subscription.
         self.frame_lifecycle_cancel.cancel();
         // A per-tab (root) socket belongs to this tab alone; shut it down so its
         // reader exits cleanly instead of logging the reset when the target goes
@@ -486,6 +485,9 @@ impl Tab {
         let frames: Arc<tokio::sync::RwLock<HashMap<String, Frame>>> =
             Arc::new(tokio::sync::RwLock::new(HashMap::new()));
         let frame_lifecycle_cancel = tokio_util::sync::CancellationToken::new();
+        // Subscribed here, not in the task, for the same reason as the
+        // network tracker's subscription above.
+        let frame_events = crate::frame::lifecycle::subscribe(&session);
 
         let inner = Arc::new_cyclic(|weak: &std::sync::Weak<TabInner>| {
             tokio::spawn({
@@ -496,6 +498,7 @@ impl Tab {
                 async move {
                     crate::frame::lifecycle::run(
                         session_for_task,
+                        frame_events,
                         frames_for_task,
                         weak_for_task,
                         cancel_for_task,
@@ -3997,10 +4000,8 @@ mod tests {
         let tab = Tab::new_for_test(sess);
 
         // Synchronize: wait until the background lifecycle task has run
-        // far enough to issue `Page.enable`. Once that command lands in
-        // the mock's outbound queue, the three `Page.frame*` subscriptions
-        // are already registered, so any subsequent
-        // `emit_event_for_session` will be routed to them.
+        // far enough to issue `Page.enable`. (Its `Page.frame*`
+        // subscription was registered by `Tab::new`, before the task.)
         let id_enable =
             tokio::time::timeout(Duration::from_secs(2), mock.expect_cmd("Page.enable"))
                 .await
@@ -4069,12 +4070,8 @@ mod tests {
                 .expect("frame lifecycle did not send Page.enable within 2s");
         mock.reply(id_enable, json!({})).await;
 
-        // Attach frames out of lexical order: "FC", "FA", "FB". Each gets
-        // its own `parentFrameId` — sharing one would trip the lifecycle
-        // subscriber's same-parent/empty-url "stale provisional sibling"
-        // sweep (see `frame::lifecycle::run`), which is unrelated to what
-        // this test is exercising.
-        for (frame_id, parent_id) in [("FC", "FROOT1"), ("FA", "FROOT2"), ("FB", "FROOT3")] {
+        // Attach frames out of lexical order: "FC", "FA", "FB".
+        for (frame_id, parent_id) in [("FC", "FROOT"), ("FA", "FROOT"), ("FB", "FROOT")] {
             mock.emit_event_for_session(
                 "Page.frameAttached",
                 json!({
