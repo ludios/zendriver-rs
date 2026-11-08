@@ -111,8 +111,9 @@ use std::time::Duration;
 /// Element geometry in CSS pixels relative to the viewport's top-left.
 ///
 /// Returned by [`crate::Element::bounding_box`] (and consumed by click
-/// target calculations, screenshot clip rects, hover coordinates). Derived
-/// from the `content` quad of `DOM.getBoxModel`.
+/// target calculations, screenshot clip rects, hover coordinates). It is the
+/// element's border box, as `getBoundingClientRect()` reports it, derived
+/// from the `border` quad of `DOM.getBoxModel`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoundingBox {
     /// Distance from viewport left edge to the box's left edge (CSS px).

@@ -9,7 +9,7 @@
 //! as visible/enabled."
 //!
 //! `bounding_box` returns a viewport-relative [`BoundingBox`] derived from
-//! the `content` quad of `DOM.getBoxModel`. Returns `Ok(None)` when the
+//! the `border` quad of `DOM.getBoxModel`. Returns `Ok(None)` when the
 //! node has no box (e.g. `display: none`) — Chrome surfaces this as a
 //! `-32000 "Could not compute box model"` Cdp error rather than a stale-node
 //! signal, so we map that specific error to `None` instead of bubbling.
@@ -24,6 +24,28 @@ use crate::element::Element;
 use crate::error::{Result, ZendriverError};
 use crate::query::actionability;
 use crate::query::{BoundingBox, PageBox};
+
+/// The smallest axis-aligned rectangle around `quad`, a `DOM.getBoxModel`
+/// quad (`[x1, y1, x2, y2, x3, y3, x4, y4]`, its four corners), or `None`
+/// when `quad` isn't eight numbers.
+fn border_box(quad: &Value) -> Option<BoundingBox> {
+    let coords: Vec<f64> = quad.as_array()?.iter().filter_map(Value::as_f64).collect();
+    if coords.len() != 8 {
+        return None;
+    }
+    let xs = coords.iter().step_by(2);
+    let ys = coords.iter().skip(1).step_by(2);
+    let left = xs.clone().copied().fold(f64::INFINITY, f64::min);
+    let right = xs.copied().fold(f64::NEG_INFINITY, f64::max);
+    let top = ys.clone().copied().fold(f64::INFINITY, f64::min);
+    let bottom = ys.copied().fold(f64::NEG_INFINITY, f64::max);
+    Some(BoundingBox {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+    })
+}
 
 impl Element {
     /// Return the value of attribute `name`, or `None` when absent.
@@ -181,9 +203,13 @@ impl Element {
     /// — Chrome reports this as `-32000 "Could not compute box model"` which
     /// is mapped to `None` rather than bubbling.
     ///
-    /// Coordinates come from `DOM.getBoxModel`'s `content` quad (clock-wise
-    /// starting top-left); `(width, height)` come from the top-level fields
-    /// of the box-model response.
+    /// The box is the element's border box, the box that
+    /// `getBoundingClientRect()` reports: the smallest rectangle around the
+    /// four corners of `DOM.getBoxModel`'s `border` quad, which a CSS
+    /// transform can rotate. (`DOM.getBoxModel`, unlike
+    /// `DOM.getContentQuads`, brings the page's layout up to date first, so
+    /// the box is current even in a background tab, which renders no
+    /// frames.)
     ///
     /// # Examples
     ///
@@ -218,24 +244,7 @@ impl Element {
                 }
                 Err(e) => return Err(e),
             };
-            let model = match res.get("model") {
-                Some(m) => m,
-                None => return Ok(None),
-            };
-            let content = match model.get("content").and_then(|v| v.as_array()) {
-                Some(c) if c.len() >= 2 => c,
-                _ => return Ok(None),
-            };
-            let x = content[0].as_f64().unwrap_or(0.0);
-            let y = content[1].as_f64().unwrap_or(0.0);
-            let width = model.get("width").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let height = model.get("height").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            Ok(Some(BoundingBox {
-                x,
-                y,
-                width,
-                height,
-            }))
+            Ok(border_box(&res["model"]["border"]))
         })
         .await
     }
@@ -460,12 +469,13 @@ mod tests {
             id,
             json!({
                 "model": {
-                    // Quad: top-left (10,20), top-right (110,20),
-                    // bottom-right (110,70), bottom-left (10,70).
-                    "content": [10.0, 20.0, 110.0, 20.0, 110.0, 70.0, 10.0, 70.0],
-                    "padding": [10.0, 20.0, 110.0, 20.0, 110.0, 70.0, 10.0, 70.0],
+                    // Four nested boxes; the border box's corners are
+                    // top-left (10,20), top-right (110,20), bottom-right
+                    // (110,70) and bottom-left (10,70).
+                    "content": [35.0, 30.0, 85.0, 30.0, 85.0, 60.0, 35.0, 60.0],
+                    "padding": [25.0, 25.0, 95.0, 25.0, 95.0, 65.0, 25.0, 65.0],
                     "border":  [10.0, 20.0, 110.0, 20.0, 110.0, 70.0, 10.0, 70.0],
-                    "margin":  [10.0, 20.0, 110.0, 20.0, 110.0, 70.0, 10.0, 70.0],
+                    "margin":  [0.0, 10.0, 120.0, 10.0, 120.0, 80.0, 0.0, 80.0],
                     "width":  100,
                     "height": 50
                 }
@@ -479,6 +489,22 @@ mod tests {
         assert!((bbox.width - 100.0).abs() < 1e-9);
         assert!((bbox.height - 50.0).abs() < 1e-9);
         conn.shutdown();
+    }
+
+    /// A rotated border quad gets the smallest upright box around it; a
+    /// quad that isn't eight numbers gets none.
+    #[test]
+    fn border_box_bounds_all_four_corners() {
+        let diamond = json!([60.0, 0.0, 120.0, 60.0, 60.0, 120.0, 0.0, 60.0]);
+        let expected = BoundingBox {
+            x: 0.0,
+            y: 0.0,
+            width: 120.0,
+            height: 120.0,
+        };
+        assert_eq!(border_box(&diamond), Some(expected));
+        assert_eq!(border_box(&json!([1.0, 2.0, 3.0])), None);
+        assert_eq!(border_box(&Value::Null), None);
     }
 
     #[tokio::test]
