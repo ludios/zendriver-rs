@@ -134,7 +134,7 @@ Also for this round:
 - [ ] **File-chooser intercept left on after an error.** Disable it on the error path. *(MEC #4)* Test `chrome`.
 - [ ] **Monitor: `stream_bodies` chunks can arrive out of order.** *(MEC #6)* Test `chrome`.
 - [ ] **From the 2026-11-06 reviews of the detach work (older problems, not fixed):**
-  - A monitor's body-streaming tasks hold its output channel, so chunks can follow its terminal `Shutdown` / `Disconnected` boundary, and the stream doesn't return `None` until they finish.
+  - A monitor's body-streaming tasks hold its output channel, so chunks can follow its terminal `Shutdown` / `Disconnected` / `Reconnected` boundary, and the stream doesn't return `None` until they finish.
   - Interception: dropping the last `Interceptor` and rule handles closes the command queue while an answer task (which holds only a weak sender) is pending, so `Mux::close` disables `Fetch` before a rejected `Fetch.fulfillRequest`'s fallback `Fetch.failRequest` runs (reproduced with `MockConnection` by a reviewer).
 - [ ] **`get_all_urls(true)` fails on SVG `href`.** *(TAB #4)* Test `chrome` with the SVG sprite fixture.
 - [ ] **Cookies, left open:**

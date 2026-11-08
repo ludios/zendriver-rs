@@ -510,7 +510,7 @@ impl MonitorBuilder {
         // for an event that arrives right after to be seen.
         // (`Network.enable` was the tab's job, at its creation.)
         let generation = self.session.connection().connection_generation();
-        let events = Box::pin(self.session.events(MONITORED_METHODS));
+        let events = Box::pin(self.session.events(monitored_methods(self.stream_bodies)));
         let (tx, rx) = mpsc::channel(CHANNEL_CAP);
         let cancel = CancellationToken::new();
         let task = tokio::spawn(run_monitor(
@@ -569,26 +569,45 @@ impl Stream for NetworkMonitor {
 /// `responseReceived` arrives. Completed on `loadingFinished` / `loadingFailed`.
 type PartialExchange = (MonitoredRequest, Option<MonitoredResponse>);
 
-/// The methods of the events that the correlator reads.
-const MONITORED_METHODS: &[&str] = &[
-    "Network.requestWillBeSent",
-    "Network.responseReceived",
-    "Network.dataReceived",
-    "Network.loadingFinished",
-    "Network.loadingFailed",
-    "Network.webSocketCreated",
-    "Network.webSocketFrameSent",
-    "Network.webSocketFrameReceived",
-    "Network.webSocketClosed",
-    "Network.eventSourceMessageReceived",
-];
+/// The methods of the events that the correlator reads, given whether it
+/// streams response bodies (`Network.dataReceived` only matters then).
+fn monitored_methods(stream_bodies: bool) -> &'static [&'static str] {
+    const WITHOUT_BODIES: &[&str] = &[
+        "Network.requestWillBeSent",
+        "Network.responseReceived",
+        "Network.loadingFinished",
+        "Network.loadingFailed",
+        "Network.webSocketCreated",
+        "Network.webSocketFrameSent",
+        "Network.webSocketFrameReceived",
+        "Network.webSocketClosed",
+        "Network.eventSourceMessageReceived",
+    ];
+    const WITH_BODIES: &[&str] = &[
+        "Network.requestWillBeSent",
+        "Network.responseReceived",
+        "Network.dataReceived",
+        "Network.loadingFinished",
+        "Network.loadingFailed",
+        "Network.webSocketCreated",
+        "Network.webSocketFrameSent",
+        "Network.webSocketFrameReceived",
+        "Network.webSocketClosed",
+        "Network.eventSourceMessageReceived",
+    ];
+    if stream_bodies {
+        WITH_BODIES
+    } else {
+        WITHOUT_BODIES
+    }
+}
 
 /// The session's events that a [`run_monitor`] reads: its subscription of
-/// [`MONITORED_METHODS`], or, in a test, a stand-in for one.
+/// [`monitored_methods`], or, in a test, a stand-in for one.
 type MonitoredEvents = Pin<Box<dyn Stream<Item = Result<Arc<RawEvent>, SessionEnd>> + Send>>;
 
 /// The correlator task. Drives `events` — the session's subscription to
-/// [`MONITORED_METHODS`], which [`MonitorBuilder::start`] registers before
+/// [`monitored_methods`], which [`MonitorBuilder::start`] registers before
 /// it returns — dispatching by `method` and correlating `requestId`s into
 /// completed [`NetworkExchange`]s plus WebSocket / EventSource
 /// notifications.
@@ -651,12 +670,13 @@ async fn run_monitor(
                         // A partial exchange spanning this gap can never be
                         // proven complete — clear it rather than risk
                         // stitching a bogus "complete" `Http` across the
-                        // loss.
+                        // loss. The URLs stay: a WebSocket or EventSource
+                        // opened before the gap keeps its URL, and so stays
+                        // matched by the filter.
                         partial.clear();
-                        urls.clear();
                         streaming.clear();
                         generation = session.connection().connection_generation();
-                        events = Box::pin(session.events(MONITORED_METHODS));
+                        events = Box::pin(session.events(monitored_methods(stream_bodies)));
                         let boundary = NetworkDeliveryBoundary::Lagged { missed: 1, generation };
                         if emit_boundary(&tx, boundary).await {
                             return;
@@ -965,9 +985,10 @@ fn end_boundary(
             previous: generation,
             generation: session.connection().connection_generation(),
         },
-        SessionEnd::Detached | SessionEnd::Shutdown | SessionEnd::Overflowed => {
+        SessionEnd::Detached | SessionEnd::Shutdown => {
             NetworkDeliveryBoundary::Shutdown { generation }
         }
+        SessionEnd::Overflowed => unreachable!("an overflow doesn't end the monitor"),
     }
 }
 
@@ -2175,6 +2196,62 @@ mod tests {
                 assert_eq!(exchange.request.url, "https://example.com/after");
             }
             other => panic!("expected the exchange after the gap, got {other:?}"),
+        }
+
+        monitor.stop();
+        conn.shutdown();
+    }
+
+    /// An overflow forgets the partial exchanges, not the URLs: a WebSocket
+    /// opened before it still passes the URL filter after it.
+    #[tokio::test]
+    async fn an_overflow_keeps_the_urls_of_open_websockets() {
+        let (mock, conn) = MockConnection::pair();
+        let session = SessionHandle::new(conn.clone(), SID);
+        let created = RawEvent {
+            method: "Network.webSocketCreated".into(),
+            params: json!({ "requestId": "ws1", "url": "wss://keep.test/socket" }),
+            session_id: Some(SID.into()),
+        };
+        let first: MonitoredEvents = Box::pin(futures::stream::iter([
+            Ok(Arc::new(created)),
+            Err(SessionEnd::Overflowed),
+        ]));
+        let (tx, rx) = mpsc::channel(CHANNEL_CAP);
+        let cancel = CancellationToken::new();
+        let filter = Some(UrlMatcher::from("keep.test"));
+        let task = tokio::spawn(run_monitor(
+            session,
+            first,
+            1,
+            filter,
+            false,
+            tx,
+            cancel.clone(),
+        ));
+        let mut monitor = NetworkMonitor {
+            rx,
+            cancel,
+            _task: task,
+        };
+        assert!(matches!(
+            next_event(&mut monitor).await,
+            NetworkEvent::WebSocketOpen { .. }
+        ));
+        assert!(matches!(
+            next_event(&mut monitor).await,
+            NetworkEvent::DeliveryBoundary(NetworkDeliveryBoundary::Lagged { .. })
+        ));
+
+        mock.emit_event_for_session(
+            "Network.webSocketFrameReceived",
+            json!({ "requestId": "ws1", "response": { "opcode": 1, "payloadData": "pong" } }),
+            SID,
+        )
+        .await;
+        match next_event(&mut monitor).await {
+            NetworkEvent::WebSocketFrame { payload, .. } => assert_eq!(payload, "pong"),
+            other => panic!("expected the frame after the gap, got {other:?}"),
         }
 
         monitor.stop();
