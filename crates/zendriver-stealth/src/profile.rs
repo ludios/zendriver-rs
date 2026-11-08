@@ -552,20 +552,9 @@ impl StealthProfile {
         }
         // Always recompose so `ua_metadata.{platform_version, architecture,
         // bitness}` track any `platform` / `chrome_major` overrides applied
-        // above. Then, if the user supplied an explicit UA string, replace
-        // the freshly composed `ua_string` with it (UAM remains coherent
-        // with the overridden platform).
+        // above; then the explicit UA and UA-CH pins replace what it composed.
         fp.recompose();
-        if let Some(ref ua) = self.per_field.ua_string {
-            fp.ua_string = ua.clone();
-        }
-        // Wholesale UA-CH pin: mirrors the `ua_string` override immediately
-        // above — when set, it REPLACES the recompose()-derived UAM outright
-        // (no field-wise fallback; that's what `Persona`'s `ua_metadata` is
-        // for, resolved in the observer against this fingerprint instead).
-        if let Some(ref uam) = self.per_field.ua_metadata {
-            fp.ua_metadata = uam.clone();
-        }
+        self.apply_ua_pins(&mut fp);
         // Screen has no "derived" baseline (unlike UA-CH) — `Fingerprint`
         // never had a screen concept before this, so leaving it `None` here
         // is exactly today's behavior (the observer's fixed 1920x1080).
@@ -600,6 +589,21 @@ impl StealthProfile {
             );
         }
         Ok(fp)
+    }
+
+    /// Replace `fp`'s UA string and UA client hints with this profile's
+    /// pins of them ([`user_agent`](Self::user_agent),
+    /// [`user_agent_metadata`](Self::user_agent_metadata)), if any. Each
+    /// pin replaces its value outright: a field-wise UA-CH override is what
+    /// a [`Persona`](crate::Persona)'s `ua.ua_metadata` is for, resolved in
+    /// the observer against the fingerprint instead.
+    pub(crate) fn apply_ua_pins(&self, fp: &mut Fingerprint) {
+        if let Some(ref ua) = self.per_field.ua_string {
+            fp.ua_string = ua.clone();
+        }
+        if let Some(ref uam) = self.per_field.ua_metadata {
+            fp.ua_metadata = uam.clone();
+        }
     }
 
     /// Composed Chrome launch flag list: per-profile defaults plus any

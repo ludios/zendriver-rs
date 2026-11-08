@@ -271,10 +271,11 @@ impl StealthObserver {
     /// patches. `fingerprint` still supplies the coherent UA / Chrome version.
     ///
     /// This is where the persona and the fingerprint are combined, so it is
-    /// where they are merged: the persona's `platform` / `timezone` /
-    /// `locale` / `languages` / `screen` / `hardware_concurrency` /
-    /// `device_memory_gb` are folded into `fingerprint` up front (see
-    /// [`Fingerprint::overlay_persona`]), and every consumer below — the
+    /// where they are merged: the persona's `timezone` / `locale` /
+    /// `languages` / `screen` / `hardware_concurrency` / `device_memory_gb`
+    /// (and, under `spoofed`, its `platform`) are folded into `fingerprint`
+    /// up front (see [`Fingerprint::overlay_persona`]), and every consumer
+    /// below — the
     /// `Emulation.set*Override` calls, the `Accept-Language` header, the
     /// bootstrap, and the launch switches of
     /// [`StealthObserver::headless_flags`] — then reads that one merged
@@ -287,6 +288,17 @@ impl StealthObserver {
         persona: Persona,
     ) -> Self {
         fingerprint.overlay_persona(&persona);
+        // Under `spoofed`, a persona's platform also picks the UA and the UA
+        // client hints, which then agree with the GPU that the bootstrap
+        // presents for it. `native` presents the real GPU, so another OS
+        // couldn't agree with it; it keeps the fingerprint's platform. The
+        // profile's UA pins still win, as they do over its own platform pin.
+        if let Some(platform) = persona.platform
+            && profile.kind() == ProfileKind::Spoofed
+        {
+            fingerprint.claim_platform(platform);
+            profile.apply_ua_pins(&mut fingerprint);
+        }
 
         let bootstrap = match profile.kind() {
             ProfileKind::Spoofed => {
@@ -1524,6 +1536,46 @@ mod persona_reaches_cdp_tests {
         let sent = params(&frames, "Emulation.setUserAgentOverride");
         let user_agent = sent["userAgent"].as_str().unwrap_or_default();
         assert!(user_agent.contains("Windows NT"), "userAgent {user_agent}");
+        assert_eq!(sent["platform"], "Win32");
+        assert_eq!(sent["userAgentMetadata"]["platform"], "Windows");
+    }
+
+    /// `native` presents the real GPU, so it keeps the fingerprint's
+    /// platform rather than claim another OS that the GPU contradicts.
+    #[tokio::test]
+    async fn native_ignores_a_persona_platform() {
+        let persona = Persona {
+            platform: Some(Platform::Win32),
+            ..Persona::default()
+        };
+        let frames = drive_attach(StealthObserver::with_persona(
+            StealthProfile::native(),
+            bare_fingerprint(),
+            persona,
+        ))
+        .await;
+        let sent = params(&frames, "Emulation.setUserAgentOverride");
+        assert_eq!(sent["platform"], "MacIntel");
+        assert_eq!(sent["userAgentMetadata"]["platform"], "macOS");
+    }
+
+    /// The profile's verbatim UA pin wins over the UA composed for a
+    /// persona's platform, as it does over the one composed for its own.
+    #[tokio::test]
+    async fn a_profile_user_agent_pin_survives_a_persona_platform() {
+        let persona = Persona {
+            platform: Some(Platform::Win32),
+            ..Persona::default()
+        };
+        let profile = StealthProfile::spoofed().user_agent("pinned UA");
+        let frames = drive_attach(StealthObserver::with_persona(
+            profile,
+            bare_fingerprint(),
+            persona,
+        ))
+        .await;
+        let sent = params(&frames, "Emulation.setUserAgentOverride");
+        assert_eq!(sent["userAgent"], "pinned UA");
         assert_eq!(sent["platform"], "Win32");
         assert_eq!(sent["userAgentMetadata"]["platform"], "Windows");
     }

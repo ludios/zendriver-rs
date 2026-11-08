@@ -715,7 +715,7 @@ pub struct BrowserBuilder {
     /// [`BrowserBuilder::resolved_input_profile`].
     pub(crate) input_profile: Option<InputProfile>,
     /// Base fingerprint [`Persona`] driving the spoofed-mode surface patches.
-    /// `None` → [`Persona::system`] (which pins only a fresh seed) is used. See
+    /// `None` → [`Persona::default`], which pins nothing, is used. See
     /// [`BrowserBuilder::persona`] and [`BrowserBuilder::resolved_persona`].
     pub(crate) persona: Option<Persona>,
     /// Optional overlay merged on top of the base persona (field-wise, `Some`
@@ -1538,12 +1538,16 @@ impl BrowserBuilder {
     }
 
     /// Set the base fingerprint [`Persona`]: it drives the spoofed-mode
-    /// surface patches (canvas/WebGL/audio/fonts/clientRects/hardware)
-    /// and, for every stealth profile except `off`, the emulation overrides —
-    /// `timezone`, `locale` / `languages` and `geolocation` — and the screen
-    /// (see [`StealthProfile::screen`]).
+    /// surface patches (canvas/WebGL/WebGPU/audio/fonts/clientRects/hardware),
+    /// the spoofed-mode CPU count and memory size, and the OS the page claims
+    /// under `spoofed` (see the persona's `platform`); and, for every stealth
+    /// profile except `off`, the emulation overrides — `timezone`, `locale` /
+    /// `languages` and `geolocation` — and the screen (see
+    /// [`StealthProfile::screen`]). Each value that it sets wins over the
+    /// stealth profile's pin of it.
     ///
-    /// When unset, [`Persona::system`] (which pins only a fresh seed) is used. Combine with
+    /// When unset, [`Persona::default`], which pins nothing, is used, so the
+    /// stealth profile's pins and the host's own values apply. Combine with
     /// [`BrowserBuilder::persona_overlay`] for field-wise tweaks and
     /// [`BrowserBuilder::surface`] for per-surface render-strategy overrides;
     /// [`BrowserBuilder::resolved_persona`] returns the effective result.
@@ -1727,7 +1731,7 @@ impl BrowserBuilder {
     /// Compute the effective [`Persona`] this builder will hand to the stealth
     /// observer.
     ///
-    /// Resolution order: base persona ([`Persona::system`] when unset) →
+    /// Resolution order: base persona ([`Persona::default`] when unset) →
     /// [`persona_overlay`](BrowserBuilder::persona_overlay) (field-wise merge) →
     /// each [`surface`](BrowserBuilder::surface) override → a seed persisted
     /// alongside [`user_data_dir`](BrowserBuilder::user_data_dir) when the
@@ -1745,16 +1749,15 @@ impl BrowserBuilder {
     /// reading or atomically persisting a fresh seed.
     pub fn resolved_persona(&self) -> Result<Persona, ZendriverError> {
         // Did the caller pin a seed explicitly (via `.persona` or
-        // `.persona_overlay`)? Capture this BEFORE the `system()` fallback,
-        // which injects a fresh random seed of its own — an explicit seed must
-        // win over the `user_data_dir`-persisted one below.
+        // `.persona_overlay`)? An explicit seed must win over the
+        // `user_data_dir`-persisted one below.
         let explicit_seed = self
             .persona
             .as_ref()
             .and_then(|p| p.seed)
             .or_else(|| self.persona_overlay.as_ref().and_then(|p| p.seed));
 
-        let mut persona = self.persona.clone().unwrap_or_else(Persona::system);
+        let mut persona = self.persona.clone().unwrap_or_default();
         if let Some(overlay) = &self.persona_overlay {
             persona = persona.overlay(overlay.clone());
         }
@@ -1765,9 +1768,9 @@ impl BrowserBuilder {
         // Seed persistence: when the caller did not pin a seed but a
         // `user_data_dir` is set, the seed is read from (or written to) a file
         // inside that dir so the same profile yields a stable fingerprint
-        // across runs. This overrides the ephemeral random seed that
-        // `Persona::system()` injects. Without a `user_data_dir`, the random
-        // seed stands (fresh identity per launch).
+        // across runs. Without a `user_data_dir`, the seed stays unset, and
+        // the stealth bootstrap draws a random one (fresh identity per
+        // launch).
         if explicit_seed.is_none() {
             if let Some(dir) = &self.user_data_dir {
                 persona.seed = Some(persisted_seed(dir)?);

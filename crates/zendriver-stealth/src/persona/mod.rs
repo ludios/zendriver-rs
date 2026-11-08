@@ -31,13 +31,13 @@ pub struct GeoPos {
 /// Unified fingerprint configuration. Every field optional → overlay semantics.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Persona {
-    /// The OS the page claims: the UA, the UA client hints,
-    /// `navigator.platform`, and the GPU that the `spoofed` WebGL and WebGPU
-    /// patches present. When it differs from the
-    /// [`Fingerprint`](crate::Fingerprint)'s, the UA and the UA client hints
-    /// are recomposed for it, replacing any that the
-    /// [`StealthProfile`](crate::StealthProfile) pinned. When unset, the
-    /// fingerprint's applies: the host's, or the profile's `platform` pin.
+    /// Under `spoofed`, the OS that the page claims: in the UA, the UA
+    /// client hints, `navigator.platform`, and the GPU that the WebGL and
+    /// WebGPU patches present. The UA and the UA client hints are composed
+    /// for it, unless the [`StealthProfile`](crate::StealthProfile) pins
+    /// them. When unset, the [`Fingerprint`](crate::Fingerprint)'s applies:
+    /// the host's, or the profile's `platform` pin. `native` ignores it: it
+    /// presents the real GPU, which another OS couldn't agree with.
     pub platform: Option<Platform>,
     pub ua: Option<UaSpec>,
     /// `navigator.hardwareConcurrency` under `spoofed`. When unset, the
@@ -268,18 +268,6 @@ impl Persona {
             }
         }
     }
-
-    /// The base persona of a launch that sets none: it pins nothing but a
-    /// fresh random seed. So the platform, CPU count and memory size come
-    /// from the [`Fingerprint`](crate::Fingerprint), which probes the host
-    /// and applies the [`StealthProfile`](crate::StealthProfile)'s pins.
-    /// Each call draws a new seed.
-    pub fn system() -> Persona {
-        Persona {
-            seed: Some(Seed::random()),
-            ..Persona::default()
-        }
-    }
 }
 
 /// Minimal eval surface so stealth can probe a live page without depending on
@@ -397,19 +385,6 @@ mod persona_tests {
         let back: Persona = serde_json::from_str(&s).unwrap();
         assert_eq!(back.seed, Some(Seed::from_u64(5)));
         assert_eq!(back.timezone.as_deref(), Some("America/New_York"));
-    }
-
-    /// The base persona mustn't pin what the fingerprint probes: it used to
-    /// pin the host's platform, CPU count and memory, which then won over the
-    /// `StealthProfile`'s `platform`, `cpu_count` and `memory_gb`.
-    #[test]
-    fn system_persona_pins_only_a_fresh_seed() {
-        let a = Persona::system();
-        assert!(a.seed.is_some());
-        assert_eq!(a.platform, None);
-        assert_eq!(a.hardware_concurrency, None);
-        assert_eq!(a.device_memory_gb, None);
-        assert_ne!(a.seed, Persona::system().seed, "each call draws a new seed");
     }
 
     #[test]

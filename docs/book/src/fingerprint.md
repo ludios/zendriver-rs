@@ -69,25 +69,17 @@ no GPU at all, so it stays honored either way.
 
 ## Persona sources
 
-### `Persona::system()` — the host, with a fresh seed
+### No persona — the host
 
-Pins nothing but a random seed, drawn anew on each call. So the platform,
-CPU count and memory come from the fingerprint, which probes the host and
-applies the `StealthProfile`'s pins. A launch without `.persona(..)` uses
-it.
-
-```rust,no_run
-use zendriver::{Browser, Persona};
-
-let browser = Browser::builder()
-    .persona(Persona::system())
-    .launch().await?;
-```
+A launch without `.persona(..)` uses a persona that pins nothing, so the
+platform, CPU count and memory come from the fingerprint, which probes the
+host and applies the `StealthProfile`'s pins, and the stealth bootstrap
+draws a random seed for each launch.
 
 ### `Persona::builder()` — explicit
 
-Build any combination of fields; unset fields come from the fingerprint,
-as with `system()`.
+Set the fields you want; the rest come from the fingerprint, as with no
+persona, and an unset seed is drawn at random.
 
 ```rust,no_run
 use zendriver::{Browser, Persona, Seed};

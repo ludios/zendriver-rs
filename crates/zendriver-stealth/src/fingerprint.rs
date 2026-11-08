@@ -230,16 +230,15 @@ impl Fingerprint {
     /// Fold a [`Persona`](crate::Persona)'s explicitly-set fields into this
     /// fingerprint.
     ///
-    /// Seven axes exist on both types — `platform`, `timezone`, `locale`,
-    /// `languages`, `screen`, the CPU count (`hardware_concurrency` on the
-    /// persona, `cpu_count` here) and the memory size (`device_memory_gb`,
+    /// Six axes exist on both types — `timezone`, `locale`, `languages`,
+    /// `screen`, the CPU count (`hardware_concurrency` on the persona,
+    /// `cpu_count` here) and the memory size (`device_memory_gb`,
     /// `memory_gb`) — and four separate consumers read them: the CDP
     /// `Emulation.set*Override` calls, the `Accept-Language` header, the
     /// bootstrap, and (for the screen) the launch switches of
     /// [`StealthObserver::headless_flags`](crate::StealthObserver::headless_flags).
-    /// A persona's `platform` that differs from this fingerprint's also
-    /// recomposes the UA and the UA client hints for it, as
-    /// [`StealthProfile::platform`](crate::StealthProfile::platform) does.
+    /// The persona's `platform` isn't folded here, since only `spoofed`
+    /// takes it (see [`Fingerprint::claim_platform`]).
     /// Merging once, at the single point where a persona and a
     /// fingerprint meet
     /// ([`StealthObserver::with_persona`](crate::StealthObserver::with_persona)),
@@ -276,7 +275,14 @@ impl Fingerprint {
         if let Some(memory_gb) = persona.device_memory_gb {
             self.memory_gb = memory_gb;
         }
-        if let Some(platform) = persona.platform.filter(|&p| p != self.platform) {
+    }
+
+    /// Claim `platform`: if it differs from this fingerprint's, set it and
+    /// recompose the UA and the UA client hints for it. Pins of the UA or
+    /// the UA client hints have to be applied again afterwards (see
+    /// [`StealthProfile::apply_ua_pins`](crate::StealthProfile)).
+    pub(crate) fn claim_platform(&mut self, platform: Platform) {
+        if platform != self.platform {
             self.platform = platform;
             self.recompose();
         }
@@ -911,5 +917,39 @@ mod fingerprint_tests {
                 "FALLBACK_CHROME_MAJOR is stale; bump it (and this floor) to current stable"
             )
         };
+    }
+
+    /// A persona's hardware pins win over the fingerprint's, and its
+    /// platform is left to `claim_platform`, which only `spoofed` calls.
+    #[test]
+    fn overlay_persona_takes_the_personas_hardware_but_not_its_platform() {
+        let mut fp = Fingerprint {
+            platform: Platform::MacIntel,
+            chrome_major: 120,
+            chrome_full: "120.0.6099.234".into(),
+            cpu_count: 8,
+            memory_gb: 8,
+            ua_string: String::new(),
+            ua_metadata: UserAgentMetadata::realistic(Platform::MacIntel, 120, "120.0.6099.234"),
+            timezone: None,
+            locale: None,
+            languages: None,
+            screen: None,
+        };
+        let before = fp.ua_metadata.clone();
+        fp.overlay_persona(&crate::Persona {
+            platform: Some(Platform::Win32),
+            hardware_concurrency: Some(3),
+            device_memory_gb: Some(2),
+            ..crate::Persona::default()
+        });
+        assert_eq!((fp.cpu_count, fp.memory_gb), (3, 2));
+        assert_eq!(fp.platform, Platform::MacIntel);
+        assert_eq!(fp.ua_metadata, before);
+
+        fp.claim_platform(Platform::Win32);
+        assert_eq!(fp.platform, Platform::Win32);
+        assert_eq!(fp.ua_metadata.platform, "Windows");
+        assert!(fp.ua_string.contains("Windows NT"), "{}", fp.ua_string);
     }
 }
