@@ -422,12 +422,12 @@ mod tests {
     #[tokio::test]
     async fn the_root_session_has_its_own_subscribers() {
         let mut routes = Routes::new();
-        let events = routes.subscribe(None, 1, &["Target."]);
-        routes.dispatch(1, &event("Target.targetCreated", Some("S1")));
-        routes.dispatch(1, &event("Target.targetCreated", None));
+        let events = routes.subscribe(None, 1, &["Test."]);
+        routes.dispatch(1, &event("Test.created", Some("S1")));
+        routes.dispatch(1, &event("Test.created", None));
         routes.end_generation(1, SessionEnd::Shutdown);
         let (methods, end) = drain(events).await;
-        assert_eq!(methods, ["Target.targetCreated"]);
+        assert_eq!(methods, ["Test.created"]);
         assert_eq!(end, SessionEnd::Shutdown);
     }
 
@@ -478,13 +478,13 @@ mod tests {
         assert_eq!(drain(flat).await.1, SessionEnd::Reconnected);
         assert_eq!(drain(root).await.1, SessionEnd::Reconnected);
 
-        let root = routes.subscribe(None, 1, &["Page."]);
-        routes.dispatch(1, &event("Page.old", None));
+        let root = routes.subscribe(None, 1, &["Test."]);
+        routes.dispatch(1, &event("Test.old", None));
         routes.end_generation(1, SessionEnd::Disconnected);
-        routes.dispatch(2, &event("Page.new", None));
+        routes.dispatch(2, &event("Test.new", None));
         routes.end_generation(2, SessionEnd::Shutdown);
         let (methods, end) = drain(root).await;
-        assert_eq!(methods, ["Page.new"]);
+        assert_eq!(methods, ["Test.new"]);
         assert_eq!(end, SessionEnd::Shutdown);
     }
 
@@ -499,17 +499,17 @@ mod tests {
     #[tokio::test]
     async fn a_new_subscription_forgets_the_subscribers_that_went_away() {
         let mut routes = Routes::new();
-        drop(routes.subscribe(Some("S1"), 1, &["Page.rare"]));
-        let _kept = routes.subscribe(Some("S2"), 1, &["Page.rare"]);
+        drop(routes.subscribe(Some("S1"), 1, &["Test.rare"]));
+        let _kept = routes.subscribe(Some("S2"), 1, &["Test.rare"]);
         assert!(!routes.by_session.contains_key(&Some("S1".to_owned())));
     }
 
     #[tokio::test]
     async fn any_event_of_the_session_forgets_the_subscribers_that_went_away() {
         let mut routes = Routes::new();
-        let _kept = routes.subscribe(Some("S1"), 1, &["Page.other"]);
-        drop(routes.subscribe(Some("S1"), 1, &["Page.rare"]));
-        routes.dispatch(1, &event("Page.other", Some("S1")));
+        let _kept = routes.subscribe(Some("S1"), 1, &["Test.other"]);
+        drop(routes.subscribe(Some("S1"), 1, &["Test.rare"]));
+        routes.dispatch(1, &event("Test.other", Some("S1")));
         assert_eq!(routes.by_session[&Some("S1".to_owned())].len(), 1);
     }
 

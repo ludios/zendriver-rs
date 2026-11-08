@@ -2017,6 +2017,15 @@ mod tests {
         conn.shutdown();
     }
 
+    /// The `Fetch.authRequired` params of a server's challenge for request
+    /// `A{i}`, which the multiplexer answers with `Default`.
+    fn server_challenge(i: u32) -> Value {
+        json!({
+            "requestId": format!("A{i}"),
+            "authChallenge": { "source": "Server", "origin": "http://x.test", "scheme": "basic" },
+        })
+    }
+
     /// An overflow of its events' queue makes the multiplexer disable
     /// `Fetch` (which continues any pause it missed) and enable it again
     /// with every entry's pattern.
@@ -2028,22 +2037,23 @@ mod tests {
         let (_first, _) = applied(&mut mock, interceptor.insert(first, Position::Last)).await;
 
         // While the multiplexer waits for Chrome, more events arrive than
-        // its queue holds (of a method it ignores, so the only commands it
-        // sends are the recovery's).
+        // its queue holds: a server's auth challenges, each of which it
+        // answers with `Default`.
         let second = vec![rule("*/b/*", Action::Block(AbortReason::Failed))];
         let second = tokio::spawn({
             let interceptor = interceptor.clone();
             async move { interceptor.insert(second, Position::Last).await }
         });
         let id = mock.expect_cmd("Fetch.enable").await;
-        for _ in 0..10 {
-            mock.emit_event_for_session("Fetch.unknown", json!({}), "S1")
+        for i in 0..10 {
+            mock.emit_event_for_session("Fetch.authRequired", server_challenge(i), "S1")
                 .await;
         }
         mock.reply(id, json!({})).await;
         let _second = second.await.unwrap().unwrap();
 
-        let sent = sent_until_quiet(&mut mock).await;
+        let mut sent = sent_until_quiet(&mut mock).await;
+        sent.retain(|(method, _)| method != "Fetch.continueWithAuth");
         let methods: Vec<&str> = sent.iter().map(|(m, _)| m.as_str()).collect();
         assert_eq!(methods, ["Fetch.disable", "Fetch.enable"], "{sent:?}");
         assert_eq!(
@@ -2075,16 +2085,16 @@ mod tests {
             .unwrap();
 
         // While the multiplexer waits for Chrome, more events arrive than
-        // its queue holds (of a method it ignores, so the only commands it
-        // sends are the recovery's).
+        // its queue holds: a server's auth challenges, each of which it
+        // answers with `Default`.
         let rules = vec![rule("*/b/*", Action::Block(AbortReason::Failed))];
         let insert = tokio::spawn({
             let interceptor = interceptor.clone();
             async move { interceptor.insert(rules, Position::Last).await }
         });
         let id = mock.expect_cmd("Fetch.enable").await;
-        for _ in 0..10 {
-            mock.emit_event_for_session("Fetch.unknown", json!({}), "S1")
+        for i in 0..10 {
+            mock.emit_event_for_session("Fetch.authRequired", server_challenge(i), "S1")
                 .await;
         }
         mock.reply(id, json!({})).await;
