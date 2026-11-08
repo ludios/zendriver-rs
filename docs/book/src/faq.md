@@ -311,8 +311,8 @@ completion, since the body can still be streaming for an arbitrarily
 long time afterward (a large download, chunked transfer encoding, a
 slow origin).
 
-`wait_for_idle` is best-effort by default: if the underlying CDP event
-stream loses delivery continuity mid-wait (a lagging subscriber, a
+`wait_for_idle` is best-effort by default: if the tab's request tracker
+misses events mid-wait (its queue overflowed) or stops getting them (a
 [`Browser::reconnect`], the WebSocket dying, the connection being shut
 down, or the tab closing), it silently tolerates
 the gap and still resolves on what it *did* observe —

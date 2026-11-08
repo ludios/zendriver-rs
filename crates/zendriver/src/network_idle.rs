@@ -7,8 +7,8 @@
 //! ## Wiring
 //!
 //! Each [`crate::Tab`] owns one tracker. [`crate::Tab::new`] subscribes to
-//! the events of the tab's connection and spawns a background task over that
-//! subscription, so that the subscription exists as soon as the tab does;
+//! the tab's session's [`TRACKED`] events and spawns a background task over
+//! that subscription, so that the subscription exists as soon as the tab does;
 //! `Tab::enable_network`, awaited before the tab is handed out, enables the
 //! `Network` domain. The task:
 //! 1. Watches three lifecycle events Chrome emits per request:
@@ -45,13 +45,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use serde::Deserialize;
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::trace;
-use zendriver_transport::RawEvent;
+use zendriver_transport::{SessionEnd, SessionEvents, SessionHandle};
 
 /// Controls how [`crate::Tab::wait_for_idle_opts`] reacts when it notices —
 /// during its own wait window — that the underlying CDP event stream lost
@@ -92,10 +93,12 @@ pub enum IdleLossPolicy {
     #[default]
     Lenient,
     /// Abort the wait with [`crate::ZendriverError::EventStreamIncomplete`]
-    /// the instant a `Lagged`, `Reconnected`, `Disconnected`, or `Shutdown`
-    /// boundary is observed on the accounted stream. Once that happens the
-    /// wait can no longer prove nothing relevant to idleness was missed, so
-    /// it refuses to report a possibly-wrong idle rather than guessing.
+    /// the instant the tab's request tracker misses events (the queue of
+    /// its subscription overflowed) or stops getting them (the tab's session
+    /// detached, or its socket died or was shut or replaced), or at once if
+    /// it had stopped before the wait began. Once that happens the wait can
+    /// no longer prove nothing relevant to idleness was missed, so it
+    /// refuses to report a possibly-wrong idle rather than guessing.
     Strict,
 }
 
@@ -115,10 +118,25 @@ pub(crate) struct InFlightTracker {
     /// flight longer than [`crate::IdleOptions::max_inflight_age`] (stuck /
     /// background requests).
     pub(crate) in_flight: Mutex<HashMap<String, tokio::time::Instant>>,
-    /// Notified on every membership change. `wait_for_idle` selects on this
-    /// alongside a 50ms tick to wake immediately when the count moves.
+    /// Notified on every membership change, and when [`Self::gaps`] grows.
+    /// `wait_for_idle` selects on this alongside a 50ms tick to wake
+    /// immediately when the count moves.
     pub(crate) notifier: Notify,
+    /// How many times the tracker may have missed events: each overflow of
+    /// its subscription's queue (after which it subscribes again), and the
+    /// subscription's end.
+    pub(crate) gaps: AtomicU64,
+    /// Whether the subscription ended, so that the tracker gets no more
+    /// events.
+    pub(crate) ended: AtomicBool,
 }
+
+/// The methods of the events the tracker reads.
+pub(crate) const TRACKED: &[&str] = &[
+    "Network.requestWillBeSent",
+    "Network.loadingFinished",
+    "Network.loadingFailed",
+];
 
 /// Lightweight projection of the three CDP event payloads we care about
 /// (`requestWillBeSent`, `loadingFinished`, `loadingFailed`). All three
@@ -138,21 +156,22 @@ impl InFlightTracker {
         Arc::new(Self {
             in_flight: Mutex::new(HashMap::new()),
             notifier: Notify::new(),
+            gaps: AtomicU64::new(0),
+            ended: AtomicBool::new(false),
         })
     }
 
-    /// Drive the tracker until `cancel` fires.
+    /// Drive the tracker until `cancel` fires or its events end.
     ///
-    /// `events` is a subscription to the events of the tab's connection,
+    /// `events` is the subscription of the tab's `session` to [`TRACKED`],
     /// which [`crate::Tab::new`] registers before it spawns this, so that the
-    /// task's late start loses no event (a burst past the bus's capacity
-    /// still does: this subscription isn't loss-accounted); `session_id` is
-    /// the tab's session
-    /// (`None` for a root session), whose events are the ones kept. Loops
-    /// over `Network.requestWillBeSent` (insert) and the two terminal events
+    /// task's late start loses no event. Loops over
+    /// `Network.requestWillBeSent` (insert) and the two terminal events
     /// (`loadingFailed`, `loadingFinished` — both remove). Notifies the
     /// [`Notify`] on every membership change so `wait_for_idle` waiters wake
-    /// immediately.
+    /// immediately. An overflow of the subscription's queue counts as a gap
+    /// ([`Self::gaps`]), after which the tracker subscribes again; the
+    /// subscription's end counts as a gap too, and ends the tracker.
     ///
     /// # Why `responseReceived` does not clear an entry
     ///
@@ -170,8 +189,8 @@ impl InFlightTracker {
     /// as "done" here.
     pub(crate) async fn run(
         self: Arc<Self>,
-        session_id: Option<String>,
-        mut events: impl Stream<Item = RawEvent> + Send + Unpin + 'static,
+        session: SessionHandle,
+        mut events: SessionEvents,
         cancel: CancellationToken,
     ) {
         // One raw subscription, dispatched on `method`, rather than three
@@ -188,19 +207,28 @@ impl InFlightTracker {
                     return;
                 }
                 next = events.next() => {
-                    let Some(ev) = next else {
-                        // Event stream closed (transport torn down). Nothing
-                        // left to observe — exit so the task doesn't sit
-                        // forever on a closed stream.
-                        trace!("InFlightTracker: event stream closed, exiting");
-                        return;
+                    let ev = match next {
+                        Some(Ok(ev)) => ev,
+                        Some(Err(SessionEnd::Overflowed)) => {
+                            trace!("InFlightTracker: its queue overflowed; subscribing again");
+                            self.gaps.fetch_add(1, Ordering::Relaxed);
+                            self.notifier.notify_waiters();
+                            events = session.events(TRACKED);
+                            continue;
+                        }
+                        Some(Err(_)) | None => {
+                            // Nothing left to observe — exit so the task
+                            // doesn't sit forever on an ended stream.
+                            trace!("InFlightTracker: event stream ended, exiting");
+                            self.ended.store(true, Ordering::Relaxed);
+                            self.gaps.fetch_add(1, Ordering::Relaxed);
+                            self.notifier.notify_waiters();
+                            return;
+                        }
                     };
-                    if ev.session_id.as_deref() != session_id.as_deref() {
-                        continue;
-                    }
                     let changed = match ev.method.as_str() {
                         "Network.requestWillBeSent" => {
-                            let Ok(parsed) = serde_json::from_value::<RequestEvent>(ev.params) else { continue };
+                            let Ok(parsed) = RequestEvent::deserialize(&ev.params) else { continue };
                             let mut set = self.in_flight.lock().await;
                             set.insert(parsed.request_id, tokio::time::Instant::now());
                             true
@@ -210,7 +238,7 @@ impl InFlightTracker {
                         // completion. See `InFlightTracker::run`'s doc
                         // comment for the full rationale.
                         "Network.loadingFailed" | "Network.loadingFinished" => {
-                            let Ok(parsed) = serde_json::from_value::<RequestEvent>(ev.params) else { continue };
+                            let Ok(parsed) = RequestEvent::deserialize(&ev.params) else { continue };
                             let mut set = self.in_flight.lock().await;
                             set.remove(&parsed.request_id);
                             true
@@ -246,12 +274,9 @@ mod tests {
         let (mock, conn) = MockConnection::pair();
         let tracker = InFlightTracker::new();
         let cancel = CancellationToken::new();
-        let events = conn.subscribe_raw();
-        let task = tokio::spawn(
-            tracker
-                .clone()
-                .run(Some("S1".into()), events, cancel.clone()),
-        );
+        let session = SessionHandle::new(conn.clone(), "S1");
+        let events = session.events(TRACKED);
+        let task = tokio::spawn(tracker.clone().run(session, events, cancel.clone()));
 
         // Insert via requestWillBeSent.
         mock.emit_event_for_session(
