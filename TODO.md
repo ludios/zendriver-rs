@@ -84,11 +84,9 @@ Also for this round:
   - `new_tab_at` takes as long as the new page keeps its main thread busy (a 2 s busy loop, even one scheduled with `setTimeout(0)`, made it take 2 s), with or without the load tracker: something in the attach chain waits on the renderer.
   - `wait_for_ready_state` right after `goto` can read the old document: `Page.navigate` replies before the commit.
   - `goto(A)`; `goto(B)`: B's tracker can still end on A's stop when A's start and stop come after B's tracker subscribed. Checking the destination at every stop would fix it, but would break downloads (no commit) and "a navigation that began after it".
-  - After lost events during a back, forward or reload, the tracker waits for the next stop (a lost stop means a 30 s timeout).
-  - The probe's `Runtime.evaluate` blocks while a JavaScript dialog is open, so `wait_for_load` after lost events can run to its timeout then.
-  - After `Connection::reconnect`, a flat-session tracker's session id is stale, so it can only time out (a per-tab socket survives a reconnect).
+  - The `readyState` probe of a tracker for the current document (`wait_for_load` with no navigation pending) or for a new tab blocks while a JavaScript dialog is open, so the wait can run to its timeout then.
   - **A crashed tab.** After `Page.crash`, the tab's session answers no renderer command, even after `Page.reload` (which returns, and in about half the runs brings the target back to its URL within 4 s; in the others its URL stays empty for over 10 s). `wait_for_load` after reloading a crashed tab times out or returns early. Chrome sends `Page.frameStartedLoading` / `frameStoppedLoading` from the browser process (`PageHandler::DidChangeFrameLoadingState`); `Inspector.targetCrashed` didn't arrive on the tab's session. The test `reload_of_a_crashed_tab_needs_no_renderer` in `navigation_waits.rs` checks only that `reload()` returns; no test calls `wait_for_load` after it.
-  - Cost: an armed tracker is a task filtering every event on its connection until the next wait or navigation; on the flat-session fallback that's tabs × events. The reviewers suggested one tracker per tab instead, created in the registrar before the target resumes; it needs a way to order the caller's arming against events in flight (e.g. the accounted stream's sequence numbers). Also, `probe_complete` sends `Page.enable` every time.
+  - Cost: an armed tracker is a task, with a subscription to its session's two loading events, until the next wait or navigation. Also, `probe_complete` sends `Page.enable` every time.
 
 ### Broken outright
 - [ ] **MCP shutdown leaves Chrome running.** *(R, MCP #6)* After a SIGTERM, the server closes Chrome over both transports (`chrome_exits_on_sigterm_over_*`).

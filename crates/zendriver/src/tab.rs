@@ -32,7 +32,7 @@ use zendriver_transport::{AccountedRawEvent, Connection, SessionHandle};
 use crate::error::{Result, ZendriverError};
 use crate::frame::Frame;
 use crate::input::InputController;
-use crate::load_tracker::{Destination, LoadTracker};
+use crate::load_tracker::LoadTracker;
 use crate::navigation::{NavigationExpectation, Target};
 use crate::network_idle::IdleLossPolicy;
 use crate::screenshot::ScreenshotBuilder;
@@ -1002,20 +1002,13 @@ impl Tab {
     /// the next [`Tab::wait_for_load`] to wait for that navigation. Returns
     /// Chrome's reply.
     ///
-    /// `destination` says, from Chrome's reply, where the navigation leads.
-    ///
     /// # Errors
     ///
     /// The call's own error, or [`ZendriverError::Navigation`] when the
     /// reply carries an `errorText` (only `Page.navigate` replies have one).
     /// Nothing is armed then: an invalid URL starts no navigation at all, so
     /// a wait for one would time out.
-    async fn navigate_main_frame(
-        &self,
-        method: &str,
-        params: Value,
-        destination: impl FnOnce(&Value) -> Destination,
-    ) -> Result<Value> {
+    async fn navigate_main_frame(&self, method: &str, params: Value) -> Result<Value> {
         // The main frame's id is the target id. Created before the call, so
         // this navigation's events can't be missed.
         let tracker = LoadTracker::before_navigating(&self.inner.session, self.target_id());
@@ -1027,7 +1020,6 @@ impl Tab {
                 return Err(ZendriverError::Navigation(err.to_string()));
             }
         }
-        tracker.heading_to(destination(&res));
         *pending = Some(tracker);
         Ok(res)
     }
@@ -1057,11 +1049,7 @@ impl Tab {
         // Enable Page domain so we get the main frame's loading events.
         self.call("Page.enable", json!({})).await?;
         let res = self
-            .navigate_main_frame(
-                "Page.navigate",
-                json!({ "url": url.as_ref() }),
-                Destination::of_navigate_reply,
-            )
+            .navigate_main_frame("Page.navigate", json!({ "url": url.as_ref() }))
             .await?;
         let frame_id = res.get("frameId").and_then(|v| v.as_str());
         if frame_id.is_some_and(|id| id != self.target_id()) {
@@ -1158,12 +1146,13 @@ impl Tab {
     ///
     /// Returns [`ZendriverError::Timeout`] when no navigation has ended
     /// within the timeout; [`ZendriverError::EventStreamIncomplete`] when
-    /// events were lost (the subscriber lagged, or the connection was
-    /// replaced), so the navigation may have happened unseen; and
+    /// the wait fell so far behind the tab's events that they overflowed
+    /// its queue, so the navigation may have happened unseen; and
     /// [`ZendriverError::Navigation`] when the navigation ends on Chrome's
     /// error page because its destination couldn't be reached, or if the
-    /// tab is closed or its connection closes first (because Chrome exited,
-    /// or zendriver shut the connection down).
+    /// tab is closed or its connection closes or is replaced first (because
+    /// Chrome exited, zendriver shut the connection down, or a
+    /// [`Browser::reconnect`](crate::Browser::reconnect) replaced it).
     ///
     /// # Examples
     ///
@@ -1216,12 +1205,14 @@ impl Tab {
     /// # Errors
     ///
     /// Returns [`ZendriverError::Timeout`] when the tab isn't at a matching,
-    /// loaded page within the timeout, and [`ZendriverError::Navigation`]
-    /// when a navigation to a matching URL ends on Chrome's error page
-    /// because it couldn't be reached, or if the tab is closed or its
-    /// connection closes first (because Chrome exited, or zendriver shut the
-    /// connection down). Lost events don't end the wait: it asks the page
-    /// where it is instead, and then reports `same_document` as `false`.
+    /// loaded page within the timeout;
+    /// [`ZendriverError::EventStreamIncomplete`] when the wait fell so far
+    /// behind the tab's events that they overflowed its queue; and
+    /// [`ZendriverError::Navigation`] when a navigation to a matching URL
+    /// ends on Chrome's error page because it couldn't be reached, or if the
+    /// tab is closed or its connection closes or is replaced first (because
+    /// Chrome exited, zendriver shut the connection down, or a
+    /// [`Browser::reconnect`](crate::Browser::reconnect) replaced it).
     ///
     /// # Examples
     ///
@@ -1634,7 +1625,6 @@ impl Tab {
         self.navigate_main_frame(
             "Page.navigateToHistoryEntry",
             json!({ "entryId": entry_id }),
-            |_| Destination::Unknown,
         )
         .await?;
         Ok(())
@@ -1729,8 +1719,7 @@ impl Tab {
         if let Some(script) = opts.script_to_evaluate_on_load {
             params["scriptToEvaluateOnLoad"] = Value::String(script);
         }
-        self.navigate_main_frame("Page.reload", params, |_| Destination::Unknown)
-            .await?;
+        self.navigate_main_frame("Page.reload", params).await?;
         Ok(())
     }
 

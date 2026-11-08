@@ -10,10 +10,10 @@
 //! document stays and only its URL changes (a fragment, or the History
 //! API). A new document then loads until `Page.frameStoppedLoading`. The
 //! events need the Page domain, which every [`Tab`] enables when it is
-//! created. They come from a broadcast channel that never replays an event
-//! sent before subscribing, so an expectation subscribes when it is
-//! created, before the caller acts, and reads the events in a task of its
-//! own from then on.
+//! created. A subscription gets the events that arrive after it, all of
+//! them and in order ([`SessionHandle::events`]), so an expectation
+//! subscribes when it is created, before the caller acts, and reads the
+//! events in a task of its own from then on.
 //!
 //! Where the frame is now, and whether its document has loaded, only the
 //! page can say: `Target.getTargetInfo` reports a navigation's URL while
@@ -37,7 +37,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Sleep;
 use tracing::warn;
 use url::Url;
-use zendriver_transport::{AccountedRawEvent, SessionHandle};
+use zendriver_transport::{SessionEnd, SessionHandle};
 
 use crate::error::{Result, ZendriverError};
 use crate::url_matcher::UrlMatcher;
@@ -61,8 +61,7 @@ pub struct Navigation {
     /// `true` when every navigation the wait saw stayed in that document
     /// (a fragment change, or the History API), or when the wait saw no
     /// navigation because the tab was already at the URL. `false` when a
-    /// new document replaced it, and after lost events, since a
-    /// replacement may have gone unseen then.
+    /// new document replaced it.
     pub same_document: bool,
 }
 
@@ -77,9 +76,8 @@ enum Change {
     SameDocument { url: String },
     /// The frame finished loading.
     Stopped,
-    /// Events may have been missed: the subscriber lagged, or the
-    /// connection was replaced.
-    Lost,
+    /// The session's events ended, for this reason: the last change.
+    Ended(SessionEnd),
 }
 
 /// The frame's URL in the `params` of a `Page.frameNavigated`, fragment
@@ -92,57 +90,43 @@ fn navigated_url(params: &Value) -> Option<String> {
 }
 
 /// The changes of the main frame, whose id is `frame_id`, that `session`
-/// receives from now on, in the order Chrome sent them. Ends when the socket
-/// dies, the connection is shut down, or Chrome detaches the session.
+/// receives from now on, in the order Chrome sent them, ending with
+/// [`Change::Ended`].
 fn changes(session: &SessionHandle, frame_id: &str) -> Pin<Box<dyn Stream<Item = Change> + Send>> {
     let frame_id = frame_id.to_owned();
     // One subscription for every method, so the events can't swap places
     // on the way here.
-    Box::pin(
-        session
-            .subscribe_accounted()
-            .take_while(|ev| {
-                let alive = !matches!(
-                    ev,
-                    AccountedRawEvent::Disconnected { .. } | AccountedRawEvent::Shutdown { .. }
-                );
-                async move { alive }
-            })
-            .filter_map(move |ev| {
-                let change =
-                    match ev {
-                        AccountedRawEvent::Event { event, .. } => {
-                            let params = &event.params;
-                            match event.method.as_str() {
-                                "Page.frameNavigated" if params["frame"]["id"] == frame_id => {
-                                    let failed = params["frame"]["unreachableUrl"].as_str();
-                                    match failed.filter(|url| !url.is_empty()) {
-                                        Some(url) => Some(Change::ErrorPage {
-                                            url: url.to_owned(),
-                                        }),
-                                        None => navigated_url(params)
-                                            .map(|url| Change::NewDocument { url }),
-                                    }
-                                }
-                                "Page.navigatedWithinDocument" if params["frameId"] == frame_id => {
-                                    params["url"].as_str().map(|url| Change::SameDocument {
-                                        url: url.to_owned(),
-                                    })
-                                }
-                                "Page.frameStoppedLoading" if params["frameId"] == frame_id => {
-                                    Some(Change::Stopped)
-                                }
-                                _ => None,
-                            }
-                        }
-                        AccountedRawEvent::Disconnected { .. }
-                        | AccountedRawEvent::Shutdown { .. } => None,
-                        AccountedRawEvent::Lagged { .. }
-                        | AccountedRawEvent::Reconnected { .. } => Some(Change::Lost),
-                    };
-                async move { change }
-            }),
-    )
+    let events = session.events(&[
+        "Page.frameNavigated",
+        "Page.navigatedWithinDocument",
+        "Page.frameStoppedLoading",
+    ]);
+    Box::pin(events.filter_map(move |event| {
+        let event = match event {
+            Ok(event) => event,
+            Err(end) => return std::future::ready(Some(Change::Ended(end))),
+        };
+        let params = &event.params;
+        let change = match event.method.as_str() {
+            "Page.frameNavigated" if params["frame"]["id"] == frame_id => {
+                let failed = params["frame"]["unreachableUrl"].as_str();
+                match failed.filter(|url| !url.is_empty()) {
+                    Some(url) => Some(Change::ErrorPage {
+                        url: url.to_owned(),
+                    }),
+                    None => navigated_url(params).map(|url| Change::NewDocument { url }),
+                }
+            }
+            "Page.navigatedWithinDocument" if params["frameId"] == frame_id => {
+                params["url"].as_str().map(|url| Change::SameDocument {
+                    url: url.to_owned(),
+                })
+            }
+            "Page.frameStoppedLoading" if params["frameId"] == frame_id => Some(Change::Stopped),
+            _ => None,
+        };
+        std::future::ready(change)
+    }))
 }
 
 /// A [`Navigation`] that ended at `url`.
@@ -156,6 +140,16 @@ fn navigation(url: &str, same_document: bool) -> Result<Navigation> {
 /// The error of a navigation to `url` that ended on Chrome's error page.
 fn failed(url: &str) -> ZendriverError {
     ZendriverError::Navigation(format!("the navigation to {url} failed"))
+}
+
+/// The error of a wait whose session's events ended, for the reason `end`.
+fn ended(end: SessionEnd) -> ZendriverError {
+    match end {
+        SessionEnd::Overflowed => ZendriverError::EventStreamIncomplete,
+        _ => ZendriverError::Navigation(format!(
+            "the tab's session or connection ended while waiting for a navigation: {end}"
+        )),
+    }
 }
 
 /// Where the page is and whether it has loaded, as the page itself says:
@@ -193,8 +187,7 @@ pub(crate) enum Target {
     /// The next navigation of the main frame, wherever it leads.
     NextNavigation,
     /// The main frame being at a URL matching this, which it may be
-    /// already. Lost events then make the wait ask the page where it is,
-    /// instead of ending.
+    /// already.
     Url(UrlMatcher),
 }
 
@@ -214,8 +207,7 @@ impl Target {
 struct Frame {
     /// A new document has committed and hasn't finished loading.
     loading: bool,
-    /// A new document has replaced the one the wait began with, or may
-    /// have, among lost events.
+    /// A new document has replaced the one the wait began with.
     replaced: bool,
     /// The matching URL the frame is at, to report once its document has
     /// loaded.
@@ -300,16 +292,7 @@ async fn wait(
             Change::Stopped => {
                 frame.loading = false;
             }
-            Change::Lost => {
-                if !asks_page {
-                    return Err(ZendriverError::EventStreamIncomplete);
-                }
-                frame.replaced = true;
-                if let Some(found) = consult_page(&session, &target, &mut frame).await? {
-                    return Ok(found);
-                }
-                continue;
-            }
+            Change::Ended(end) => return Err(ended(end)),
         }
         if frame.loading || frame.candidate.is_none() {
             continue;
@@ -326,9 +309,8 @@ async fn wait(
             return Ok(found);
         }
     }
-    Err(ZendriverError::Navigation(
-        "the tab's session or connection ended while waiting for a navigation".into(),
-    ))
+    // The changes end with `Change::Ended`, which returned above.
+    Err(ended(SessionEnd::Shutdown))
 }
 
 /// Awaitable handle returned by
@@ -478,17 +460,6 @@ mod tests {
         answer(mock, "Runtime.evaluate", value).await;
     }
 
-    /// Return once every frame emitted or replied so far has reached `conn`:
-    /// a reconnect drops the frames the old socket hasn't delivered yet.
-    /// (Frames arrive in order, so an unrelated event emitted now arrives
-    /// after them.)
-    async fn delivered(mock: &MockConnection, conn: &Connection) {
-        let mut seen = conn.subscribe_raw_accounted();
-        mock.emit_event_for_session("Page.frameStoppedLoading", json!({ "frameId": "G" }), "S1")
-            .await;
-        seen.next().await;
-    }
-
     fn expect_navigation(conn: &Connection) -> NavigationExpectation {
         let session = SessionHandle::new(conn.clone(), "S1");
         NavigationExpectation::new(&session, "F", Target::NextNavigation)
@@ -604,32 +575,44 @@ mod tests {
         }
     }
 
-    /// After lost events, `expect_navigation` can't tell whether the
-    /// navigation happened, so it ends; `wait_for_url` asks the page where
-    /// it is, and no longer vouches for the document.
+    /// A reconnect moves the connection to a new socket, where the session
+    /// doesn't exist, so both kinds of wait end, saying so.
     #[tokio::test]
-    async fn lost_events_end_expect_navigation_and_make_wait_for_url_look_again() {
+    async fn a_reconnect_ends_the_wait() {
         let (mut mock, conn) = MockConnection::pair();
-        let waiting = tokio::spawn(expect_navigation(&conn));
+        let next = tokio::spawn(expect_navigation(&conn));
+        let url = tokio::spawn(wait_for_url(&conn, "/target"));
+        answer_page(&mut mock, "http://a.test/start", "complete").await;
         mock.reconnect(&conn);
-        let res = waiting.await.unwrap();
+        for waiting in [next, url] {
+            let res = waiting.await.unwrap();
+            assert!(
+                matches!(&res, Err(ZendriverError::Navigation(m)) if m.contains("new socket")),
+                "{res:?}"
+            );
+        }
+        conn.shutdown();
+    }
+
+    /// A wait that falls so far behind its events that its queue overflows
+    /// can't tell what it missed.
+    #[tokio::test]
+    async fn an_overflow_ends_the_wait_as_incomplete() {
+        let (mock, conn) = MockConnection::pair_with_session_queue_capacity(1);
+        let session = SessionHandle::new(conn.clone(), "S1");
+        let changes = changes(&session, "F");
+        // The actor fills the queues before it broadcasts an event, so once
+        // the broadcast has both stops, the second has overflowed the queue.
+        let mut broadcast = conn.subscribe_raw();
+        stop(&mock).await;
+        stop(&mock).await;
+        broadcast.next().await;
+        broadcast.next().await;
+        let res = wait(session, changes, Target::NextNavigation).await;
         assert!(
             matches!(res, Err(ZendriverError::EventStreamIncomplete)),
             "{res:?}"
         );
-        conn.shutdown();
-
-        let (mut mock, conn) = MockConnection::pair();
-        let waiting = tokio::spawn(wait_for_url(&conn, "/target"));
-        answer_page(&mut mock, "http://a.test/start", "complete").await;
-        delivered(&mock, &conn).await;
-        mock.reconnect(&conn);
-        answer_page(&mut mock, "http://a.test/target", "complete").await;
-        let found = waiting
-            .await
-            .unwrap()
-            .expect("found at the URL after lost events");
-        assert_eq!(found, reached("http://a.test/target", false));
         conn.shutdown();
     }
 

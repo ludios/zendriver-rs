@@ -71,15 +71,15 @@ The wait asks the page itself where it is (`location.href`) and whether it
 has loaded (`document.readyState`), rather than Chrome's `Target` domain,
 which reports a navigation's URL while it is still pending.
 
-## Timeouts and lost events
+## Timeouts and ends
 
 Both waits give up after 30 s unless `.timeout(duration)` says otherwise;
-the clock starts at the first `.await`. If the event stream loses events (a
-lagging subscriber, or a reconnect), `expect_navigation` fails with
-`EventStreamIncomplete`, because the navigation may have happened unseen;
-`wait_for_url` asks the page where it is and keeps waiting, and then reports
-`same_document` as `false`, since a new document may have arrived unseen.
-Closing the tab, or Chrome exiting, ends a wait with a `Navigation` error.
+the clock starts at the first `.await`. A wait gets every event of the tab's
+main frame, in order. Closing the tab, Chrome exiting, or a
+`Browser::reconnect` that replaces the tab's connection ends a wait with a
+`Navigation` error. A wait whose events pile up unread until its queue
+overflows (65,536 of them) fails with `EventStreamIncomplete`, since the
+navigation may have happened unseen.
 
 ## In the MCP server
 
