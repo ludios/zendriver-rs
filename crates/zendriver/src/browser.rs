@@ -2210,14 +2210,23 @@ impl BrowserInner {
     }
 }
 
+/// The browser session's events that [`BrowserInner::wait_for_tab`] reads.
+const TAB_SETUP_EVENTS: &[&str] = &["Target.attachedToTarget", "Target.detachedFromTarget"];
+
 impl BrowserInner {
+    /// The browser session's events that [`Self::wait_for_tab`] reads, from
+    /// now on.
+    pub(crate) fn tab_setup_events(&self) -> zendriver_transport::SessionEvents {
+        SessionHandle::new_root(self.conn.clone()).events(TAB_SETUP_EVENTS)
+    }
+
     /// Wait for the [`TabRegistrar`] to register the tab of the page target
     /// `target_id`, which it does once the observer chain on the session
     /// that auto-attach opens on the target has run.
     ///
-    /// `events` is a subscription to [`Self::conn`] made before Chrome could
-    /// attach the target, so that it holds that attach, and the detach of
-    /// that session, if any.
+    /// `events` is a subscription made by [`Self::tab_setup_events`] before
+    /// Chrome could attach the target, so that it holds that attach, and the
+    /// detach of that session, if any.
     ///
     /// Returns the tab. Returns [`ZendriverError::TabSetup`] at once if
     /// Chrome detaches that session first, or once
@@ -2226,11 +2235,11 @@ impl BrowserInner {
     /// shut down.
     pub(crate) async fn wait_for_tab(
         &self,
-        events: &mut (impl futures::Stream<Item = zendriver_transport::AccountedRawEvent> + Unpin),
+        events: &mut zendriver_transport::SessionEvents,
         target_id: &str,
     ) -> Result<Tab, ZendriverError> {
         use futures::StreamExt;
-        use zendriver_transport::{AccountedRawEvent, TransportError};
+        use zendriver_transport::{SessionEnd, TransportError};
 
         let deadline = tokio::time::Instant::now() + self.tab_setup_budget;
         // The first session attached to the target is auto-attach's; an
@@ -2256,7 +2265,7 @@ impl BrowserInner {
             tokio::select! {
                 () = inserted => {}
                 event = events.next() => match event {
-                    Some(AccountedRawEvent::Event { event, .. }) => {
+                    Some(Ok(event)) => {
                         let params = &event.params;
                         if event.method == "Target.attachedToTarget"
                             && session_id.is_none()
@@ -2277,14 +2286,18 @@ impl BrowserInner {
                             });
                         }
                     }
-                    Some(AccountedRawEvent::Disconnected { .. }) => {
+                    Some(Err(SessionEnd::Disconnected)) => {
                         return Err(ZendriverError::Disconnected);
                     }
-                    Some(AccountedRawEvent::Shutdown { .. }) | None => {
+                    // Events may have been missed (a detach missed is caught
+                    // by the deadline): read the ones from now on. (After a
+                    // reconnect, the target attaches again on the new socket.)
+                    Some(Err(SessionEnd::Overflowed | SessionEnd::Reconnected)) => {
+                        *events = self.tab_setup_events();
+                    }
+                    Some(Err(SessionEnd::Shutdown | SessionEnd::Detached)) | None => {
                         return Err(TransportError::Shutdown.into());
                     }
-                    // A detach lost in a lag gap is caught by the deadline.
-                    Some(AccountedRawEvent::Lagged { .. } | AccountedRawEvent::Reconnected { .. }) => {}
                 },
                 () = tokio::time::sleep_until(deadline) => {
                     return Err(ZendriverError::TabSetup {
@@ -2318,7 +2331,7 @@ impl BrowserInner {
         // Chrome opens an empty URL as about:blank, and ignores its case.
         let navigates = !url.is_empty() && !url.eq_ignore_ascii_case("about:blank");
         params["url"] = serde_json::Value::String(url);
-        let mut events = self.conn.subscribe_raw_accounted();
+        let mut events = self.tab_setup_events();
         let res = self
             .conn
             .call_raw("Target.createTarget", params, None)
@@ -3522,10 +3535,10 @@ pub(crate) async fn finish_connect(
     // replies, and every page target that appears later (paused until the
     // observer chain on it has run). The observer chain runs once on each,
     // and its last observer, the registrar, sets up each one's tab.
-    let mut main_events = inner.conn.subscribe_raw_accounted();
+    let mut main_events = inner.tab_setup_events();
     let user_tabs: Vec<_> = user_tabs
         .into_iter()
-        .map(|id| (id, inner.conn.subscribe_raw_accounted()))
+        .map(|id| (id, inner.tab_setup_events()))
         .collect();
     inner
         .conn
