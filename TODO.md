@@ -66,7 +66,6 @@ Also for this round:
 - [ ] **Interception: review findings left open** *(reviews of `222fe294b..907f3a7f2`, 2026-11-06)*
   - An overflow of the multiplexer's queue of `Fetch` events (4,096 of this session's `Fetch` events waiting, which takes that many requests paused while the multiplexer waits on Chrome in `apply` or `recover`): the recovery's `Fetch.disable` continues every paused request, those a block rule or a stream would have held included. Running those round trips beside the event loop would make it rarer still.
   - A stream layer's queue is unbounded (Chrome holds the requests anyway); the auth memory doesn't know which credentials answered, so new credentials for the same request and proxy within 60 s get `CancelAuth`.
-  - Each intercepting tab subscribes to the accounted bus, which turns on the transport's per-event clone for it.
   - *Open from the reviews of `b965a0d09..777c35159`, `4dd5e05e0` and `b357bdb23` (2026-11-06):*
     - An entry inserted while a request is already under way (paused at the Request stage, or sent before `insert` returned) doesn't get that request's Response pause: Chrome fixed its stages when it started. Documented as "a request sent from then on". Sending `interceptResponse` on every Request-stage continue, worked out (by resource type, as for a new URL since `94768fd1e`) from the list at answer time, would close it for a request still paused at the Request stage, but not for one already sent.
     - When Chrome refuses both an answer and the `failRequest` that follows it, the hold is dropped as answered, so a later `Fetch.disable` may release the request (if Chrome still had it). Keeping the hold would keep `Fetch` on for a request Chrome most likely no longer knows. *(Astra, `b965a0d09..777c35159`.)*
@@ -137,10 +136,7 @@ Also for this round:
 - [ ] **From the 2026-11-06 reviews of the detach work (older problems, not fixed):**
   - A monitor's body-streaming tasks hold its output channel, so chunks can follow its terminal `Shutdown` / `Disconnected` boundary, and the stream doesn't return `None` until they finish.
   - Interception: dropping the last `Interceptor` and rule handles closes the command queue while an answer task (which holds only a weak sender) is pending, so `Mux::close` disables `Fetch` before a rejected `Fetch.fulfillRequest`'s fallback `Fetch.failRequest` runs (reproduced with `MockConnection` by a reviewer).
-  - Simplification: in `load_tracker.rs` and `navigation.rs`, `changes` ends at `Disconnected` / `Shutdown` with `take_while`, so the `filter_map` arms for those variants are dead; the two `changes` adapters are near-copies.
 - [ ] **`get_all_urls(true)` fails on SVG `href`.** *(TAB #4)* Test `chrome` with the SVG sprite fixture.
-- [ ] **A flat session's stream that loses its detach in a `Lagged` gap never ends.** (A subscription that starts after the detach ends at once since `07727d301`.) The expect waits and Strict idle end on the `Lagged` anyway, but a monitor keeps going, and the interceptor's `recover()` gets "session not found" from `Fetch.disable` / `Fetch.enable`, logs it, and keeps its entries, so `interceptor.subscribe(...)` streams never end. On the shared socket every tab's traffic fills each session's lag window, which makes this likelier (and a `Lagged` caused only by other tabs' events makes the interceptor release this tab's held pauses).
-  - Unverified: an OOPIF's session may be dropped with its page's session without a detach of its own, so its waits wouldn't end.
 - [ ] **Cookies, left open:**
   - `for_url` without the public suffix list: a cookie partitioned under a public suffix with a dot (a page at `github.io` itself) is returned for that suffix's subdomains. `psl` is in the tree (via `zendriver-datadome`) but not in the default build.
   - From review: `only_isolated_tab_jars_name_their_context` reads the jar's `Debug`; `tab_cookies_write_into_the_tabs_context` can't tell the tab's connection from the browser's.
@@ -151,7 +147,10 @@ Also for this round:
 - [ ] **`geo_auto()` captures the proxy at call time.** Calling `.geo_auto().proxy(..)` in that order probes from the real IP. *(BR #6)* Test `unit` on builder order.
 
 ### Transport and input
+- [ ] **One socket for every target: stages 2 and 3 of the event model** *(decided 2026-11-08)*. Stage 1, ordered per-session event queues (`SessionHandle::events`), is done. Stage 2: attach OOPIFs on their page's session (see "OOPIF fixes" above). Stage 3: run every target as a flat session on the browser's socket, and delete `per_tab_session` and its fallback. The per-tab socket keeps OOPIF attaches from the registrar, makes stealth's setup during the debugger pause slower (no pipelining across two sockets), turns prerender off, and lets `tab.set_user_agent` beat stealth's override whatever the order of the writes (Chrome applies emulation in the order that sessions attached).
 - [ ] **A reply frame that fails to parse hangs its caller for 180 s.** Fail the pending caller instead. *(TI #9)* Test `unit`.
+- [ ] **An event frame that fails to parse is dropped without a trace on its session's streams.** `serde_json`'s recursion limit (128) rejects valid deep events (a reviewer saw `DOM.setChildNodes` for a DOM 70 elements deep fail on Chrome 157); the actor logs a warning and drops the frame, and `SessionHandle::events` goes on with the next event as if none were missing. Parse without the limit (`serde_json`'s `unbounded_depth`, with `serde_stacker` against stack overflow). Test `unit`: replay a deep frame.
+- [ ] **A socket write that never completes keeps the actor from noticing its shutdown**, so neither its pending calls nor its session streams end. *(found reviewing `6fbfdd6cd`)*
 - [ ] **Grapheme clusters longer than 4 UTF-16 units fail.** Split into insertText or per-codepoint events (ZWJ emoji, flags, skin tones). *(FI #3)*
   - Test `chrome`: `type_text("👩‍💻🇯🇵👍🏽")` round-trips.
 
