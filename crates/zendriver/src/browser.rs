@@ -2210,13 +2210,14 @@ impl BrowserInner {
     }
 }
 
-/// The browser session's events that [`BrowserInner::wait_for_tab`] reads.
+/// The methods of the browser session's events that
+/// [`BrowserInner::wait_for_tab`] reads.
 const TAB_SETUP_EVENTS: &[&str] = &["Target.attachedToTarget", "Target.detachedFromTarget"];
 
 impl BrowserInner {
-    /// The browser session's events that [`Self::wait_for_tab`] reads, from
-    /// now on.
-    pub(crate) fn tab_setup_events(&self) -> zendriver_transport::SessionEvents {
+    /// A subscription to the browser session's [`TAB_SETUP_EVENTS`] that
+    /// arrive after this call, for [`Self::wait_for_tab`].
+    fn tab_setup_events(&self) -> zendriver_transport::SessionEvents {
         SessionHandle::new_root(self.conn.clone()).events(TAB_SETUP_EVENTS)
     }
 
@@ -2225,14 +2226,18 @@ impl BrowserInner {
     /// that auto-attach opens on the target has run.
     ///
     /// `events` is a subscription made by [`Self::tab_setup_events`] before
-    /// Chrome could attach the target, so that it holds that attach, and the
-    /// detach of that session, if any.
+    /// Chrome could attach the target, so that it gets that attach, and the
+    /// detach of that session, if any (unless the subscription overflows,
+    /// or a reconnect ends it, before then).
     ///
     /// Returns the tab. Returns [`ZendriverError::TabSetup`] at once if
     /// Chrome detaches that session first, or once
     /// [`Self::tab_setup_budget`] has elapsed; [`ZendriverError::Disconnected`]
     /// if the connection drops; and [`ZendriverError::Transport`] if it is
-    /// shut down.
+    /// shut down. After an overflow of the subscription, or a reconnect, a
+    /// detach can be told from the detach of a session that an observer
+    /// opened only if the session was known before: an unknown one fails
+    /// the wait only at the deadline.
     pub(crate) async fn wait_for_tab(
         &self,
         events: &mut zendriver_transport::SessionEvents,
@@ -2243,8 +2248,11 @@ impl BrowserInner {
 
         let deadline = tokio::time::Instant::now() + self.tab_setup_budget;
         // The first session attached to the target is auto-attach's; an
-        // observer may open, and close, others of its own.
+        // observer may open, and close, others of its own. After a gap in
+        // the events, the first one seen may be such another one, so
+        // nothing is learned from them any more.
         let mut session_id = None;
+        let mut learning = true;
         loop {
             // Enabled before the read, so that an insert between the read
             // and the wait still wakes the wait.
@@ -2268,6 +2276,7 @@ impl BrowserInner {
                     Some(Ok(event)) => {
                         let params = &event.params;
                         if event.method == "Target.attachedToTarget"
+                            && learning
                             && session_id.is_none()
                             && params["targetInfo"]["targetId"] == target_id
                         {
@@ -2289,14 +2298,25 @@ impl BrowserInner {
                     Some(Err(SessionEnd::Disconnected)) => {
                         return Err(ZendriverError::Disconnected);
                     }
-                    // Events may have been missed (a detach missed is caught
-                    // by the deadline): read the ones from now on. (After a
-                    // reconnect, the target attaches again on the new socket.)
-                    Some(Err(SessionEnd::Overflowed | SessionEnd::Reconnected)) => {
+                    // Events may have been missed (an attach or a detach;
+                    // the deadline catches a detach missed): read the later
+                    // ones, without learning a session from them.
+                    Some(Err(SessionEnd::Overflowed)) => {
+                        learning = false;
                         *events = self.tab_setup_events();
                     }
-                    Some(Err(SessionEnd::Shutdown | SessionEnd::Detached)) | None => {
+                    // The known session, if any, doesn't exist on the new
+                    // socket.
+                    Some(Err(SessionEnd::Reconnected)) => {
+                        learning = false;
+                        session_id = None;
+                        *events = self.tab_setup_events();
+                    }
+                    Some(Err(SessionEnd::Shutdown)) | None => {
                         return Err(TransportError::Shutdown.into());
+                    }
+                    Some(Err(SessionEnd::Detached)) => {
+                        unreachable!("the browser session doesn't detach")
                     }
                 },
                 () = tokio::time::sleep_until(deadline) => {
@@ -3545,6 +3565,7 @@ pub(crate) async fn finish_connect(
         .call_raw("Target.setAutoAttach", auto_attach_params(), None)
         .await?;
     let main_tab = inner.wait_for_tab(&mut main_events, &target_id).await?;
+    drop(main_events);
     let unset = inner.main_tab.set(main_tab);
     assert!(unset.is_ok(), "only finish_connect sets the main tab");
 
@@ -4837,8 +4858,10 @@ impl Browser {
     /// 2. Waits for a [`Tab`] whose [`Tab::target_id`] matches to appear in
     ///    the internal tabs registry. The tab registrar adds it once the
     ///    observer chain has run on the target that auto-attach attached. The
-    ///    wait ends at once if the target is detached first, and otherwise
-    ///    after 5 s for each observer in the chain, plus 5 s.
+    ///    wait ends at once if the target is detached first (unless the
+    ///    browser's events overflowed their queue, or the connection was
+    ///    reconnected, meanwhile), and otherwise after 5 s for each observer
+    ///    in the chain, plus 5 s.
     /// 3. Returns the matching [`Tab`] on success.
     ///
     /// # Background tabs
@@ -7457,6 +7480,42 @@ mod tests {
             .unwrap();
         assert_eq!(inner.main_tab.get().unwrap().target_id(), "T1");
         inner.conn.shutdown();
+    }
+
+    /// After an overflow swallowed auto-attach's attach of the target, the
+    /// detach of a session that an observer opened on it can't be told from
+    /// a failed setup, so it doesn't fail the wait: only the deadline does.
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_tab_learns_no_session_after_an_overflow() {
+        let (mock, conn) =
+            zendriver_transport::testing::MockConnection::pair_with_session_queue_capacity(1);
+        let inner = test_only_inner_with(conn.clone(), |inner| {
+            inner.tab_setup_budget = Duration::from_secs(1);
+        });
+        let mut events = inner.tab_setup_events();
+        let waiting = tokio::spawn({
+            let inner = inner.clone();
+            async move { inner.wait_for_tab(&mut events, "T7").await }
+        });
+        // Auto-attach's attach of T7 is lost in the overflow.
+        for (target, session) in [("T2", "S2"), ("T3", "S3"), ("T7", "S7")] {
+            emit_page_attach(&mock, target, session, "about:blank").await;
+        }
+        // Let the waiter read the queue and subscribe again.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        emit_page_attach(&mock, "T7", "S9", "about:blank").await;
+        // Let the waiter read the attach before the detach comes (the queue
+        // holds one event).
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let detached = json!({ "sessionId": "S9", "targetId": "T7" });
+        mock.emit_event("Target.detachedFromTarget", detached).await;
+
+        let err = waiting.await.unwrap().unwrap_err();
+        assert!(
+            matches!(err, ZendriverError::TabSetup { ref reason, .. } if reason.contains("budget")),
+            "{err:?}"
+        );
+        conn.shutdown();
     }
 
     /// `finish_connect` gives up on a main tab that isn't set up within its

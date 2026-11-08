@@ -37,7 +37,9 @@ Internally, `new_tab*` waits for the observer chain to set up the new
 target's tab, and returns as soon as it has — typically within a few
 milliseconds. If the target is detached first (an observer failed on it,
 and so the transport detached it, or the page closed), you get
-[`ZendriverError::TabSetup`] at once, and the target is closed; you get
+[`ZendriverError::TabSetup`] at once (or, in the rare case that the
+browser's events overflowed their queue or the connection was reconnected
+meanwhile, at the end of the budget), and the target is closed; you get
 it too if the setup doesn't end within its budget, which is 5 s for each
 observer in the chain, plus 5 s. `launch()` and `connect()` wait the same
 way for the main tab.
