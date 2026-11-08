@@ -44,7 +44,7 @@ use Scope::{Browser as B, Page as P};
 /// the tab has its own socket (the usual case), and to the browser when it
 /// fell back to the shared one; such commands are listed at both.
 const COMMANDS: &[(&str, Scope)] = &[
-    ("Accessibility.getPartialAXTree", P),
+    ("Accessibility.queryAXTree", P),
     ("Browser.close", B),
     ("Browser.getVersion", B),
     ("Browser.getWindowForTarget", B),

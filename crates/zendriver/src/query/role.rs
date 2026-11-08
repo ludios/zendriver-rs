@@ -1,8 +1,6 @@
-//! ARIA role enum + role-to-CSS-selector compilation.
-//!
-//! Used by [`crate::query::FindBuilder::role`] /
-//! [`crate::query::FindBuilder::role_named`] for accessibility-aware
-//! queries.
+//! ARIA role enum, for the accessibility-aware queries
+//! [`crate::query::FindBuilder::role`] /
+//! [`crate::query::FindBuilder::role_named`].
 
 /// An ARIA role for use with [`crate::query::FindBuilder::role`].
 ///
@@ -64,23 +62,9 @@ pub enum AriaRole {
 }
 
 impl AriaRole {
-    /// Compile to a CSS attribute selector.
-    ///
-    /// Tag-implicit roles (e.g. `<button>` implies role=button) are NOT
-    /// auto-included; users querying by role get only explicit
-    /// `[role="..."]` matches. This avoids surprising matches against
-    /// tag-implicit elements that may have different accessibility behavior.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use zendriver::AriaRole;
-    /// assert_eq!(AriaRole::Button.to_css(), r#"[role="button"]"#);
-    /// assert_eq!(AriaRole::Other("tooltip").to_css(), r#"[role="tooltip"]"#);
-    /// ```
-    #[must_use]
-    pub fn to_css(self) -> String {
-        let name = match self {
+    /// The role's ARIA name, as in a `role` attribute.
+    pub(crate) fn aria_name(self) -> &'static str {
+        match self {
             AriaRole::Button => "button",
             AriaRole::Link => "link",
             AriaRole::Textbox => "textbox",
@@ -103,8 +87,34 @@ impl AriaRole {
             AriaRole::Columnheader => "columnheader",
             AriaRole::Rowheader => "rowheader",
             AriaRole::Other(s) => s,
-        };
-        format!("[role=\"{name}\"]")
+        }
+    }
+
+    /// Compile to a CSS attribute selector, which matches only an explicit
+    /// `role` attribute: `<button>` doesn't match `[role="button"]`.
+    /// [`crate::query::FindBuilder::role`] doesn't use it, and also matches
+    /// the roles that elements have implicitly.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use zendriver::AriaRole;
+    /// assert_eq!(AriaRole::Button.to_css(), r#"[role="button"]"#);
+    /// assert_eq!(AriaRole::Other("tooltip").to_css(), r#"[role="tooltip"]"#);
+    /// ```
+    #[must_use]
+    pub fn to_css(self) -> String {
+        format!("[role=\"{}\"]", self.aria_name())
+    }
+
+    /// The role's name in Chrome's accessibility tree, which
+    /// `Accessibility.queryAXTree` matches. It is the ARIA name, except
+    /// that Chrome calls `img` by its ARIA 1.3 synonym, `image`.
+    pub(crate) fn ax_name(self) -> &'static str {
+        match self.aria_name() {
+            "img" => "image",
+            name => name,
+        }
     }
 }
 

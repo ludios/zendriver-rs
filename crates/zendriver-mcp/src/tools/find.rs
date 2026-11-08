@@ -20,8 +20,8 @@
 //! match against the same shortlist the lib enumerates. Unknown role
 //! strings yield [`rmcp::ErrorData::invalid_params`] listing the accepted
 //! variants — surfacing the typo to the agent rather than silently falling
-//! back to `AriaRole::Other` (which would compile to a literal
-//! `[role="<typo>"]` selector that matches nothing).
+//! back to `AriaRole::Other` (which would query a role named `<typo>`,
+//! which matches nothing).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -250,7 +250,7 @@ fn apply_modifiers_all<'a>(mut builder: FindAllBuilder<'a>, sel: &Selector) -> F
 /// We accept lowercase ARIA role names. Unknown values surface an
 /// `invalid_params` error listing the accepted roles, so an agent that
 /// typos `"buttn"` gets a clean signal rather than `AriaRole::Other`
-/// silently compiling to a `[role="buttn"]` selector that matches nothing.
+/// silently querying a role named `buttn`, which matches nothing.
 fn parse_role(s: &str) -> Result<AriaRole, ErrorData> {
     match s {
         "button" => Ok(AriaRole::Button),

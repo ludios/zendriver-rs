@@ -17,8 +17,8 @@ use std::time::Duration;
 use serial_test::serial;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+use zendriver::Browser;
 use zendriver::error::ZendriverError;
-use zendriver::{AriaRole, Browser};
 
 /// Spin up a mock HTTP server that returns `html` at `/`. Shared between
 /// every test below — keeps fixtures inline + isolated.
@@ -326,28 +326,6 @@ async fn text_selector_case_insensitive() {
     let el = tab.find().text("submit").one().await.unwrap();
     let id: Option<String> = el.attr("id").await.unwrap();
     assert_eq!(id.as_deref(), Some("s"));
-
-    browser.close().await.unwrap();
-}
-
-#[tokio::test]
-#[serial]
-async fn aria_role_finds_button() {
-    let mock = fixture_with_html(
-        r#"<!doctype html><html><body>
-          <div role="button" id="r" tabindex="0">go</div>
-        </body></html>"#,
-    )
-    .await;
-    let browser = Browser::builder().headless(true).launch().await.unwrap();
-    let tab = browser.main_tab();
-    tab.goto(&mock.uri()).await.unwrap();
-    tab.wait_for_load().await.unwrap();
-
-    // role() compiles to `[role="button"]` — should locate our <div>.
-    let el = tab.find().role(AriaRole::Button).one().await.unwrap();
-    let id: Option<String> = el.attr("id").await.unwrap();
-    assert_eq!(id.as_deref(), Some("r"));
 
     browser.close().await.unwrap();
 }

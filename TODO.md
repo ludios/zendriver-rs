@@ -125,8 +125,6 @@ Also for this round:
   - `text_exact()` returns the outermost match (a table cell, not the link inside), so the click lands on nothing yet reports success. *(R2)*
   - Text selectors also match `<title>`, `<script>` and `<style>`. *(QE #7)*
   - Prefer the deepest rendered match. Test `chrome`: table-with-link fixture.
-- [ ] **Role selector ignores implied ARIA roles.** It found 0 of 32 ordinary links (`a[href]` should be `link`; same for buttons, headings, and so on). *(R3)*
-  - Test `unit` for the role mapping table, `chrome` for the link fixture.
 
 ### Downloads, expect, monitor, cookies
 - [ ] **Downloads, phase 2** (phase 1, 2026-11-06: downloads followed at browser scope, so a `MatchedDownload` outlives its tab; designed with Astra and an Opus critique):

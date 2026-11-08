@@ -693,9 +693,24 @@ impl<'scope> FindBuilder<'scope> {
         self
     }
 
-    /// ARIA role match.
+    /// ARIA role match: the elements whose role, as Chrome's accessibility
+    /// tree computes it (`Accessibility.queryAXTree`), is `role`.
     ///
-    /// Compiles to a `[role="..."]` CSS attribute selector.
+    /// That is the role that an element has implicitly (`<a href>` is a
+    /// link, `<h1>` a heading, `<button>` a button) as well as one that a
+    /// `role` attribute gives it. Like Playwright's `getByRole`, it leaves
+    /// out what the accessibility tree hides: an element under
+    /// `display: none` or `visibility: hidden`, and one that Chrome ignores
+    /// (one under `aria-hidden="true"`, say). It includes elements in
+    /// shadow roots, closed ones too, but not those in iframes, as CSS
+    /// queries don't.
+    ///
+    /// Chrome answers only while the page renders. A background tab
+    /// renders only with focus emulation, which [`crate::stealth::StealthProfile::native`]
+    /// (the default) and `spoofed` turn on. So under `StealthProfile::off`,
+    /// a role query in a background tab fails after 10 s with
+    /// [`ZendriverError::CdpTimeout`] for `Accessibility.queryAXTree`;
+    /// [`crate::Tab::activate`] the tab first.
     ///
     /// # Examples
     ///
@@ -714,10 +729,10 @@ impl<'scope> FindBuilder<'scope> {
         self
     }
 
-    /// ARIA role + accessible name match.
-    ///
-    /// Post-filters role candidates by computed accessible name via
-    /// `Accessibility.getPartialAXTree` (case-insensitive substring).
+    /// ARIA role + accessible name match: the elements that
+    /// [`FindBuilder::role`] matches whose accessible name, as Chrome
+    /// computes it (from `aria-label`, `aria-labelledby`, a `<label>` or
+    /// the element's text), contains `name`, ignoring case.
     ///
     /// # Examples
     ///
@@ -1771,9 +1786,9 @@ fn describe_selector(sel: &SelectorKind) -> String {
                 format!("text_regex(/{pattern}/{flags})")
             }
         }
-        SelectorKind::Role(role, None) => format!("role({})", role.to_css()),
+        SelectorKind::Role(role, None) => format!("role({})", role.aria_name()),
         SelectorKind::Role(role, Some(name)) => {
-            format!("role_named({}, {name})", role.to_css())
+            format!("role_named({}, {name})", role.aria_name())
         }
     }
 }
@@ -1991,11 +2006,11 @@ mod tests {
         );
         assert_eq!(
             describe_selector(&SelectorKind::Role(AriaRole::Button, None)),
-            r#"role([role="button"])"#
+            "role(button)"
         );
         assert_eq!(
             describe_selector(&SelectorKind::Role(AriaRole::Button, Some("Save".into()))),
-            r#"role_named([role="button"], Save)"#
+            "role_named(button, Save)"
         );
     }
 

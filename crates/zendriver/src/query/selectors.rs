@@ -15,20 +15,16 @@
 //! specialization is ever wanted for its cheaper wire shape, it belongs
 //! behind `resolve_many_inner` rather than beside it.
 //!
-//! Role resolution: role-only queries compile to a `[role="..."]`
-//! CSS attribute selector and reuse `resolve_css_many`
-//! directly. Role + accessible-name queries do the same CSS pass first
-//! to get all candidates, then post-filter via
-//! `Accessibility.getPartialAXTree { backendNodeId, fetchRelatives: false }`
-//! per candidate, matching `name.value` against the needle with
-//! case-insensitive substring semantics. The AX call has to be per-node
-//! because the AX tree doesn't expose a "find by computed name" query —
-//! the JS-side `aria-label` attribute alone misses cases where the name
-//! comes from `aria-labelledby`, the wrapped text, or `<label>` linkage,
-//! which only the computed AX tree resolves.
+//! Role resolution asks Chrome's accessibility tree
+//! (`Accessibility.queryAXTree`), which knows the roles that elements have
+//! implicitly (`<a href>` is a link) and their computed accessible names;
+//! see `resolve_role_many`.
+
+use std::time::Duration;
 
 use serde_json::{Value, json};
-use zendriver_transport::SessionHandle;
+use tracing::warn;
+use zendriver_transport::{CallError, SessionHandle};
 
 use crate::element::Element;
 use crate::error::{Result, ZendriverError};
@@ -63,7 +59,7 @@ impl QueryScope<'_> {
     ///
     /// All `Runtime.evaluate` / `Runtime.callFunctionOn` /
     /// `Runtime.getProperties` / `DOM.describeNode` /
-    /// `Accessibility.getPartialAXTree` calls in this module go through
+    /// `Accessibility.queryAXTree` calls in this module go through
     /// this accessor so adding a new scope variant only requires
     /// extending the match arm.
     pub(crate) fn session(&self) -> &SessionHandle {
@@ -183,7 +179,8 @@ impl SelectorKind {
 /// instead of waiting for the element on the next page.
 ///
 /// Every `Tab`/`Frame` match arm below (css/xpath/text/text_regex/
-/// predicate) routes through this one function instead of hand-rolling the
+/// predicate, and role for its root `document`) routes through this one
+/// function instead of hand-rolling the
 /// `contextId` dance per resolver.
 async fn eval_expr_in_scope(scope: &QueryScope<'_>, expression: String) -> Result<Value> {
     let session = scope.session();
@@ -752,68 +749,108 @@ async fn resolve_text_regex_many(
 }
 
 // ---------------------------------------------------------------------
-// Role (`[role="..."]` CSS + optional accessible-name post-filter)
+// Role (Chrome's accessibility tree)
 // ---------------------------------------------------------------------
 
+/// How long a role query waits for `Accessibility.queryAXTree`. Chrome
+/// answers it only after the page next renders, which a background tab
+/// doesn't do unless focus emulation is on (`StealthProfile::native` and
+/// `spoofed` turn it on), so there the query would otherwise wait out the
+/// transport's whole call budget.
+const AX_QUERY_BUDGET: Duration = Duration::from_secs(10);
+
+/// Every element under `scope` whose computed role is `role`, and, if
+/// `name` is given, whose computed accessible name contains `name`
+/// (case-insensitively), in document order.
+///
+/// `Accessibility.queryAXTree` computes them, so an element matches by
+/// the role it has implicitly (`<a href>` is a link, `<h1>` a heading) as
+/// well as by a `role` attribute, and by a name that comes from
+/// `aria-labelledby`, a `<label>` or its text. Like Playwright's
+/// `getByRole`, it leaves out what the tree hides: an element under
+/// `display: none` or `visibility: hidden`, and one that Chrome ignores
+/// (under `aria-hidden="true"`, say). It includes elements in shadow
+/// roots, closed ones too, and doesn't descend into iframes.
+///
+/// In a background tab without focus emulation (under
+/// `StealthProfile::off`), Chrome doesn't answer; after
+/// [`AX_QUERY_BUDGET`], this fails with [`ZendriverError::CdpTimeout`] for
+/// `Accessibility.queryAXTree`, and logs why.
+///
+/// The scope's root (the document, or the element of an Element scope)
+/// is an object in zendriver's isolated world, so each match is resolved
+/// into the same world, whose context id the root's object id holds. An
+/// Element scope's own element doesn't match, as with `querySelectorAll`.
 async fn resolve_role_many(
     scope: &QueryScope<'_>,
     role: AriaRole,
     name: Option<&str>,
 ) -> Result<Vec<RemoteRef>> {
-    // Both the name-filter and the no-filter path share this one candidate
-    // enumeration. Delegating to `resolve_css_many` also means role queries
-    // inherit its `contextId` pinning for free — a Frame-scoped role query
-    // correctly enumerates from the frame's own document, not the parent
-    // tab's.
-    let css = role.to_css();
-    let candidates = resolve_css_many(scope, &css).await?;
-    let Some(needle) = name else {
-        return Ok(candidates);
-    };
     let session = scope.session();
-    let mut out = Vec::new();
-    for candidate in candidates {
-        if accessible_name_matches(session, &candidate, needle).await? {
-            out.push(candidate);
+    let mut own_element = None;
+    let root = match scope {
+        QueryScope::Tab(_) | QueryScope::Frame(_) => {
+            let reply = eval_expr_in_scope(scope, "document".to_string()).await?;
+            let id = reply["result"]["objectId"].as_str().map(str::to_owned);
+            id.ok_or_else(|| ZendriverError::Navigation("no object for the document".into()))?
         }
-    }
-    Ok(out)
-}
-
-/// Returns `true` if the computed accessible name for `node` contains
-/// `needle` as a case-insensitive substring.
-///
-/// Uses `Accessibility.getPartialAXTree { backendNodeId, fetchRelatives: false }`
-/// to fetch the AX node and reads `name.value`. Nodes with no AX entry,
-/// no name, or a name that isn't a string are treated as a non-match
-/// (returns `Ok(false)`).
-async fn accessible_name_matches(
-    session: &SessionHandle,
-    node: &RemoteRef,
-    needle: &str,
-) -> Result<bool> {
-    let response = session
-        .call(
-            "Accessibility.getPartialAXTree",
-            json!({
-                "backendNodeId": node.backend_node_id,
-                "fetchRelatives": false,
-            }),
-        )
-        .await?;
-    let needle_lower = needle.to_lowercase();
-    let Some(nodes) = response["nodes"].as_array() else {
-        return Ok(false);
+        QueryScope::Element(el) => {
+            own_element = Some(el.backend_node_id_cloned().await?);
+            el.remote_object_id_cloned().await?
+        }
     };
-    for ax_node in nodes {
-        let Some(name_value) = ax_node["name"]["value"].as_str() else {
+    let context_id = crate::isolated_world::context_id_of_object(&root)?;
+    let reply = session
+        .connection()
+        .call_raw_with_timeout(
+            "Accessibility.queryAXTree",
+            json!({ "objectId": root, "role": role.ax_name() }),
+            session.session_id().map(str::to_owned),
+            Some(AX_QUERY_BUDGET),
+        )
+        .await;
+    if let Err(CallError::Timeout { .. }) = &reply {
+        warn!(
+            "Chrome's accessibility tree didn't answer a role query within {AX_QUERY_BUDGET:?}. \
+             It answers only while the page renders, which a background tab does only with \
+             focus emulation (StealthProfile::native or spoofed). Activate the tab first."
+        );
+    }
+    let reply = reply?;
+    let needle = name.map(str::to_lowercase);
+
+    let mut out = Vec::new();
+    for node in reply["nodes"].as_array().into_iter().flatten() {
+        if node["ignored"] == true {
+            continue;
+        }
+        let Some(backend_node_id) = node["backendDOMNodeId"].as_i64() else {
             continue;
         };
-        if name_value.to_lowercase().contains(&needle_lower) {
-            return Ok(true);
+        if Some(backend_node_id) == own_element {
+            continue;
         }
+        if let Some(needle) = &needle {
+            let name = node["name"]["value"].as_str().unwrap_or_default();
+            if !name.to_lowercase().contains(needle.as_str()) {
+                continue;
+            }
+        }
+        let resolved = session
+            .call(
+                "DOM.resolveNode",
+                json!({ "backendNodeId": backend_node_id, "executionContextId": context_id }),
+            )
+            .await?;
+        let Some(object_id) = resolved["object"]["objectId"].as_str() else {
+            continue;
+        };
+        out.push(RemoteRef {
+            remote_object_id: object_id.to_owned(),
+            backend_node_id,
+        });
     }
-    Ok(false)
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------
@@ -1409,13 +1446,13 @@ mod tests {
         );
     }
 
+    /// A role query asks Chrome's accessibility tree for the role under the
+    /// scope's `document`, skips the nodes Chrome ignores and those whose
+    /// name doesn't contain the needle (case-insensitively), and resolves
+    /// each match into the world of the `document` object, whose context id
+    /// that object's id holds.
     #[tokio::test]
-    async fn role_button_without_name_dispatches_attribute_selector_and_resolves_hits() {
-        // Role(Button, None) should:
-        //   1. Runtime.evaluate `Array.from(document.querySelectorAll('[role="button"]'))`
-        //   2. Runtime.getProperties on the returned Array
-        //   3. DOM.describeNode on each array element to fetch backendNodeId
-        // and return a RemoteRef per hit.
+    async fn role_queries_the_ax_tree_and_resolves_matches_into_the_isolated_world() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         let tab = Tab::new_for_test(sess);
@@ -1424,59 +1461,74 @@ mod tests {
             let t = tab.clone();
             async move {
                 let scope = QueryScope::Tab(&t);
-                SelectorKind::Role(AriaRole::Button, None)
+                SelectorKind::Role(AriaRole::Button, Some("SAVE".into()))
                     .resolve_many(&scope)
                     .await
             }
         });
 
-        let id_q = expect_tab_query(&mut mock).await;
-        let sent = mock.last_sent()["params"]["expression"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        assert!(
-            sent.contains(r#"[role=\"button\"]"#),
-            "role path must embed the `[role=\"button\"]` attribute selector verbatim; got: {sent}"
-        );
-        assert!(
-            sent.contains("document.querySelectorAll"),
-            "role path must call querySelectorAll for the candidate enumeration; got: {sent}"
-        );
-        mock.reply(
-            id_q,
-            json!({ "result": { "objectId": "RArr", "type": "object", "subtype": "array" } }),
-        )
-        .await;
+        let id = expect_tab_query(&mut mock).await;
+        assert_eq!(mock.last_sent()["params"]["expression"], "document");
+        mock.reply(id, json!({ "result": { "objectId": "9.7.1" } }))
+            .await;
+        let id = expect(&mut mock, "Accessibility.queryAXTree").await;
+        assert_eq!(mock.last_sent()["params"]["objectId"], "9.7.1");
+        assert_eq!(mock.last_sent()["params"]["role"], "button");
+        let nodes = json!({ "nodes": [
+            { "ignored": false, "backendDOMNodeId": 11, "name": { "value": "Save draft" } },
+            { "ignored": true, "backendDOMNodeId": 12 },
+            { "ignored": false, "backendDOMNodeId": 13, "name": { "value": "Cancel" } },
+            { "ignored": false, "backendDOMNodeId": 14, "name": { "value": "Autosave" } },
+        ] });
+        mock.reply(id, nodes).await;
+        for (backend, object) in [(11, "9.7.2"), (14, "9.7.3")] {
+            let id = expect(&mut mock, "DOM.resolveNode").await;
+            assert_eq!(mock.last_sent()["params"]["backendNodeId"], backend);
+            assert_eq!(mock.last_sent()["params"]["executionContextId"], 7);
+            mock.reply(id, json!({ "object": { "objectId": object } }))
+                .await;
+        }
 
-        let id_p = expect(&mut mock, "Runtime.getProperties").await;
-        assert_eq!(mock.last_sent()["params"]["objectId"], "RArr");
-        mock.reply(
-            id_p,
-            json!({
-                "result": [
-                    {
-                        "name": "0",
-                        "value": { "objectId": "RN0", "type": "object", "subtype": "node" }
-                    },
-                    {
-                        "name": "length",
-                        "value": { "value": 1, "type": "number" }
-                    }
-                ]
-            }),
-        )
-        .await;
+        let hits = fut.await.unwrap().unwrap();
+        let hits: Vec<(&str, i64)> = hits
+            .iter()
+            .map(|h| (h.remote_object_id.as_str(), h.backend_node_id))
+            .collect();
+        assert_eq!(hits, [("9.7.2", 11), ("9.7.3", 14)]);
+        conn.shutdown();
+    }
 
-        let id_d = expect(&mut mock, "DOM.describeNode").await;
-        assert_eq!(mock.last_sent()["params"]["objectId"], "RN0");
-        mock.reply(id_d, json!({ "node": { "backendNodeId": 42 } }))
+    /// In an Element scope the query's root is the element itself, which
+    /// doesn't match, as with `querySelectorAll`.
+    #[tokio::test]
+    async fn role_in_an_element_scope_leaves_out_the_element() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let tab = Tab::new_for_test(sess);
+        let el = Element::from_jsret(tab, 21, "9.7.5".to_string());
+
+        let fut = tokio::spawn(async move {
+            let scope = QueryScope::Element(&el);
+            SelectorKind::Role(AriaRole::List, None)
+                .resolve_many(&scope)
+                .await
+        });
+
+        let id = expect(&mut mock, "Accessibility.queryAXTree").await;
+        assert_eq!(mock.last_sent()["params"]["objectId"], "9.7.5");
+        let nodes = json!({ "nodes": [
+            { "ignored": false, "backendDOMNodeId": 21 },
+            { "ignored": false, "backendDOMNodeId": 22 },
+        ] });
+        mock.reply(id, nodes).await;
+        let id = expect(&mut mock, "DOM.resolveNode").await;
+        assert_eq!(mock.last_sent()["params"]["backendNodeId"], 22);
+        mock.reply(id, json!({ "object": { "objectId": "9.7.6" } }))
             .await;
 
         let hits = fut.await.unwrap().unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].remote_object_id, "RN0");
-        assert_eq!(hits[0].backend_node_id, 42);
+        assert_eq!(hits[0].backend_node_id, 22);
         conn.shutdown();
     }
 
@@ -1617,11 +1669,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn role_many_frame_scope_pins_context_id_via_css_many_delegation() {
-        // resolve_role_many delegates to resolve_css_many, which already
-        // set contextId correctly before this fix. This test locks that
-        // (already-correct) transitive behavior so a future refactor of
-        // the role path can't silently drop it.
+    async fn role_many_frame_scope_queries_the_frames_document() {
+        // A Frame-scoped role query must root the accessibility query at
+        // the frame's own document, found in the frame's isolated world,
+        // not at the parent tab's.
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         let frame = frame_on(sess, "F1");
@@ -1642,16 +1693,16 @@ mod tests {
         assert_eq!(
             mock.last_sent()["params"]["contextId"],
             780,
-            "role_many must pin Runtime.evaluate to the frame's isolated-world contextId"
+            "role_many must find the document in the frame's isolated world"
         );
-        mock.reply(
-            id_q,
-            json!({ "result": { "type": "object", "subtype": "null" } }),
-        )
-        .await;
+        mock.reply(id_q, json!({ "result": { "objectId": "9.780.1" } }))
+            .await;
+        let id_ax = mock.expect_cmd("Accessibility.queryAXTree").await;
+        assert_eq!(mock.last_sent()["params"]["objectId"], "9.780.1");
+        mock.reply(id_ax, json!({ "nodes": [] })).await;
 
         let r = fut.await.unwrap().unwrap();
-        assert!(r.is_empty(), "null subtype must yield an empty Vec");
+        assert!(r.is_empty(), "no AX nodes must yield an empty Vec");
         conn.shutdown();
     }
 }
