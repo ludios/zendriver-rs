@@ -403,10 +403,10 @@ pub struct IdleOptions {
     /// the historical behavior: a single never-completing request keeps the
     /// tab non-idle until `timeout`.
     pub max_inflight_age: Option<Duration>,
-    /// How the wait reacts to a CDP event-stream delivery gap or end (a
-    /// lagging broadcast subscriber, a reconnect, the WebSocket dying, the
-    /// connection being shut down, or the tab closing) observed during the
-    /// wait. Default: [`IdleLossPolicy::Lenient`] — a gap is
+    /// How the wait reacts when the tab's request tracker misses events (its
+    /// subscription's queue overflowed) or stops getting them (a reconnect,
+    /// the WebSocket dying, the connection being shut down, or the tab
+    /// closing) during the wait. Default: [`IdleLossPolicy::Lenient`] — a gap is
     /// tolerated and the call still resolves best-effort, matching every
     /// prior release's behavior. Opt into [`IdleLossPolicy::Strict`] to fail
     /// loudly with [`ZendriverError::EventStreamIncomplete`] instead of
@@ -461,8 +461,8 @@ impl Tab {
         // `wait_for_idle` reads from the same `network_tracker` Arc. The
         // subscription is registered here, not in the task, so that it exists
         // when this returns: an event that arrives after that is queued for
-        // the task, whether or not the task has run yet. (`Network.enable`
-        // itself is `enable_network`'s job.)
+        // the task (until the queue overflows), whether or not the task has
+        // run yet. (`Network.enable` itself is `enable_network`'s job.)
         let network_tracker = crate::network_idle::InFlightTracker::new();
         let network_cancel = tokio_util::sync::CancellationToken::new();
         let network_events = session.events(crate::network_idle::TRACKED);
@@ -2013,7 +2013,9 @@ impl Tab {
         // their end, aborts it instead of silently reporting a
         // possibly-wrong idle.
         let strict = loss_policy == IdleLossPolicy::Strict;
-        let gaps_then = tracker.gaps.load(std::sync::atomic::Ordering::Relaxed);
+        // `gaps` before `ended`: the tracker sets `ended` before it counts
+        // the end, so a count that includes the end comes with `ended`.
+        let gaps_then = tracker.gaps.load(std::sync::atomic::Ordering::Acquire);
         if strict && tracker.ended.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(ZendriverError::EventStreamIncomplete);
         }
@@ -2029,7 +2031,7 @@ impl Tab {
             let notif = tracker.notifier.notified();
             tokio::pin!(notif);
             notif.as_mut().enable();
-            if strict && tracker.gaps.load(std::sync::atomic::Ordering::Relaxed) != gaps_then {
+            if strict && tracker.gaps.load(std::sync::atomic::Ordering::Acquire) != gaps_then {
                 return Err(ZendriverError::EventStreamIncomplete);
             }
 

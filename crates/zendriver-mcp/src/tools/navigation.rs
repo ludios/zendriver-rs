@@ -373,11 +373,11 @@ pub struct IdleInput {
     /// wait for every request to complete (the default).
     #[serde(default)]
     pub max_inflight_age_ms: Option<u64>,
-    /// Abort the wait with an error if the underlying event stream loses
-    /// delivery continuity (a lagging subscriber, a reconnect, or a dropped
-    /// connection) or ends (the tab is closed, or its connection is shut
-    /// down) while waiting. Default `false`: a delivery gap is
-    /// tolerated and the wait still resolves on a best-effort basis.
+    /// Abort the wait with an error if the tab's request tracker misses
+    /// events (its queue overflowed) or stops getting them (a reconnect, a
+    /// dropped connection, the tab closed, or its connection shut down)
+    /// while waiting. Default `false`: a delivery gap is tolerated and the
+    /// wait still resolves on a best-effort basis.
     #[serde(default)]
     pub strict: bool,
 }

@@ -33,7 +33,9 @@
 //!
 //! The task runs until the supplied [`CancellationToken`] fires — typically
 //! when the owning Tab is dropped (P4 wires `network_cancel` into
-//! `TabInner` so `Drop` triggers cancellation).
+//! `TabInner` so `Drop` triggers cancellation) — or the tab's events end.
+//! Should its subscription overflow, the task forgets the requests in
+//! flight (some may have finished unseen) and subscribes again.
 //!
 //! ## Why a separate task (not poll-on-demand)
 //!
@@ -90,8 +92,8 @@ pub enum IdleLossPolicy {
     #[default]
     Lenient,
     /// Abort the wait with [`crate::ZendriverError::EventStreamIncomplete`]
-    /// the instant the tab's request tracker misses events (the queue of
-    /// its subscription overflowed) or stops getting them (the tab's session
+    /// once the tab's request tracker has missed events (the queue of its
+    /// subscription overflowed) or stopped getting them (the tab's session
     /// detached, or its socket died or was shut or replaced), or at once if
     /// it had stopped before the wait began. Once that happens the wait can
     /// no longer prove nothing relevant to idleness was missed, so it
@@ -162,13 +164,14 @@ impl InFlightTracker {
     ///
     /// `events` is the subscription of the tab's `session` to [`TRACKED`],
     /// which [`crate::Tab::new`] registers before it spawns this, so that the
-    /// task's late start loses no event. Loops over
+    /// task's late start loses no event (short of an overflow). Loops over
     /// `Network.requestWillBeSent` (insert) and the two terminal events
     /// (`loadingFailed`, `loadingFinished` — both remove). Notifies the
     /// [`Notify`] on every membership change so `wait_for_idle` waiters wake
     /// immediately. An overflow of the subscription's queue counts as a gap
-    /// ([`Self::gaps`]), after which the tracker subscribes again; the
-    /// subscription's end counts as a gap too, and ends the tracker.
+    /// ([`Self::gaps`]), after which the tracker forgets the requests in
+    /// flight and subscribes again; the subscription's end counts as a gap
+    /// too, and ends the tracker.
     ///
     /// # Why `responseReceived` does not clear an entry
     ///
@@ -208,7 +211,13 @@ impl InFlightTracker {
                         Some(Ok(ev)) => ev,
                         Some(Err(SessionEnd::Overflowed)) => {
                             trace!("InFlightTracker: its queue overflowed; subscribing again");
-                            self.gaps.fetch_add(1, Ordering::Relaxed);
+                            // Some of the requests in flight may have
+                            // finished unseen, and would stay in flight for
+                            // good: forget them all.
+                            self.in_flight.lock().await.clear();
+                            // Release: a wait that sees this count sees the
+                            // cleared set (and, below, `ended`).
+                            self.gaps.fetch_add(1, Ordering::Release);
                             self.notifier.notify_waiters();
                             events = session.events(TRACKED);
                             continue;
@@ -218,7 +227,7 @@ impl InFlightTracker {
                             // doesn't sit forever on an ended stream.
                             trace!("InFlightTracker: event stream ended, exiting");
                             self.ended.store(true, Ordering::Relaxed);
-                            self.gaps.fetch_add(1, Ordering::Relaxed);
+                            self.gaps.fetch_add(1, Ordering::Release);
                             self.notifier.notify_waiters();
                             return;
                         }
