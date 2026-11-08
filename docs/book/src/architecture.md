@@ -89,10 +89,17 @@ instead.
 Most CDP usage thinks of events as "fire and forget — subscribe if you
 care". zendriver-rs has two layers:
 
-- **Broadcast subscribers** — `Tab` clones a per-target receiver from
-  the broadcast channel. Event helpers (`expect_request`, etc) drop
-  into this layer, filter on type + payload, and resolve a oneshot when
-  the first match arrives.
+- **Session subscribers** — everything that follows a tab's events (the
+  frame registry, the request tracker behind `wait_for_idle`, the load
+  and navigation waits, the `expect_*` helpers, the network monitor, the
+  interceptor) subscribes with `SessionHandle::events`: its own queue of
+  just the methods it asked for, of just its session, in the order Chrome
+  sent them and without gaps, until one end says why it stopped (the
+  session detached, the socket died, was shut down, or was replaced, or
+  the queue overflowed). A subscription is made before the action whose
+  events it awaits, so none can be missed. The connection-wide broadcast
+  (`Connection::subscribe_raw`, `subscribe_raw_accounted`) stays for raw
+  consumers that want every event, and can fall behind.
 - **Synchronous observers** — `TargetObserver` runs on
   `Target.attachedToTarget` **before** the new target's debugger pause
   is released. Stealth depends on this: the auto-attach observer
