@@ -197,11 +197,6 @@ impl Routes {
         self.capacity = capacity;
     }
 
-    /// Whether Chrome has detached the session `session_id`.
-    pub(crate) fn is_detached(&self, session_id: &str) -> bool {
-        self.detached.contains(session_id)
-    }
-
     /// Add a subscriber to the events of the session `session_id` whose
     /// method is one of `methods`.
     ///

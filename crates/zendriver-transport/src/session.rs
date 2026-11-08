@@ -14,7 +14,6 @@ use serde_json::Value;
 
 use crate::connection::Connection;
 use crate::error::CallError;
-use crate::frame::{AccountedRawEvent, RawEvent};
 use crate::routes::{self, SessionEvents};
 
 /// Cheap-to-clone handle binding a [`Connection`] to a specific CDP session.
@@ -133,10 +132,10 @@ impl SessionHandle {
     /// attached, `Detached` if Chrome detached the session, and otherwise the
     /// reason the connection's current socket stopped.
     ///
-    /// Unlike [`Self::subscribe`] and [`Self::subscribe_accounted`], which
-    /// filter one broadcast of every event of the connection, each stream
-    /// here has its own queue, filled by the connection's actor with only
-    /// the events asked for.
+    /// Unlike [`Connection::subscribe_raw`] and
+    /// [`Connection::subscribe_raw_accounted`], which filter one broadcast of
+    /// every event of the connection, each stream here has its own queue,
+    /// filled by the connection's actor with only the events asked for.
     ///
     /// # Panics
     ///
@@ -178,8 +177,14 @@ impl SessionHandle {
         )
     }
 
-    /// Subscribe to events of type `T` on this session. Matches a flat session's
-    /// `sessionId`, or (for a root session) frames that carry none.
+    /// Subscribe to this session's events of method `method`, decoded into
+    /// `T`: the events of [`Self::events`] for that one method, in order,
+    /// skipping one that doesn't decode as a `T`. The stream ends, without
+    /// saying why, where that one would yield its [`SessionEnd`](crate::routes::SessionEnd).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `method` has no `.` or has a `*` (see [`Self::events`]).
     pub fn subscribe<T>(
         &self,
         method: &'static str,
@@ -187,84 +192,12 @@ impl SessionHandle {
     where
         T: DeserializeOwned + Send + 'static,
     {
-        let sid = self.inner.session_id.clone();
-        let raw = self.inner.conn.subscribe_raw();
-        Box::pin(raw.filter_map(move |ev: RawEvent| {
-            let matches = ev.session_id == sid && ev.method == method;
-            async move {
-                matches
-                    .then(|| serde_json::from_value(ev.params).ok())
-                    .flatten()
-            }
+        Box::pin(self.events(&[method]).filter_map(|next| {
+            let decoded = next
+                .ok()
+                .and_then(|event| T::deserialize(&event.params).ok());
+            std::future::ready(decoded)
         }))
-    }
-
-    /// Subscribe to this session's events on the loss-accounted bus of
-    /// [`Connection::subscribe_raw_accounted`]: the events that carry this
-    /// session's `sessionId` (for a root session, the events that carry
-    /// none), whatever their method, and every marker of the connection
-    /// (`Lagged`, `Reconnected`, `Disconnected`, `Shutdown`). Since the
-    /// other sessions' events are left out, a gap between two `sequence`
-    /// values doesn't mean a loss here; only a `Lagged` does, and its
-    /// `missed` counts the lost events of every session.
-    ///
-    /// A flat session's stream also ends when Chrome detaches the session
-    /// (for example, because the session's target closed), since Chrome
-    /// sends no event of the session after that: at the
-    /// `Target.detachedFromTarget` naming the session, the stream yields
-    /// [`AccountedRawEvent::Shutdown`], with that event's generation, and
-    /// then ends. A stream that subscribes after the detach yields that
-    /// `Shutdown` (with the current generation) at once, and ends. A stream
-    /// that lost the detach in a `Lagged` gap never ends: like the
-    /// connection's stream, it reports the connection's end, and then stays
-    /// open.
-    pub fn subscribe_accounted(
-        &self,
-    ) -> impl Stream<Item = AccountedRawEvent> + Send + Unpin + use<> {
-        // Subscribe first, then check for a past detach: the actor records a
-        // detach before it broadcasts it, so a detach that this check misses
-        // arrives on the subscription, and one that the subscription misses
-        // (because it subscribed later) is found here.
-        let raw = self.inner.conn.subscribe_raw_accounted();
-        let session_id = self.inner.session_id.clone();
-        let detached_already = session_id
-            .as_ref()
-            .is_some_and(|sid| routes::lock(&self.inner.conn.inner.routes).is_detached(sid));
-        let past_detach = detached_already.then(|| AccountedRawEvent::Shutdown {
-            generation: self.inner.conn.connection_generation(),
-        });
-        // The state is `None` after the detach, which ends the stream.
-        let state = if detached_already {
-            None
-        } else {
-            Some((raw, session_id))
-        };
-        let events = futures::stream::unfold(state, |state| async move {
-            let (mut events, session_id) = state?;
-            loop {
-                let ev = events.next().await?;
-                if let AccountedRawEvent::Event {
-                    generation, event, ..
-                } = &ev
-                {
-                    let detached = event.method == "Target.detachedFromTarget"
-                        && session_id.is_some()
-                        && event.params["sessionId"].as_str() == session_id.as_deref();
-                    if detached {
-                        let end = AccountedRawEvent::Shutdown {
-                            generation: *generation,
-                        };
-                        return Some((end, None));
-                    }
-                    if event.session_id != session_id {
-                        continue;
-                    }
-                }
-                return Some((ev, Some((events, session_id))));
-            }
-        });
-        // An `Unfold` panics if polled after its end.
-        Box::pin(futures::stream::iter(past_detach).chain(events).fuse())
     }
 }
 
@@ -274,6 +207,7 @@ mod tests {
     use super::*;
     use crate::connection::spawn_actor;
     use crate::connection::test_only::duplex_pair;
+    use crate::frame::RawEvent;
     use crate::observer::{ObserverError, PausedSession, TargetObserver};
     use crate::routes::SessionEnd;
     use crate::testing::MockConnection;
@@ -334,99 +268,6 @@ mod tests {
 
         drop(call);
         conn.shutdown();
-    }
-
-    /// The next item of `events`, which must come within a second.
-    async fn next_within_a_second(
-        events: &mut (impl Stream<Item = AccountedRawEvent> + Unpin),
-    ) -> Option<AccountedRawEvent> {
-        tokio::time::timeout(std::time::Duration::from_secs(1), events.next())
-            .await
-            .unwrap()
-    }
-
-    /// A flat session's accounted stream skips the events of other sessions
-    /// (including another session's detach), and ends with `Shutdown` at its
-    /// own detach.
-    #[tokio::test]
-    async fn flat_accounted_stream_ends_at_its_own_detach() {
-        let (mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn, "S1");
-        let mut events = sess.subscribe_accounted();
-
-        mock.emit_event_for_session("Page.loadEventFired", json!({}), "S2")
-            .await;
-        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S2" }))
-            .await;
-        mock.emit_event_for_session("Page.frameStoppedLoading", json!({}), "S1")
-            .await;
-        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S1" }))
-            .await;
-
-        match next_within_a_second(&mut events).await {
-            Some(AccountedRawEvent::Event { event, .. }) => {
-                assert_eq!(event.method, "Page.frameStoppedLoading");
-            }
-            other => panic!("expected S1's event, got {other:?}"),
-        }
-        match next_within_a_second(&mut events).await {
-            Some(AccountedRawEvent::Shutdown { generation: 1 }) => {}
-            other => panic!("expected Shutdown, got {other:?}"),
-        }
-        assert!(next_within_a_second(&mut events).await.is_none());
-        assert!(next_within_a_second(&mut events).await.is_none());
-    }
-
-    /// A flat session's accounted stream that starts after the session's
-    /// detach ends at once, with `Shutdown`.
-    #[tokio::test]
-    async fn flat_accounted_stream_started_after_the_detach_ends_at_once() {
-        let (mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn, "S1");
-        // Seen through this stream, so that the actor has processed the
-        // detach before the next subscription.
-        let mut before = sess.subscribe_accounted();
-        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S1" }))
-            .await;
-        assert!(matches!(
-            next_within_a_second(&mut before).await,
-            Some(AccountedRawEvent::Shutdown { generation: 1 })
-        ));
-
-        let mut after = sess.subscribe_accounted();
-        match next_within_a_second(&mut after).await {
-            Some(AccountedRawEvent::Shutdown { generation: 1 }) => {}
-            other => panic!("expected Shutdown, got {other:?}"),
-        }
-        assert!(next_within_a_second(&mut after).await.is_none());
-    }
-
-    /// A root session has no session id for a detach to name: a detach on
-    /// its socket is just one of its events, and the stream goes on, passing
-    /// on the connection's markers.
-    #[tokio::test]
-    async fn root_accounted_stream_does_not_end_at_a_detach() {
-        let (mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new_root(conn.clone());
-        let mut events = sess.subscribe_accounted();
-
-        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S1" }))
-            .await;
-        mock.emit_event("Target.detachedFromTarget", json!({}))
-            .await;
-        for _ in 0..2 {
-            match next_within_a_second(&mut events).await {
-                Some(AccountedRawEvent::Event { event, .. }) => {
-                    assert_eq!(event.method, "Target.detachedFromTarget");
-                }
-                other => panic!("expected the detach event, got {other:?}"),
-            }
-        }
-        conn.shutdown();
-        match next_within_a_second(&mut events).await {
-            Some(AccountedRawEvent::Shutdown { generation: 1 }) => {}
-            other => panic!("expected Shutdown, got {other:?}"),
-        }
     }
 
     /// The next item of `events`, which must come within a second.
@@ -638,5 +479,39 @@ mod tests {
             drain(&mut handle.events(&["Page."])).await.1,
             SessionEnd::Reconnected
         );
+    }
+
+    /// `subscribe` decodes its method's events of its session, in order,
+    /// skips one that doesn't decode, and ends with the session.
+    #[tokio::test]
+    async fn subscribe_decodes_its_events_and_ends_with_the_session() {
+        #[derive(serde::Deserialize)]
+        struct Frame {
+            #[serde(rename = "frameId")]
+            frame_id: String,
+        }
+        let (mock, conn) = MockConnection::pair();
+        let mut frames =
+            SessionHandle::new(conn.clone(), "S1").subscribe::<Frame>("Page.frameAttached");
+        for (params, session) in [
+            (json!({ "frameId": "A" }), "S1"),
+            (json!({ "frameId": "X" }), "S2"),
+            (json!({ "frameId": 7 }), "S1"),
+            (json!({ "frameId": "B" }), "S1"),
+        ] {
+            mock.emit_event_for_session("Page.frameAttached", params, session)
+                .await;
+        }
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S1" }))
+            .await;
+        let mut ids = Vec::new();
+        while let Some(frame) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), frames.next())
+                .await
+                .unwrap()
+        {
+            ids.push(frame.frame_id);
+        }
+        assert_eq!(ids, ["A", "B"]);
     }
 }

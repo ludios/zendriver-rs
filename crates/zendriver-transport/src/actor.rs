@@ -430,12 +430,9 @@ pub(crate) async fn run_actor<S>(
                                                     "failed the pending commands of a detached session"
                                                 );
                                             }
-                                            // Recorded before the broadcast
-                                            // below, so that a subscription of
-                                            // this session that starts around
-                                            // now sees the detach on the bus
-                                            // or finds it here, never neither
-                                            // (see `SessionHandle::subscribe_accounted`).
+                                            // Ends the session's streams, and
+                                            // those of the sessions attached
+                                            // through it.
                                             if let Some(routes) = &routes {
                                                 routes::lock(routes)
                                                     .detach(accounted.generation, &ev.session_id);

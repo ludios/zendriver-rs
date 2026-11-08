@@ -167,10 +167,7 @@ pub(crate) struct ConnectionInner {
     /// ([`SessionHandle::events`](crate::session::SessionHandle::events)),
     /// and the sessions Chrome has detached. Shared with the actor, which
     /// takes it when it starts (holding the `ConnectionInner` itself would
-    /// keep the actor alive forever). The actor records a detach here before
-    /// it broadcasts the detach, so that a
-    /// [`SessionHandle::subscribe_accounted`](crate::session::SessionHandle::subscribe_accounted)
-    /// that starts after the detach still ends.
+    /// keep the actor alive forever).
     pub(crate) routes: Arc<Mutex<Routes>>,
     /// Cancellation token of the *current* actor. Swapped on reconnect: the
     /// old actor is cancelled (its already-dead `pending` drains) and the new

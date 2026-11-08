@@ -55,19 +55,16 @@ use tracing::trace;
 use zendriver_transport::{SessionEnd, SessionEvents, SessionHandle};
 
 /// Controls how [`crate::Tab::wait_for_idle_opts`] reacts when it notices —
-/// during its own wait window — that the underlying CDP event stream lost
-/// delivery continuity or ended: a lagging broadcast subscriber, a
-/// [`zendriver_transport::Connection::reconnect`], the WebSocket dying, the
-/// connection being shut down, or Chrome detaching the tab's session.
+/// during its own wait window — that the tab's request tracker missed
+/// events or stopped getting them: an overflow of its subscription's queue,
+/// a [`zendriver_transport::Connection::reconnect`], the WebSocket dying,
+/// the connection being shut down, or Chrome detaching the tab's session.
 ///
-/// This is independent of the in-flight tracker's own subscription (which
-/// always uses [`zendriver_transport::Connection::subscribe_raw`] and
-/// silently drops anything a lag causes it to miss — that's what keeps a
-/// tracker cheap enough to run for the whole lifetime of every
-/// [`crate::Tab`]). `IdleLossPolicy` only governs what one
-/// [`crate::Tab::wait_for_idle_opts`] *call* does when the opt-in
-/// [`zendriver_transport::SessionHandle::subscribe_accounted`] stream
-/// reports such a gap while that call is in progress.
+/// The tracker's subscription itself is the same under both policies: it
+/// gets the tab's request events in order and without gaps, until it
+/// overflows (after which it subscribes again) or ends. `IdleLossPolicy`
+/// only governs what one [`crate::Tab::wait_for_idle_opts`] *call* does when
+/// that happens while the call is in progress.
 ///
 /// # Examples
 ///

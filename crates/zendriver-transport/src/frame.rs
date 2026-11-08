@@ -77,9 +77,9 @@ pub struct RawEvent {
 }
 
 /// Loss-accounted event as delivered by
-/// [`Connection::subscribe_raw_accounted`](crate::connection::Connection::subscribe_raw_accounted),
-/// or, for one session, by
-/// [`SessionHandle::subscribe_accounted`](crate::session::SessionHandle::subscribe_accounted).
+/// [`Connection::subscribe_raw_accounted`](crate::connection::Connection::subscribe_raw_accounted).
+/// (For one session's events, in order and without gaps, see
+/// [`SessionHandle::events`](crate::session::SessionHandle::events).)
 ///
 /// [`Connection::subscribe_raw`](crate::connection::Connection::subscribe_raw)
 /// silently drops any [`RawEvent`] a lagging subscriber missed and has no way
@@ -109,10 +109,7 @@ pub enum AccountedRawEvent {
         /// [`AccountedRawEvent::Reconnected`]: the counter restarts at 1 for
         /// the new generation, and a `Lagged`'s `missed` may also count the
         /// non-sequenced `Reconnected`/`Disconnected`/`Shutdown` markers, so
-        /// only same-`generation` values are comparable. On the stream of
-        /// [`SessionHandle::subscribe_accounted`](crate::session::SessionHandle::subscribe_accounted),
-        /// which leaves out the other sessions' events, a gap doesn't by
-        /// itself mean a loss.
+        /// only same-`generation` values are comparable.
         sequence: u64,
         /// The underlying raw CDP event.
         event: RawEvent,
@@ -162,14 +159,8 @@ pub enum AccountedRawEvent {
     /// [`Connection::reconnect`](crate::connection::Connection::reconnect)
     /// also stops the current generation, but produces
     /// [`AccountedRawEvent::Reconnected`] instead.
-    ///
-    /// On the stream of a flat session's
-    /// [`SessionHandle::subscribe_accounted`](crate::session::SessionHandle::subscribe_accounted),
-    /// it also marks Chrome's detaching of the session (while the connection
-    /// lives on), and is the stream's last item.
     Shutdown {
-        /// Generation that was shut down, or, for a session's detach, the
-        /// generation whose socket carried the detach.
+        /// Generation that was shut down.
         generation: u64,
     },
 }

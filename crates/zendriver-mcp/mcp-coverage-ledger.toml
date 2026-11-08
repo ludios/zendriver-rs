@@ -594,10 +594,6 @@ api = "zendriver::Connection::subscribe_raw_accounted"
 excluded = "Stream-returning subscription; not a request/response tool"
 
 [[entry]]
-api = "zendriver::SessionHandle::subscribe_accounted"
-excluded = "Stream-returning subscription; not a request/response tool"
-
-[[entry]]
 api = "zendriver::Connection::connection_generation"
 excluded = "Stream-returning subscription; not a request/response tool"
 
