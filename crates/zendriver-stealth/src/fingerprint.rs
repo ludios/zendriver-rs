@@ -230,12 +230,16 @@ impl Fingerprint {
     /// Fold a [`Persona`](crate::Persona)'s explicitly-set fields into this
     /// fingerprint.
     ///
-    /// Five axes exist on both types — `timezone`, `locale`, `languages`,
-    /// `screen`, and the CPU count (`hardware_concurrency` on the persona,
-    /// `cpu_count` here) — and three separate consumers read them: the CDP
-    /// `Emulation.set*Override` calls, the `Accept-Language` header, and
-    /// (for the screen) the launch switches of
+    /// Seven axes exist on both types — `platform`, `timezone`, `locale`,
+    /// `languages`, `screen`, the CPU count (`hardware_concurrency` on the
+    /// persona, `cpu_count` here) and the memory size (`device_memory_gb`,
+    /// `memory_gb`) — and four separate consumers read them: the CDP
+    /// `Emulation.set*Override` calls, the `Accept-Language` header, the
+    /// bootstrap, and (for the screen) the launch switches of
     /// [`StealthObserver::headless_flags`](crate::StealthObserver::headless_flags).
+    /// A persona's `platform` that differs from this fingerprint's also
+    /// recomposes the UA and the UA client hints for it, as
+    /// [`StealthProfile::platform`](crate::StealthProfile::platform) does.
     /// Merging once, at the single point where a persona and a
     /// fingerprint meet
     /// ([`StealthObserver::with_persona`](crate::StealthObserver::with_persona)),
@@ -268,6 +272,13 @@ impl Fingerprint {
         }
         if let Some(cpu_count) = persona.hardware_concurrency {
             self.cpu_count = cpu_count;
+        }
+        if let Some(memory_gb) = persona.device_memory_gb {
+            self.memory_gb = memory_gb;
+        }
+        if let Some(platform) = persona.platform.filter(|&p| p != self.platform) {
+            self.platform = platform;
+            self.recompose();
         }
     }
 

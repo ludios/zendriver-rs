@@ -715,7 +715,7 @@ pub struct BrowserBuilder {
     /// [`BrowserBuilder::resolved_input_profile`].
     pub(crate) input_profile: Option<InputProfile>,
     /// Base fingerprint [`Persona`] driving the spoofed-mode surface patches.
-    /// `None` → [`Persona::system`] (host-probed) is used. See
+    /// `None` → [`Persona::system`] (which pins only a fresh seed) is used. See
     /// [`BrowserBuilder::persona`] and [`BrowserBuilder::resolved_persona`].
     pub(crate) persona: Option<Persona>,
     /// Optional overlay merged on top of the base persona (field-wise, `Some`
@@ -1543,7 +1543,7 @@ impl BrowserBuilder {
     /// `timezone`, `locale` / `languages` and `geolocation` — and the screen
     /// (see [`StealthProfile::screen`]).
     ///
-    /// When unset, [`Persona::system`] (host-probed) is used. Combine with
+    /// When unset, [`Persona::system`] (which pins only a fresh seed) is used. Combine with
     /// [`BrowserBuilder::persona_overlay`] for field-wise tweaks and
     /// [`BrowserBuilder::surface`] for per-surface render-strategy overrides;
     /// [`BrowserBuilder::resolved_persona`] returns the effective result.
@@ -1565,7 +1565,7 @@ impl BrowserBuilder {
     /// field in the overlay wins; `None` inherits from the base.
     ///
     /// Handy for layering a small JSON tweak (e.g. just a timezone) over a
-    /// host-probed or pool-sampled base persona.
+    /// default or a pool-sampled base persona.
     ///
     /// # Examples
     ///

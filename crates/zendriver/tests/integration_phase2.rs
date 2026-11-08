@@ -83,6 +83,25 @@ async fn spoofed_bootstrap_installs_under_a_csp_that_forbids_every_script() {
     );
 }
 
+/// A `StealthProfile`'s hardware pins reach the page when no persona pins
+/// other values: the base persona of a launch used to pin the host's.
+#[tokio::test]
+#[serial]
+async fn spoofed_profile_hardware_pins_reach_the_page() {
+    let server = FixtureServer::start().await;
+    let profile = StealthProfile::spoofed().cpu_count(3).memory_gb(2);
+    let browser = launch_for_test(Browser::builder().stealth(profile)).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url("127.0.0.1", "/plain")).await;
+    let seen = eval(
+        &tab,
+        "[navigator.hardwareConcurrency, navigator.deviceMemory]",
+    )
+    .await;
+    browser.close().await;
+    assert_eq!(seen, json!([3, 2]), "[hardwareConcurrency, deviceMemory]");
+}
+
 /// Chrome defines `navigator.deviceMemory` only in secure contexts, so the
 /// `spoofed` bootstrap mustn't define it on a plain-HTTP page.
 #[tokio::test]

@@ -233,8 +233,10 @@ differently-weighted list. Its first entry then becomes
 list is a mismatch no real browser produces.
 
 A [`Persona`](https://docs.rs/zendriver-stealth/latest/zendriver_stealth/struct.Persona.html)
-carries the same `timezone` / `locale` / `languages` / `screen` fields,
-and whichever ones it sets take precedence over the profile's. Anything
+carries the same `platform` / `timezone` / `locale` / `languages` /
+`screen` fields, plus the CPU count and memory size
+(`hardware_concurrency`, `device_memory_gb`), and whichever ones it sets
+take precedence over the profile's. Anything
 it leaves unset falls through to the values above, so a persona can pin
 one axis without restating the rest.
 

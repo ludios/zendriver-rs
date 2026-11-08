@@ -268,12 +268,14 @@ impl StealthObserver {
     /// patches. `fingerprint` still supplies the coherent UA / Chrome version.
     ///
     /// This is where the persona and the fingerprint are combined, so it is
-    /// where they are merged: the persona's `timezone` / `locale` /
-    /// `languages` / `screen` / `hardware_concurrency` are folded into
-    /// `fingerprint` up front, and every consumer below — the
-    /// `Emulation.set*Override` calls, the `Accept-Language` header, and the
-    /// launch switches of [`StealthObserver::headless_flags`] — then reads
-    /// that one merged value. An explicitly-set persona field wins over
+    /// where they are merged: the persona's `platform` / `timezone` /
+    /// `locale` / `languages` / `screen` / `hardware_concurrency` /
+    /// `device_memory_gb` are folded into `fingerprint` up front (see
+    /// [`Fingerprint::overlay_persona`]), and every consumer below — the
+    /// `Emulation.set*Override` calls, the `Accept-Language` header, the
+    /// bootstrap, and the launch switches of
+    /// [`StealthObserver::headless_flags`] — then reads that one merged
+    /// value. An explicitly-set persona field wins over
     /// the fingerprint's; `None` inherits the fingerprint's.
     #[must_use]
     pub fn with_persona(
@@ -1469,6 +1471,28 @@ mod persona_reaches_cdp_tests {
                     method_names(frames)
                 )
             })
+    }
+
+    /// A persona's platform reaches the UA, the UA client hints and
+    /// `navigator.platform` together, not only the GPU that the bootstrap
+    /// presents.
+    #[tokio::test]
+    async fn a_persona_platform_recomposes_the_user_agent_and_its_client_hints() {
+        let persona = Persona {
+            platform: Some(Platform::Win32),
+            ..Persona::default()
+        };
+        let frames = drive_attach(StealthObserver::with_persona(
+            StealthProfile::spoofed(),
+            bare_fingerprint(),
+            persona,
+        ))
+        .await;
+        let sent = params(&frames, "Emulation.setUserAgentOverride");
+        let user_agent = sent["userAgent"].as_str().unwrap_or_default();
+        assert!(user_agent.contains("Windows NT"), "userAgent {user_agent}");
+        assert_eq!(sent["platform"], "Win32");
+        assert_eq!(sent["userAgentMetadata"]["platform"], "Windows");
     }
 
     /// The CPU-count override takes the persona's count, else the
