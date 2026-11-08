@@ -161,8 +161,8 @@ async fn scroll_into_view_scrolls_deep_child() {
     let el = tab.find().css("#bottom").one().await.unwrap();
     el.scroll_into_view().await.unwrap();
 
-    // After scroll_into_view (block:'center'), the element's top should be
-    // within the viewport (0 .. innerHeight).
+    // After scroll_into_view, the element's top should be within the
+    // viewport (0 .. innerHeight).
     let in_viewport: bool = tab
         .evaluate_main(
             "(() => { \

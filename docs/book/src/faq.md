@@ -41,9 +41,11 @@ Common causes:
   or the nearest `aria-disabled` around it says `true`, or it is a custom
   element with a `disabled` attribute. The gate waits for the page to
   enable it; see `Element::is_enabled` for the exact rules.
-- **Hit-test failure** — a modal overlay sits above the element. Close
-  the overlay first, or pass `ClickOptions { force: true, ..default() }`
-  to bypass the check.
+- **Hit-test failure** — a modal overlay, or a sticky header or footer,
+  sits above the element. (The scroll that an action runs first moves an
+  element only when it isn't in view, so an element under a sticky header
+  stays there.) Close the overlay or scroll the page first, or pass
+  `ClickOptions { force: true, ..default() }` to bypass the check.
 - **Animation** — the element is still moving. Wait for
   `tab.wait_for_idle().await?` before clicking; the gate retries a few
   frames automatically but won't wait through a 2-second CSS transition.

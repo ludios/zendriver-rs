@@ -188,9 +188,8 @@ mod tests {
 
         // Step 2: actionability gate (VISIBLE_ONLY = only check_visible).
         //
-        // The predicate is asserted by what it is NOT: its JS is owned by
-        // `query::actionability` and gets rewritten there, but "the gate is
-        // not the scroll" is the property this test needs.
+        // The scroll is a CDP command, so the first `Runtime.callFunctionOn`
+        // is the gate's visibility predicate.
         let gate_js = serve_call_js(&mut mock, json!({ "value": true, "type": "boolean" })).await;
         assert!(
             gate_js.contains("getBoundingClientRect"),

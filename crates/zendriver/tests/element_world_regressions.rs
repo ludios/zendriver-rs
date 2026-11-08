@@ -359,9 +359,9 @@ async fn hover_and_click_reach_an_element_inside_an_iframe() {
 /// exercises.
 ///
 /// The fixture puts the field LAST in a document taller than any viewport, so
-/// `scrollIntoView({ block: 'center' })` clamps at the document bottom
-/// instead of centring and parks the field against the real viewport's lower
-/// edge — inside the band. A field that *can* be centred lands mid-viewport
+/// the scroll that `focus` runs first, which centres an element out of view,
+/// clamps at the document bottom instead of centring and parks the field
+/// against the real viewport's lower edge — inside the band. A field that *can* be centred lands mid-viewport
 /// and hides the bug entirely, which is why the geometry is measured at
 /// runtime rather than assumed: a fixture that stops landing in the band
 /// fails loudly instead of passing vacuously.

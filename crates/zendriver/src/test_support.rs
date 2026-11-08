@@ -138,12 +138,34 @@ pub(crate) async fn drain_mouse_dispatches(mock: &mut MockConnection) -> Vec<Val
     frames
 }
 
-/// Serve the `scroll_into_view` (`DOM.scrollIntoViewIfNeeded`) that an
-/// action runs before its actionability gate. Waiting for that very command
-/// fails the test if the scroll ever goes missing.
+/// Serve a `scroll_into_view` (`DOM.scrollIntoViewIfNeeded` for the whole
+/// element), as `focus` and `screenshot` run it before their actionability
+/// gate. Waiting for that very command fails the test if the scroll ever
+/// goes missing.
 pub(crate) async fn serve_scroll_into_view(mock: &mut MockConnection) {
     let id = expect(mock, "DOM.scrollIntoViewIfNeeded").await;
+    assert!(
+        mock.last_sent()["params"]["objectId"].is_string(),
+        "the scroll must name the element: {}",
+        mock.last_sent()
+    );
+    assert!(mock.last_sent()["params"].get("rect").is_none());
     mock.reply(id, json!({})).await;
+}
+
+/// Serve the scroll that a pointer action (click, tap, hover, ...) runs
+/// before its actionability gate: the element's box ([`box_model_reply`]),
+/// then `DOM.scrollIntoViewIfNeeded` for a one-pixel rect at the point the
+/// action dispatches at. Returns that rect.
+pub(crate) async fn serve_scroll_point_into_view(mock: &mut MockConnection) -> Value {
+    let id = expect(mock, "DOM.getBoxModel").await;
+    mock.reply(id, box_model_reply()).await;
+    let id = expect(mock, "DOM.scrollIntoViewIfNeeded").await;
+    let rect = mock.last_sent()["params"]["rect"].clone();
+    assert_eq!(rect["width"], 1, "{rect}");
+    assert_eq!(rect["height"], 1, "{rect}");
+    mock.reply(id, json!({})).await;
+    rect
 }
 
 /// Serve one pass of the actionability gate for `require`, answering every

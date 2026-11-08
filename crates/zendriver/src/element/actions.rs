@@ -37,7 +37,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::element::Element;
 use crate::error::{Result, ZendriverError};
@@ -256,7 +256,7 @@ impl Element {
     /// ```
     pub async fn click_with(&self, opts: ClickOptions) -> Result<()> {
         self.with_refresh(|| async move {
-            self.scroll_into_view().await?;
+            self.scroll_point_into_view(opts.position).await?;
             if !opts.force {
                 actionability::wait_actionable(
                     self,
@@ -313,7 +313,7 @@ impl Element {
     /// ```
     pub async fn tap(&self) -> Result<()> {
         self.with_refresh(|| async move {
-            self.scroll_into_view().await?;
+            self.scroll_point_into_view(None).await?;
             actionability::wait_actionable(
                 self,
                 ActionabilityCheck::FULL,
@@ -350,7 +350,7 @@ impl Element {
     /// ```
     pub async fn hover(&self) -> Result<()> {
         self.with_refresh(|| async move {
-            self.scroll_into_view().await?;
+            self.scroll_point_into_view(None).await?;
             actionability::wait_actionable(
                 self,
                 ActionabilityCheck::HOVER,
@@ -389,7 +389,7 @@ impl Element {
     /// ```
     pub async fn hover_fast(&self) -> Result<()> {
         self.with_refresh(|| async move {
-            self.scroll_into_view().await?;
+            self.scroll_point_into_view(None).await?;
             actionability::wait_actionable(
                 self,
                 ActionabilityCheck::HOVER,
@@ -456,13 +456,19 @@ impl Element {
     ///
     /// In each scroll container (and the page), an element that is already
     /// fully in view isn't scrolled at all; one that is partly in view is
-    /// scrolled just far enough to be in view; and any other is centered.
-    /// So an element under a sticky header counts as in view and stays under
-    /// it; the actionability gate then reports it occluded. The scroll is
-    /// instant, so the post-scroll bbox is final by the time the next CDP
-    /// call (e.g. `bounding_box`) runs. An element with no box (under
-    /// `display: none`) isn't scrolled, and no error is raised: the gate
-    /// reports it not visible.
+    /// usually scrolled just far enough to be in view; and any other is
+    /// centered. (An element bigger than the viewport that covers it counts
+    /// as in view.) So an element under a sticky header counts as in view
+    /// and stays under it. The scroll is instant, so the post-scroll bbox is
+    /// final by the time the next CDP call (e.g. `bounding_box`) runs.
+    ///
+    /// An element with no box (under `display: none`) or one that the page
+    /// has removed isn't scrolled, and raises no error; an action's
+    /// actionability gate, which follows its scroll, then reports it not
+    /// visible. Click, tap, hover, [`Element::flash`] and
+    /// [`Element::mouse_drag`] scroll the point they dispatch at instead of
+    /// the whole element, so that the point is in view even when the
+    /// element is bigger than the viewport.
     ///
     /// No actionability gate: this method IS the visibility prerequisite
     /// for the other actions; gating it on visibility would deadlock.
@@ -478,19 +484,30 @@ impl Element {
     /// # Ok(()) }
     /// ```
     pub async fn scroll_into_view(&self) -> Result<()> {
-        self.with_refresh(|| async move {
+        self.scroll_rect_into_view(None).await
+    }
+
+    /// Send `DOM.scrollIntoViewIfNeeded` for this element, or for `rect` of
+    /// it (`{ x, y, width, height }` in CSS pixels, relative to its border
+    /// box's top-left corner). An element with no box, or one that the page
+    /// has removed, is left alone, with no error (see
+    /// [`Element::scroll_into_view`]).
+    async fn scroll_rect_into_view(&self, rect: Option<Value>) -> Result<()> {
+        self.with_refresh(|| async {
             let object_id = self.remote_object_id_cloned().await?;
+            let mut params = json!({ "objectId": object_id });
+            if let Some(rect) = &rect {
+                params["rect"] = rect.clone();
+            }
             let res = self
                 .inner
                 .tab
-                .call(
-                    "DOM.scrollIntoViewIfNeeded",
-                    json!({ "objectId": object_id }),
-                )
+                .call("DOM.scrollIntoViewIfNeeded", params)
                 .await;
             match res {
                 Err(ZendriverError::Cdp { ref message, .. })
-                    if message.contains("does not have a layout object") =>
+                    if message.contains("does not have a layout object")
+                        || message.contains("Node is detached from document") =>
                 {
                     Ok(())
                 }
@@ -498,6 +515,20 @@ impl Element {
             }
         })
         .await
+    }
+
+    /// Scroll the point of this element that a pointer action dispatches at
+    /// into view, if it isn't already: `point`, an offset from the top-left
+    /// corner of the element's [`Element::bounding_box`], or else the box's
+    /// centre. Asks Chrome for a one-pixel rect there, so an element bigger
+    /// than the viewport is scrolled until that point is in view.
+    pub(crate) async fn scroll_point_into_view(&self, point: Option<(f64, f64)>) -> Result<()> {
+        let Some(bbox) = self.bounding_box().await? else {
+            return self.scroll_rect_into_view(None).await;
+        };
+        let (dx, dy) = point.unwrap_or((bbox.width / 2.0, bbox.height / 2.0));
+        let rect = json!({ "x": dx, "y": dy, "width": 1, "height": 1 });
+        self.scroll_rect_into_view(Some(rect)).await
     }
 
     /// Set this element's `value` + fire bubbled `input` and `change` events.
@@ -800,7 +831,7 @@ impl Element {
     pub async fn flash(&self, duration: Duration) -> Result<()> {
         let ms = duration.as_millis();
         self.with_refresh(|| async move {
-            self.scroll_into_view().await?;
+            self.scroll_point_into_view(None).await?;
             let bbox = match self.bounding_box().await? {
                 Some(b) => b,
                 // No box to point at — nothing to flash.
@@ -922,7 +953,7 @@ z-index:2147483647;pointer-events:none;opacity:0.85;'; \
     /// ```
     pub async fn mouse_drag(&self, to: (f64, f64), steps: usize) -> Result<()> {
         self.with_refresh(|| async move {
-            self.scroll_into_view().await?;
+            self.scroll_point_into_view(None).await?;
             let bbox = self
                 .bounding_box()
                 .await?
@@ -942,9 +973,33 @@ z-index:2147483647;pointer-events:none;opacity:0.85;'; \
 mod tests {
     use super::*;
     use crate::tab::Tab;
-    use crate::test_support::{expect, js_params, serve_gate_probes, serve_scroll_into_view};
+    use crate::test_support::{
+        expect, js_params, serve_gate_probes, serve_scroll_into_view, serve_scroll_point_into_view,
+    };
     use zendriver_transport::SessionHandle;
     use zendriver_transport::testing::MockConnection;
+
+    /// Chrome's two answers for an element it can't scroll to, one with no
+    /// box and one that the page removed, leave `scroll_into_view` with no
+    /// error, so that the action's gate decides.
+    #[tokio::test]
+    async fn scroll_into_view_leaves_an_element_without_a_box_alone() {
+        for message in [
+            "Node does not have a layout object",
+            "Node is detached from document",
+        ] {
+            let (mut mock, conn) = MockConnection::pair();
+            let tab = Tab::new_for_test(SessionHandle::new(conn.clone(), "S1"));
+            let el = Element::from_jsret(tab, 99, "R1".to_string());
+            let fut = tokio::spawn(async move { el.scroll_into_view().await });
+            let id = expect(&mut mock, "DOM.scrollIntoViewIfNeeded").await;
+            mock.reply_err(id, -32000, message).await;
+            fut.await
+                .unwrap()
+                .unwrap_or_else(|e| panic!("{message}: {e}"));
+            conn.shutdown();
+        }
+    }
 
     #[tokio::test]
     async fn hover_dispatches_input_dispatchmouseevent_with_type_mousemoved() {
@@ -963,7 +1018,7 @@ mod tests {
         });
 
         // Step 1: scroll_into_view.
-        serve_scroll_into_view(&mut mock).await;
+        serve_scroll_point_into_view(&mut mock).await;
 
         // Step 2: actionability gate — visible → stable → receives_pointer
         // (gate order is visible → enabled → stable → receives_pointer, and
@@ -1041,7 +1096,11 @@ mod tests {
         });
 
         // Step 1: scroll_into_view.
-        serve_scroll_into_view(&mut mock).await;
+        let rect = serve_scroll_point_into_view(&mut mock).await;
+        assert_eq!(
+            (rect["x"].as_f64(), rect["y"].as_f64()),
+            (Some(50.0), Some(25.0))
+        );
 
         // Step 2: actionability gate (FULL = visible → enabled → stable →
         // receives_pointer); reply true to each.
@@ -1131,7 +1190,7 @@ mod tests {
         });
 
         // Step 1: scroll_into_view.
-        serve_scroll_into_view(&mut mock).await;
+        serve_scroll_point_into_view(&mut mock).await;
 
         // Step 2: actionability gate (FULL = visible → enabled → stable →
         // receives_pointer), matching `click`'s gate.
@@ -1464,7 +1523,7 @@ mod tests {
         });
 
         // Step 1: scroll_into_view.
-        serve_scroll_into_view(&mut mock).await;
+        serve_scroll_point_into_view(&mut mock).await;
 
         // Step 2: bounding_box → DOM.getBoxModel. Box top-left (10,20), 100x50
         // ⇒ center (60, 45).
@@ -1560,7 +1619,7 @@ mod tests {
         });
 
         // Step 1: scroll_into_view.
-        serve_scroll_into_view(&mut mock).await;
+        serve_scroll_point_into_view(&mut mock).await;
 
         // Step 2: bounding_box → DOM.getBoxModel. Box top-left (10,20), 100x50
         // ⇒ center (60, 45) = the drag source.
