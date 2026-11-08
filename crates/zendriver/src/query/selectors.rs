@@ -753,7 +753,8 @@ const AX_QUERY_BUDGET: Duration = Duration::from_secs(10);
 
 /// Every element under `scope` whose computed role is `role`, and, if
 /// `name` is given, whose computed accessible name contains `name`
-/// (case-insensitively), in document order.
+/// (case-insensitively), in the accessibility tree's order: document order,
+/// except where `aria-owns` moves an element.
 ///
 /// `Accessibility.queryAXTree` computes them, so an element matches by
 /// the role it has implicitly (`<a href>` is a link, `<h1>` a heading) as
@@ -761,13 +762,18 @@ const AX_QUERY_BUDGET: Duration = Duration::from_secs(10);
 /// `aria-labelledby`, a `<label>` or its text. Like Playwright's
 /// `getByRole`, it leaves out what the tree hides: an element under
 /// `display: none` or `visibility: hidden`, and one that Chrome ignores
-/// (under `aria-hidden="true"`, say). It includes elements in shadow
-/// roots, closed ones too, and doesn't descend into iframes.
+/// (under `aria-hidden="true"` or `inert`, or outside an open modal
+/// `<dialog>`). It includes elements in shadow roots, closed ones too, and
+/// doesn't descend into iframes. An Element scope whose element Chrome
+/// leaves out of the tree (one with `role="presentation"` or `"none"`,
+/// including a cell of a presentational table) finds nothing, because
+/// Chrome's search starts from that element's place in the tree.
 ///
-/// In a background tab without focus emulation (under
-/// `StealthProfile::off`), Chrome doesn't answer; after
-/// [`AX_QUERY_BUDGET`], this fails with [`ZendriverError::CdpTimeout`] for
-/// `Accessibility.queryAXTree`, and logs why.
+/// When Chrome doesn't answer within [`AX_QUERY_BUDGET`] (in a background
+/// tab without focus emulation, under `StealthProfile::off`, say), this
+/// fails with [`ZendriverError::CdpTimeout`] for
+/// `Accessibility.queryAXTree`, and logs the likely causes. A match that
+/// leaves the page before it is resolved is left out.
 ///
 /// The scope's root (the document, or the element of an Element scope)
 /// is an object in zendriver's isolated world, so each match is resolved
@@ -804,8 +810,9 @@ async fn resolve_role_many(
     if let Err(CallError::Timeout { .. }) = &reply {
         warn!(
             "Chrome's accessibility tree didn't answer a role query within {AX_QUERY_BUDGET:?}. \
-             It answers only while the page renders, which a background tab does only with \
-             focus emulation (StealthProfile::native or spoofed). Activate the tab first."
+             It answers only once the page renders again, which a background tab does only \
+             with focus emulation (StealthProfile::native or spoofed; else activate the tab), \
+             and a page that is navigating away, or an offscreen cross-origin iframe, may not."
         );
     }
     let reply = reply?;
@@ -833,7 +840,17 @@ async fn resolve_role_many(
                 "DOM.resolveNode",
                 json!({ "backendNodeId": backend_node_id, "executionContextId": context_id }),
             )
-            .await?;
+            .await;
+        let resolved = match resolved {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                let e = ZendriverError::from(e);
+                if crate::element::refresh::is_stale_node_error(&e) {
+                    continue;
+                }
+                return Err(e);
+            }
+        };
         let Some(object_id) = resolved["object"]["objectId"].as_str() else {
             continue;
         };
@@ -1468,7 +1485,7 @@ mod tests {
         assert_eq!(mock.last_sent()["params"]["role"], "button");
         let nodes = json!({ "nodes": [
             { "ignored": false, "backendDOMNodeId": 11, "name": { "value": "Save draft" } },
-            { "ignored": true, "backendDOMNodeId": 12 },
+            { "ignored": true, "backendDOMNodeId": 12, "name": { "value": "Save ignored" } },
             { "ignored": false, "backendDOMNodeId": 13, "name": { "value": "Cancel" } },
             { "ignored": false, "backendDOMNodeId": 14, "name": { "value": "Autosave" } },
         ] });

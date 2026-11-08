@@ -113,12 +113,6 @@ the default `native`, zendriver's focus emulation keeps every tab
 visible and focused, so those two differ between tabs only under
 `StealthProfile::off()`.)
 
-Role queries (`find().role(..)`) are one such feature: they ask Chrome's
-accessibility tree, which answers only while the page renders, and a
-background tab renders only under focus emulation. So under
-`StealthProfile::off()`, a role query in a background tab fails after
-10 s with `ZendriverError::CdpTimeout` for `Accessibility.queryAXTree`.
-
 The fix is to activate the tab before the input sequence:
 
 ```rust,no_run
@@ -136,6 +130,13 @@ working. But `activate` brings the tab to the front of its window, so
 the tab that was in front there becomes a background tab. On Linux,
 that tab's page then sees its viewport as its window (see the
 [concurrency note](#concurrency-note)).
+
+Role queries (`find().role(..)`) depend on rendering too: they ask
+Chrome's accessibility tree, which answers only while the page renders,
+and a background tab renders only under focus emulation. So under
+`StealthProfile::off()`, a role query in a background tab fails after
+10 s with `ZendriverError::CdpTimeout` for `Accessibility.queryAXTree`;
+activate the tab before the query.
 
 ## Closing tabs
 

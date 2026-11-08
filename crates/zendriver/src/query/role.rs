@@ -5,13 +5,20 @@
 /// An ARIA role for use with [`crate::query::FindBuilder::role`].
 ///
 /// Covers the common WAI-ARIA roles. For roles not enumerated here, use
-/// [`AriaRole::Other`] with a `&'static str` of the role name.
+/// [`AriaRole::Other`] with a `&'static str` of the role name. A query
+/// matches the role that Chrome's accessibility tree computes, whether an
+/// element has it implicitly (`<button>`) or by a `role` attribute.
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
+/// # async fn ex() -> zendriver::Result<()> {
+/// # let browser = zendriver::Browser::builder().launch().await?;
+/// # let tab = browser.main_tab();
 /// use zendriver::AriaRole;
-/// assert_eq!(AriaRole::Button.to_css(), r#"[role="button"]"#);
+/// let links = tab.find_all().role(AriaRole::Link).many().await?;
+/// # let _ = links;
+/// # Ok(()) }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AriaRole {
@@ -126,6 +133,15 @@ mod tests {
     #[test]
     fn button_compiles_to_attribute_selector() {
         assert_eq!(AriaRole::Button.to_css(), r#"[role="button"]"#);
+    }
+
+    /// Chrome's accessibility tree calls ARIA's `img` by its synonym
+    /// `image`; every other role keeps its ARIA name.
+    #[test]
+    fn ax_name_is_chromes_name_for_the_role() {
+        assert_eq!(AriaRole::Other("img").ax_name(), "image");
+        assert_eq!(AriaRole::Other("tooltip").ax_name(), "tooltip");
+        assert_eq!(AriaRole::Columnheader.ax_name(), "columnheader");
     }
 
     #[test]

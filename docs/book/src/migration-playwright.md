@@ -26,7 +26,7 @@ same shape).
 | Wait for the next navigation | `await Promise.all([page.waitForNavigation(), locator.click()])` (deprecated there in favour of `waitForURL`) | `let nav = tab.expect_navigation(); el.click().await?; nav.await?` |
 | Find one element (CSS) | `page.locator("button").click()` | `tab.find().css("button").one().await?.click().await?` |
 | Find by text | `page.getByText("Submit")` | `tab.find().text("Submit").one().await?` |
-| Find by ARIA role | `page.getByRole("button", { name: "Go" })` | `tab.find().role(AriaRole::Button).name("Go").one().await?` |
+| Find by ARIA role | `page.getByRole("button", { name: "Go" })` | `tab.find().role_named(AriaRole::Button, "Go").one().await?` |
 | Find by XPath | `page.locator("xpath=//button")` | `tab.find().xpath("//button").one().await?` |
 | Find all | `await page.locator("li").all()` | `tab.find().css("li").many().await?` |
 | Get nth match | `page.locator("li").nth(2)` | `tab.find().css("li").nth(2).one().await?` |

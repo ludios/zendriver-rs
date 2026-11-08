@@ -99,8 +99,10 @@ chain encodes both the selector and any modifiers:
 - `.text("Submit")` — text-content matcher (anchor-style "find by
   visible text").
 - `.xpath("//div[@id='main']")` — XPath escape hatch.
-- `.role(AriaRole::Button)` — ARIA-role + accessible-name match
-  (Playwright-style).
+- `.role(AriaRole::Button)` — the role that Chrome's accessibility tree
+  computes, implicit (`<button>`) or explicit (`role="button"`);
+  `.role_named(AriaRole::Button, "Save")` also matches the accessible
+  name (Playwright-style).
 - `.tag("button").attr_contains("class", "primary").containing_text("Buy")`
   — bs4-like combinable *predicate* finders (`tag`, `attr`, `attr_contains`,
   `attr_starts_with`, `attr_ends_with`, `has_attr`, `attr_regex`,
