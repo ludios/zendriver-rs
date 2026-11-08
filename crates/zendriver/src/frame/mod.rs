@@ -17,13 +17,13 @@
 //! # Ok(()) }
 //! ```
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use zendriver_transport::SessionHandle;
 
 use crate::error::{Result, ZendriverError};
@@ -33,7 +33,6 @@ use crate::tab::{Tab, TabInner};
 
 pub mod lifecycle;
 pub mod oopif;
-pub(crate) mod tree;
 
 /// Default wait window for [`Frame::wait_for_load`]. Mirrors the constant
 /// in [`crate::tab::Tab::wait_for_load`] so single-frame and tab-level
@@ -83,17 +82,6 @@ pub(crate) struct FrameInner {
     /// frame shares the owning tab's session; OOPIFs attach to a distinct
     /// child session whose handle is plumbed in at construction.
     pub(crate) session: SessionHandle,
-    /// The `frameId` under which [`Frame::ensure_isolated_world`] last found
-    /// this frame in the frame tree, after Chrome had rejected `frame_id`
-    /// (see [`Frame::id`]). Its later calls try this id first. `None` until
-    /// then.
-    pub(crate) rebound_frame_id: Mutex<Option<String>>,
-    /// Set by [`lifecycle`] when Chrome reports this frame detached
-    /// (`Page.frameDetached`). Then [`Frame::ensure_isolated_world`] fails
-    /// with [`ZendriverError::FrameNotFound`] instead of rebinding this
-    /// handle to another frame. Best effort: the subscriber can miss the
-    /// event (see the [`lifecycle`] module docs).
-    pub(crate) detached: AtomicBool,
     /// Weak ref to the owning tab. Upgraded by
     /// [`Frame::tab_for_synthesize`] when the query layer needs to wrap
     /// a `RemoteRef` in an `Element` (the `Element` stores an owned
@@ -126,23 +114,16 @@ impl Frame {
                 url: RwLock::new(url),
                 name,
                 session,
-                rebound_frame_id: Mutex::new(None),
-                detached: AtomicBool::new(false),
                 tab,
             }),
         }
     }
 
-    /// The frame's CDP `frameId`, as recorded when this handle was built.
-    ///
-    /// The value never changes on a given handle, which is not the same as
-    /// naming the frame forever. Chrome sometimes re-attaches an iframe
-    /// under a fresh `frameId` with no `Page.frameDetached` in between (seen
-    /// on `srcdoc` iframes under `--headless=new`), and this handle goes on
-    /// reporting the id it was built with. [`Frame::evaluate`] and the query
-    /// methods recover on their own by rebinding against the live frame
-    /// tree; a caller that hands this id to CDP itself can instead get
-    /// "No frame for given id found".
+    /// The frame's CDP `frameId`. Chrome keeps it for the frame's whole life
+    /// (it is the frame tree node's DevTools token, which a move to another
+    /// process keeps), so once Chrome rejects it with "No frame for given id
+    /// found", the frame is gone from this tab's session: it was removed, or
+    /// it moved to another renderer process (an out-of-process iframe).
     ///
     /// # Examples
     ///
@@ -680,34 +661,24 @@ impl Frame {
     /// another context in the same way, if such a navigation commits before
     /// Chrome handles the caller's command that uses the id.
     ///
-    /// If Chrome has re-attached the frame under a fresh `frameId` (observed
-    /// for `srcdoc` iframes under `--headless=new`, with no `frameDetached`
-    /// in between), it rejects the recorded id with "No frame for given id
-    /// found". Then this finds the live id in the frame tree, remembers it
-    /// for later calls, and retries with it. Unless Chrome reported the
-    /// frame detached: then the frame is gone, and a frame found in the
-    /// tree would be another one.
+    /// # Errors
+    ///
+    /// [`ZendriverError::FrameNotFound`] when Chrome rejects the frame's id:
+    /// the frame is gone from this tab's session (see [`Frame::id`]).
     pub(crate) async fn ensure_isolated_world(&self) -> Result<i64> {
-        let rebound = self.inner.rebound_frame_id.lock().await.clone();
-        let frame_id = rebound.as_deref().unwrap_or(&self.inner.frame_id);
-        match self.create_isolated_world(frame_id).await {
+        match self.create_isolated_world(&self.inner.frame_id).await {
             Err(ZendriverError::Cdp {
                 code: -32602,
                 ref message,
                 ..
-            }) if message.contains("No frame for given id") => {}
-            other => return other,
+            }) if message.contains("No frame for given id") => {
+                Err(ZendriverError::FrameNotFound(format!(
+                    "frame {} is gone from this tab's session (removed, or moved to another process)",
+                    self.inner.frame_id
+                )))
+            }
+            other => other,
         }
-        if self.inner.detached.load(Ordering::Relaxed) {
-            return Err(ZendriverError::FrameNotFound(format!(
-                "frame {} was detached",
-                self.inner.frame_id
-            )));
-        }
-        let live = self.discover_current_frame_id().await?;
-        let ctx = self.create_isolated_world(&live).await?;
-        *self.inner.rebound_frame_id.lock().await = Some(live);
-        Ok(ctx)
     }
 
     async fn create_isolated_world(&self, frame_id: &str) -> Result<i64> {
@@ -728,118 +699,6 @@ impl Frame {
                 "Page.createIsolatedWorld did not return executionContextId".into(),
             )
         })
-    }
-
-    /// Find the frame id Chrome currently uses for this frame, by locating
-    /// it in the live `Page.getFrameTree`.
-    ///
-    /// Only [`FrameInner::rebound_frame_id`] records the result.
-    /// [`FrameInner::frame_id`] is immutable, so [`Frame::id`] keeps
-    /// returning the id Chrome rejected, and so does anything filtering on
-    /// it — notably [`Frame::wait_for_load`], whose
-    /// `Page.frameStoppedLoading` filter can then never match and always
-    /// burns its full timeout. `evaluate` / `find` recover because they
-    /// go through [`Frame::ensure_isolated_world`]; nothing that reads the
-    /// id does. Making `frame_id` interior-mutable would fix that too, and
-    /// is a separate change.
-    ///
-    /// The probe runs on the transport's default call budget
-    /// ([`zendriver_transport::DEFAULT_CALL_TIMEOUT`]), like every other CDP
-    /// call the caller is awaiting. [`crate::frame::lifecycle`] bounds its
-    /// copy of the same `Page.getFrameTree` far tighter, and the difference
-    /// is deliberate: that one runs in a detached task with nobody waiting
-    /// on it, so its budget exists to reclaim the task rather than to answer
-    /// a caller.
-    ///
-    /// A single child under the recorded parent is unambiguous. With
-    /// several, the recorded `name` and `url` are the only things that tell
-    /// them apart — and when neither singles one out, this returns
-    /// [`ZendriverError::FrameNotFound`] instead of binding the first
-    /// depth-first hit. A wrong bind is worse than an error: it reports
-    /// `Ok` and then runs every later `evaluate` / query against a
-    /// different iframe's document.
-    async fn discover_current_frame_id(&self) -> Result<String> {
-        /// One candidate child frame, as reported by `Page.getFrameTree`.
-        struct Child {
-            /// The live CDP `frameId` — what a successful recovery binds.
-            id: String,
-            /// Chrome's reported frame name, absent when it sends none.
-            /// Compared against our own recorded name below.
-            name: Option<String>,
-            /// Chrome's reported document URL, absent when it sends none.
-            /// Empty for a frame that has not navigated.
-            url: Option<String>,
-        }
-        /// The one candidate satisfying `pred`, or `None` when zero or
-        /// several do — "several" must not resolve to "the first".
-        fn sole_match(candidates: &[Child], pred: impl Fn(&Child) -> bool) -> Option<&Child> {
-            let mut hits = candidates.iter().filter(|c| pred(c));
-            let first = hits.next()?;
-            hits.next().is_none().then_some(first)
-        }
-
-        let parent = self.inner.parent_frame_id.as_deref().ok_or_else(|| {
-            ZendriverError::Navigation(
-                "frame_id rejected and no parent_frame_id recorded to recover from".into(),
-            )
-        })?;
-        let tree = self
-            .inner
-            .session
-            .call("Page.getFrameTree", json!({}))
-            .await?;
-        // EVERY child of `parent`, not just the first — the count is what
-        // reveals ambiguity. The root is excluded because it is the tree's
-        // own frame rather than a child of anything in the tree.
-        //
-        // That exclusion also costs the OOPIF case, which is why it is
-        // written as a depth check and not folded into the `parent_id`
-        // comparison. Walked on an OOPIF's own child session, the tree's
-        // root IS this frame and carries `parent` as its `parentId` — so
-        // dropping the depth check is exactly what an OOPIF would need, and
-        // it is not done here because the shape of that tree is unverified
-        // against a real browser. Guessing wrong binds a live-looking id
-        // from the wrong target, and the paragraph above says why a wrong
-        // bind is worse than the `FrameNotFound` an OOPIF gets today.
-        let mut candidates = Vec::new();
-        tree::walk(&tree["frameTree"], &mut |node| {
-            if node.depth > 0 && node.parent_id == Some(parent) {
-                candidates.push(Child {
-                    id: node.id.to_string(),
-                    name: node.name.map(str::to_string),
-                    url: node.url.map(str::to_string),
-                });
-            }
-        });
-
-        if candidates.is_empty() {
-            return Err(ZendriverError::FrameNotFound(format!(
-                "no child frame found under parent {parent} during recovery"
-            )));
-        }
-        if candidates.len() == 1 {
-            return Ok(candidates.swap_remove(0).id);
-        }
-        // Several siblings: only a unique name or url match may bind.
-        let name = self.inner.name.as_deref().filter(|n| !n.is_empty());
-        if let Some(name) = name {
-            if let Some(hit) = sole_match(&candidates, |c| c.name.as_deref() == Some(name)) {
-                return Ok(hit.id.clone());
-            }
-        }
-        let url = self.inner.url.read().await.clone();
-        if !url.is_empty() {
-            if let Some(hit) = sole_match(&candidates, |c| c.url.as_deref() == Some(url.as_str())) {
-                return Ok(hit.id.clone());
-            }
-        }
-        Err(ZendriverError::FrameNotFound(format!(
-            "frame id recovery under parent {parent} is ambiguous: {} sibling frames, and neither \
-             the recorded name ({}) nor url ({}) matches exactly one",
-            candidates.len(),
-            name.unwrap_or("<none>"),
-            if url.is_empty() { "<none>" } else { &url },
-        )))
     }
 
     /// Shared post-processing for `Runtime.evaluate` responses — checks
@@ -1341,123 +1200,23 @@ mod tests {
         conn.shutdown();
     }
 
-    // --- stale frame-id recovery (`discover_current_frame_id`) ----------
+    // --- a rejected frame id ----------------------------------------------
 
-    /// A `Frame` whose recorded id Chrome will reject, forcing
-    /// `ensure_isolated_world` down the recovery path.
-    fn stale_frame(session: SessionHandle, name: Option<&str>, url: &str) -> Frame {
-        Frame::new(
-            "STALE".to_string(),
-            Some("PARENT".to_string()),
-            url.to_string(),
-            name.map(str::to_string),
-            session,
-            Weak::new(),
-        )
-    }
-
-    /// Drain the rejected first `Page.createIsolatedWorld` and answer the
-    /// recovery `Page.getFrameTree` with `children` under `PARENT`.
-    async fn reject_then_serve_tree(mock: &mut MockConnection, children: Value) {
-        let id_world = next_cmd(mock, "Page.createIsolatedWorld").await;
-        assert_eq!(mock.last_sent()["params"]["frameId"], "STALE");
-        mock.reply_err(id_world, -32602, "No frame for given id found")
-            .await;
-        let id_tree = next_cmd(mock, "Page.getFrameTree").await;
-        mock.reply(
-            id_tree,
-            json!({
-                "frameTree": {
-                    "frame": { "id": "PARENT", "url": "https://host.test/" },
-                    "childFrames": children,
-                }
-            }),
-        )
-        .await;
-    }
-
-    fn tree_frame(id: &str, name: &str, url: &str) -> Value {
-        json!({ "frame": { "id": id, "parentId": "PARENT", "name": name, "url": url } })
-    }
-
-    /// Two sibling iframes and nothing to tell them apart: recovery must
-    /// FAIL. Binding the first depth-first hit would return `Ok` and then
-    /// run every later `evaluate` against the wrong document.
+    /// Chrome keeps a frame's id for the frame's whole life, so when it
+    /// rejects the id, the frame is gone from this session: the call fails
+    /// rather than binding to another frame of the tree.
     #[tokio::test]
-    async fn ambiguous_recovery_errors_instead_of_binding_a_sibling() {
+    async fn a_rejected_frame_id_is_not_found() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let frame = stale_frame(sess, None, "");
-
-        let fut = tokio::spawn({
-            let f = frame.clone();
-            async move { f.ensure_isolated_world().await }
-        });
-        reject_then_serve_tree(
-            &mut mock,
-            json!([
-                tree_frame("F1", "", "https://host.test/a"),
-                tree_frame("F2", "", "https://host.test/b"),
-            ]),
-        )
-        .await;
-
-        match fut.await.unwrap() {
-            Err(ZendriverError::FrameNotFound(m)) => {
-                assert!(m.contains("ambiguous"), "unexpected message: {m}");
-            }
-            other => panic!("expected FrameNotFound on an ambiguous tree, got: {other:?}"),
-        }
-        assert_eq!(
-            mock.try_recv_cmd(),
+        let frame = Frame::new(
+            "GONE".into(),
+            Some("PARENT".into()),
+            String::new(),
             None,
-            "a failed recovery must not retry Page.createIsolatedWorld against a guess",
+            sess,
+            Weak::new(),
         );
-        conn.shutdown();
-    }
-
-    /// The recorded frame `name` singles one sibling out — that is a bind
-    /// we can justify, so recovery proceeds with the live id.
-    #[tokio::test]
-    async fn recovery_uses_the_recorded_name_to_pick_among_siblings() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let frame = stale_frame(sess, Some("sidebar"), "");
-
-        let fut = tokio::spawn({
-            let f = frame.clone();
-            async move { f.ensure_isolated_world().await }
-        });
-        reject_then_serve_tree(
-            &mut mock,
-            json!([
-                tree_frame("F1", "banner", "https://host.test/a"),
-                tree_frame("F2", "sidebar", "https://host.test/b"),
-            ]),
-        )
-        .await;
-
-        let id_retry = next_cmd(&mut mock, "Page.createIsolatedWorld").await;
-        assert_eq!(
-            mock.last_sent()["params"]["frameId"],
-            "F2",
-            "recovery must bind the name-matched sibling",
-        );
-        mock.reply(id_retry, json!({ "executionContextId": 99 }))
-            .await;
-        assert_eq!(fut.await.unwrap().unwrap(), 99);
-        conn.shutdown();
-    }
-
-    /// A frame that Chrome reported detached is gone: recovery must fail
-    /// instead of walking the tree, where the lone child it would bind is
-    /// another frame.
-    #[tokio::test]
-    async fn a_detached_frame_is_not_rebound() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let frame = stale_frame(sess, None, "");
-        frame.inner.detached.store(true, Ordering::Relaxed);
 
         let fut = tokio::spawn({
             let f = frame.clone();
@@ -1468,73 +1227,10 @@ mod tests {
             .await;
 
         match fut.await.unwrap() {
-            Err(ZendriverError::FrameNotFound(m)) => assert!(m.contains("detached"), "{m}"),
+            Err(ZendriverError::FrameNotFound(m)) => assert!(m.contains("GONE"), "{m}"),
             other => panic!("expected FrameNotFound, got: {other:?}"),
         }
         assert_eq!(mock.try_recv_cmd(), None, "no frame-tree walk");
-        conn.shutdown();
-    }
-
-    /// No name, but the recorded url matches exactly one sibling.
-    #[tokio::test]
-    async fn recovery_falls_back_to_the_recorded_url() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let frame = stale_frame(sess, None, "https://host.test/b");
-
-        let fut = tokio::spawn({
-            let f = frame.clone();
-            async move { f.ensure_isolated_world().await }
-        });
-        reject_then_serve_tree(
-            &mut mock,
-            json!([
-                tree_frame("F1", "", "https://host.test/a"),
-                tree_frame("F2", "", "https://host.test/b"),
-            ]),
-        )
-        .await;
-
-        let id_retry = next_cmd(&mut mock, "Page.createIsolatedWorld").await;
-        assert_eq!(mock.last_sent()["params"]["frameId"], "F2");
-        mock.reply(id_retry, json!({ "executionContextId": 5 }))
-            .await;
-        assert_eq!(fut.await.unwrap().unwrap(), 5);
-        conn.shutdown();
-    }
-
-    /// The unambiguous single-iframe page keeps recovering with no name or
-    /// url to go on — the disambiguation must not make the common case
-    /// stricter. Later calls then go straight to the recovered frame id,
-    /// instead of being rejected on the recorded one and walking the frame
-    /// tree again.
-    #[tokio::test]
-    async fn lone_child_still_recovers_without_name_or_url() {
-        let (mut mock, conn) = MockConnection::pair();
-        let sess = SessionHandle::new(conn.clone(), "S1");
-        let frame = stale_frame(sess, None, "");
-
-        let fut = tokio::spawn({
-            let f = frame.clone();
-            async move { f.ensure_isolated_world().await }
-        });
-        reject_then_serve_tree(&mut mock, json!([tree_frame("LIVE", "", "")])).await;
-
-        let id_retry = next_cmd(&mut mock, "Page.createIsolatedWorld").await;
-        assert_eq!(mock.last_sent()["params"]["frameId"], "LIVE");
-        mock.reply(id_retry, json!({ "executionContextId": 3 }))
-            .await;
-        assert_eq!(fut.await.unwrap().unwrap(), 3);
-
-        let fut = tokio::spawn({
-            let f = frame.clone();
-            async move { f.ensure_isolated_world().await }
-        });
-        let id_world = next_cmd(&mut mock, "Page.createIsolatedWorld").await;
-        assert_eq!(mock.last_sent()["params"]["frameId"], "LIVE");
-        mock.reply(id_world, json!({ "executionContextId": 4 }))
-            .await;
-        assert_eq!(fut.await.unwrap().unwrap(), 4);
         conn.shutdown();
     }
 }

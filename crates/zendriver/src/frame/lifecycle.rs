@@ -23,8 +23,7 @@
 //!    - `Page.frameNavigated` — update the existing entry's URL in
 //!      place (and backfill the frame `name` the attach event could not
 //!      carry); insert a fresh [`crate::Frame`] if no entry exists.
-//!    - `Page.frameDetached` — remove the entry from the registry, and mark
-//!      it detached (see `FrameInner::detached`).
+//!    - `Page.frameDetached` — remove the entry from the registry.
 //!
 //! Chrome reports each frame under one id for the frame's whole life (the
 //! id is the frame tree node's DevTools token, which a move to another
@@ -44,7 +43,6 @@
 //! outlives it waiting out a CDP budget.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 
 use futures::StreamExt;
@@ -289,9 +287,7 @@ pub(crate) async fn run(
                 let Some(ev) = decode::<FrameDetachedEvent>(&event) else {
                     continue;
                 };
-                if let Some(frame) = frames.write().await.remove(&ev.frame_id) {
-                    frame.inner.detached.store(true, Ordering::Relaxed);
-                }
+                frames.write().await.remove(&ev.frame_id);
             }
             _ => {}
         }
@@ -419,28 +415,6 @@ mod tests {
         conn.shutdown();
     }
 
-    /// A detach marks the removed frame, so a handle that a caller still
-    /// holds stops rebinding itself to another frame.
-    #[tokio::test]
-    async fn a_detach_marks_the_removed_frame() {
-        let (mock, conn, frames, cancel) = start().await;
-        attach(&mock, "F1", "P").await;
-        let map = wait_for(&frames, |m| m.contains_key("F1")).await;
-        let held = map["F1"].clone();
-        assert!(!held.inner.detached.load(Ordering::Relaxed));
-
-        mock.emit_event_for_session("Page.frameDetached", json!({ "frameId": "F1" }), SESSION)
-            .await;
-        wait_for(&frames, |m| !m.contains_key("F1")).await;
-        assert!(held.inner.detached.load(Ordering::Relaxed));
-
-        cancel.cancel();
-        conn.shutdown();
-    }
-
-    /// `Page.frameAttached` carries no name, so a named iframe is nameless
-    /// in the registry until `Page.frameNavigated` supplies one. Dropping it
-    /// there leaves `Tab::frame_by_name` unable to find the frame forever.
     #[tokio::test]
     async fn navigated_backfills_the_frame_name_onto_an_attached_entry() {
         let (mock, conn, frames, cancel) = start().await;
