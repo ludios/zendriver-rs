@@ -528,11 +528,14 @@ impl Frame {
     ///
     /// # Errors
     ///
-    /// Returns [`ZendriverError::Timeout`] on expiry, and
+    /// Returns [`ZendriverError::Timeout`] on expiry;
+    /// [`ZendriverError::EventStreamIncomplete`] when the wait fell so far
+    /// behind the frame's events that they overflowed its queue; and
     /// [`ZendriverError::Navigation`] if the tab is closed, or its
-    /// connection closes, first. For a sub-frame in its own process, it
-    /// also returns `Navigation` if the frame's session ends first (as when
-    /// the frame is removed, or moves into its parent's process).
+    /// connection closes or is replaced, first. For a sub-frame in its own
+    /// process, it also returns `Navigation` if the frame's session ends
+    /// first (as when the frame is removed, or moves into its parent's
+    /// process).
     ///
     /// # Examples
     ///

@@ -74,12 +74,14 @@ which reports a navigation's URL while it is still pending.
 ## Timeouts and ends
 
 Both waits give up after 30 s unless `.timeout(duration)` says otherwise;
-the clock starts at the first `.await`. A wait gets every event of the tab's
-main frame, in order. Closing the tab, Chrome exiting, or a
-`Browser::reconnect` that replaces the tab's connection ends a wait with a
-`Navigation` error. A wait whose events pile up unread until its queue
-overflows (4,096 of them) fails with `EventStreamIncomplete`, since the
-navigation may have happened unseen.
+the clock starts at the first `.await`. A wait gets the main frame's events
+in order and without gaps. Closing the tab, Chrome exiting, or a
+`Browser::reconnect` that moves the tab's connection to a new socket ends a
+wait with a `Navigation` error. If a wait's events pile up unread until its
+queue overflows (4,096 of them), `expect_navigation` fails with
+`EventStreamIncomplete`, since the navigation may have happened unseen;
+`wait_for_url` asks the page where it is and keeps waiting, and then
+reports `same_document` as `false`.
 
 ## In the MCP server
 

@@ -10,8 +10,8 @@
 //! document stays and only its URL changes (a fragment, or the History
 //! API). A new document then loads until `Page.frameStoppedLoading`. The
 //! events need the Page domain, which every [`Tab`] enables when it is
-//! created. A subscription gets the events that arrive after it, all of
-//! them and in order ([`SessionHandle::events`]), so an expectation
+//! created. A subscription gets the events that arrive after it, in order
+//! and without gaps until it ends ([`SessionHandle::events`]), so an expectation
 //! subscribes when it is created, before the caller acts, and reads the
 //! events in a task of its own from then on.
 //!
@@ -39,7 +39,7 @@ use tracing::warn;
 use url::Url;
 use zendriver_transport::{SessionEnd, SessionHandle};
 
-use crate::error::{Result, ZendriverError};
+use crate::error::{Result, ZendriverError, wait_ended};
 use crate::url_matcher::UrlMatcher;
 
 /// How long a [`NavigationExpectation`] waits unless told otherwise.
@@ -76,7 +76,7 @@ enum Change {
     SameDocument { url: String },
     /// The frame finished loading.
     Stopped,
-    /// The session's events ended, for this reason: the last change.
+    /// The session's events ended, for this reason. No change follows it.
     Ended(SessionEnd),
 }
 
@@ -144,12 +144,7 @@ fn failed(url: &str) -> ZendriverError {
 
 /// The error of a wait whose session's events ended, for the reason `end`.
 fn ended(end: SessionEnd) -> ZendriverError {
-    match end {
-        SessionEnd::Overflowed => ZendriverError::EventStreamIncomplete,
-        _ => ZendriverError::Navigation(format!(
-            "the tab's session or connection ended while waiting for a navigation: {end}"
-        )),
-    }
+    wait_ended(end, "a navigation")
 }
 
 /// Where the page is and whether it has loaded, as the page itself says:
@@ -257,10 +252,16 @@ async fn consult_page(
     frame.arrived()
 }
 
-/// Wait for `target` on the main frame of `session`, whose `changes` these
-/// are, with no time limit.
+/// Wait for `target` on the main frame of `session`, whose id is
+/// `frame_id` and whose `changes` these are, with no time limit.
+///
+/// When the changes overflow their queue, a wait for a URL subscribes again
+/// and asks the page where it is (being at a URL is a state, which the page
+/// can tell); a wait for the next navigation can't tell whether it missed
+/// it, and fails.
 async fn wait(
     session: SessionHandle,
+    frame_id: String,
     mut changes: Pin<Box<dyn Stream<Item = Change> + Send>>,
     target: Target,
 ) -> Result<Navigation> {
@@ -291,6 +292,15 @@ async fn wait(
             }
             Change::Stopped => {
                 frame.loading = false;
+            }
+            Change::Ended(SessionEnd::Overflowed) if asks_page => {
+                changes = self::changes(&session, &frame_id);
+                // A new document may have come among the missed events.
+                frame.replaced = true;
+                if let Some(found) = consult_page(&session, &target, &mut frame).await? {
+                    return Ok(found);
+                }
+                continue;
             }
             Change::Ended(end) => return Err(ended(end)),
         }
@@ -335,8 +345,9 @@ impl NavigationExpectation {
     /// Wait for `target` on the main frame `frame_id` of `session`.
     pub(crate) fn new(session: &SessionHandle, frame_id: &str, target: Target) -> Self {
         let changes = changes(session, frame_id);
+        let wait = wait(session.clone(), frame_id.to_owned(), changes, target);
         Self {
-            task: tokio::spawn(wait(session.clone(), changes, target)),
+            task: tokio::spawn(wait),
             timeout: DEFAULT_TIMEOUT,
             sleep: None,
         }
@@ -594,6 +605,32 @@ mod tests {
         conn.shutdown();
     }
 
+    /// A wait for a URL whose events overflowed their queue (here, while it
+    /// waited for the page's answer) subscribes again and asks the page
+    /// where it is, and no longer vouches for the document.
+    #[tokio::test]
+    async fn a_url_wait_recovers_from_an_overflow() {
+        let (mut mock, conn) = MockConnection::pair_with_session_queue_capacity(1);
+        let waiting = tokio::spawn(wait_for_url(&conn, "/target"));
+        let id = mock.expect_cmd("Runtime.evaluate").await;
+        let mut broadcast = conn.subscribe_raw();
+        for _ in 0..3 {
+            stop(&mock).await;
+        }
+        for _ in 0..3 {
+            broadcast.next().await;
+        }
+        let value = json!({ "result": { "value": ["http://a.test/start", "complete"] } });
+        mock.reply(id, value).await;
+        answer_page(&mut mock, "http://a.test/target", "complete").await;
+        let found = waiting
+            .await
+            .unwrap()
+            .expect("found at the URL after the overflow");
+        assert_eq!(found, reached("http://a.test/target", false));
+        conn.shutdown();
+    }
+
     /// A wait that falls so far behind its events that its queue overflows
     /// can't tell what it missed.
     #[tokio::test]
@@ -608,7 +645,7 @@ mod tests {
         stop(&mock).await;
         broadcast.next().await;
         broadcast.next().await;
-        let res = wait(session, changes, Target::NextNavigation).await;
+        let res = wait(session, "F".into(), changes, Target::NextNavigation).await;
         assert!(
             matches!(res, Err(ZendriverError::EventStreamIncomplete)),
             "{res:?}"

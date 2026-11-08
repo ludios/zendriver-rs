@@ -9,10 +9,11 @@
 //! loading exactly when a start has arrived since the last stop.
 //!
 //! A tracker gets the events of its session that arrive after it is
-//! created, all of them and in order ([`SessionHandle::events`]), so create
-//! it before the action that navigates. A tracker for a load that may have
-//! begun before it was created asks the page's `document.readyState`
-//! first.
+//! created, in order and without gaps until its subscription ends
+//! ([`SessionHandle::events`]), so create it before the action that
+//! navigates. A tracker for a load that may have begun before it was
+//! created asks the page first whether that load has finished
+//! ([`Initial::question`]).
 
 use std::pin::Pin;
 use std::time::Duration;
@@ -23,16 +24,33 @@ use serde_json::json;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::warn;
-use zendriver_transport::SessionHandle;
+use zendriver_transport::{SessionEnd, SessionHandle};
 
-use crate::error::{Result, ZendriverError};
+use crate::error::{Result, ZendriverError, wait_ended};
 
 /// What happened to the followed frame, as far as its events tell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Change {
     Started,
     Stopped,
+    /// The session's events ended, for this reason. No change follows it.
+    Ended(SessionEnd),
 }
+
+/// What a [`LoadTracker`] knows of its load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Load {
+    Loading,
+    Loaded,
+    /// The session's events ended, for this reason, while it was loading.
+    Ended(SessionEnd),
+}
+
+/// Whether the current document has loaded: `"complete"` if so.
+const READY_STATE: &str = "document.readyState";
+
+/// Whether a new tab has left `about:blank` and loaded: `"complete"` if so.
+const LEFT_BLANK: &str = "location.href === 'about:blank' ? 'blank' : document.readyState";
 
 /// The load a [`LoadTracker`] waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +68,8 @@ enum Initial {
 
 impl Initial {
     /// What to ask the page first, for a load that may have begun before
-    /// the tracker: `"complete"` means it has finished.
+    /// the tracker: an expression that evaluates to `"complete"` once that
+    /// load has finished.
     fn question(self) -> Option<&'static str> {
         match self {
             Self::Navigating => None,
@@ -61,38 +80,26 @@ impl Initial {
 }
 
 /// The changes of frame `frame_id` that `session` receives from now on, in
-/// the order Chrome sent them. Ends when the session's events end (the
-/// socket dies or is replaced, the connection is shut down, or Chrome
-/// detaches the session).
+/// the order Chrome sent them, ending with [`Change::Ended`].
 fn changes(
     session: &SessionHandle,
     frame_id: &str,
 ) -> impl Stream<Item = Change> + Send + Unpin + use<> {
     let frame_id = frame_id.to_owned();
     let events = session.events(&["Page.frameStartedLoading", "Page.frameStoppedLoading"]);
-    Box::pin(
-        events
-            .take_while(|event| std::future::ready(event.is_ok()))
-            .filter_map(move |event| {
-                let change = event.ok().and_then(|event| {
-                    if event.params["frameId"] != frame_id.as_str() {
-                        return None;
-                    }
-                    match event.method.as_str() {
-                        "Page.frameStartedLoading" => Some(Change::Started),
-                        _ => Some(Change::Stopped),
-                    }
-                });
-                std::future::ready(change)
-            }),
-    )
+    Box::pin(events.filter_map(move |next| {
+        let change = match next {
+            Err(end) => Some(Change::Ended(end)),
+            Ok(event) if event.params["frameId"] != frame_id.as_str() => None,
+            Ok(event) => match event.method.as_str() {
+                "Page.frameStartedLoading" => Some(Change::Started),
+                "Page.frameStoppedLoading" => Some(Change::Stopped),
+                other => unreachable!("not subscribed to {other}"),
+            },
+        };
+        std::future::ready(change)
+    }))
 }
-
-/// Whether the current document has loaded: `"complete"` if so.
-const READY_STATE: &str = "document.readyState";
-
-/// Whether a new tab has left `about:blank` and loaded: `"complete"` if so.
-const LEFT_BLANK: &str = "location.href === 'about:blank' ? 'blank' : document.readyState";
 
 /// Whether `expression` evaluates to `"complete"` in `session`'s main
 /// world, after enabling the Page domain (so every event after this call is
@@ -127,20 +134,21 @@ fn change_queued(changes: &mut Peekable<impl Stream<Item = Change> + Unpin>) -> 
     Pin::new(changes).peek().now_or_never().flatten().is_some()
 }
 
-/// Feed `changes` into `loading`, for the load `initial`.
+/// Feed `changes` into `load`, for the load `initial`. `session` is the
+/// one the changes come from, for [`Initial::question`].
 async fn follow(
     changes: impl Stream<Item = Change> + Unpin,
     session: SessionHandle,
     initial: Initial,
-    loading: watch::Sender<bool>,
+    load: watch::Sender<Load>,
 ) {
     let mut changes = changes.peekable();
     if let Some(question) = initial.question() {
         let complete = probe_complete(&session, question).await;
         // A change that arrived while the page answered is newer than the
         // answer, so the frame stays loading until that change is taken.
-        if !change_queued(&mut changes) {
-            loading.send_replace(complete != Some(true));
+        if !change_queued(&mut changes) && complete == Some(true) {
+            load.send_replace(Load::Loaded);
         }
     }
     // Whether a stop ends the load the tracker waits for: for a navigation,
@@ -150,12 +158,23 @@ async fn follow(
         match change {
             Change::Started => {
                 started = true;
-                loading.send_replace(true);
+                load.send_replace(Load::Loading);
             }
             Change::Stopped => {
                 if started {
-                    loading.send_replace(false);
+                    load.send_replace(Load::Loaded);
                 }
+            }
+            Change::Ended(end) => {
+                // A load that finished stays finished.
+                load.send_if_modified(|load| {
+                    let loading = *load == Load::Loading;
+                    if loading {
+                        *load = Load::Ended(end);
+                    }
+                    loading
+                });
+                return;
             }
         }
     }
@@ -166,10 +185,8 @@ async fn follow(
 ///
 /// # Errors
 ///
-/// [`ZendriverError::Timeout`] if none arrives within `within`;
-/// [`ZendriverError::Navigation`] if the changes end first (the socket
-/// dies or is replaced, the connection is shut down, or Chrome detaches
-/// the session).
+/// [`ZendriverError::Timeout`] if none arrives within `within`; the error
+/// of [`wait_ended`] if the session's events end first.
 pub(crate) async fn next_stop(
     session: &SessionHandle,
     frame_id: &str,
@@ -178,27 +195,24 @@ pub(crate) async fn next_stop(
     let mut changes = changes(session, frame_id);
     let stop = async {
         while let Some(change) = changes.next().await {
-            if change == Change::Stopped {
-                return Some(());
+            match change {
+                Change::Started => {}
+                Change::Stopped => return Ok(()),
+                Change::Ended(end) => return Err(wait_ended(end, "the frame to load")),
             }
         }
-        None
+        Err(wait_ended(SessionEnd::Shutdown, "the frame to load"))
     };
-    match tokio::time::timeout(within, stop).await {
-        Err(_) => Err(ZendriverError::Timeout(within)),
-        Ok(None) => Err(ZendriverError::Navigation(
-            "the frame's session or connection ended while waiting for the frame to load".into(),
-        )),
-        Ok(Some(_)) => Ok(()),
-    }
+    tokio::time::timeout(within, stop)
+        .await
+        .unwrap_or(Err(ZendriverError::Timeout(within)))
 }
 
 /// Follows whether one frame is loading, in a task that runs until the
-/// tracker is dropped or the changes end (the socket dies or is replaced,
-/// the connection is shut down, or Chrome detaches the session).
+/// tracker is dropped or the session's events end.
 #[derive(Debug)]
 pub(crate) struct LoadTracker {
-    loading: watch::Receiver<bool>,
+    load: watch::Receiver<Load>,
     task: JoinHandle<()>,
 }
 
@@ -206,14 +220,15 @@ impl LoadTracker {
     /// Follow frame `frame_id` on `session`, starting from `initial`.
     fn start(session: &SessionHandle, frame_id: &str, initial: Initial) -> Self {
         let changes = changes(session, frame_id);
-        let (loading_tx, loading) = watch::channel(true);
-        let task = tokio::spawn(follow(changes, session.clone(), initial, loading_tx));
-        Self { loading, task }
+        let (load_tx, load) = watch::channel(Load::Loading);
+        let task = tokio::spawn(follow(changes, session.clone(), initial, load_tx));
+        Self { load, task }
     }
 
     /// For a caller that is about to start a navigation of the main frame,
-    /// whose id is `frame_id`, on `session`: loading until that navigation
-    /// has started and stopped.
+    /// whose id is `frame_id`, on `session`: loading until a load starts
+    /// and then stops (normally that navigation's; TODO.md lists the ways
+    /// another load's can count instead).
     pub(crate) fn before_navigating(session: &SessionHandle, frame_id: &str) -> Self {
         Self::start(session, frame_id, Initial::Navigating)
     }
@@ -238,16 +253,18 @@ impl LoadTracker {
     /// # Errors
     ///
     /// [`ZendriverError::Timeout`] if it is still loading after `within`;
-    /// [`ZendriverError::Navigation`] if the changes end first (the socket
-    /// dies or is replaced, the connection is shut down, or Chrome detaches
-    /// the session).
+    /// the error of [`wait_ended`] if the session's events end first.
     pub(crate) async fn wait(mut self, within: Duration) -> Result<()> {
-        match tokio::time::timeout(within, self.loading.wait_for(|loading| !loading)).await {
+        let settled = self.load.wait_for(|load| *load != Load::Loading);
+        match tokio::time::timeout(within, settled).await {
             Err(_) => Err(ZendriverError::Timeout(within)),
             Ok(Err(_)) => Err(ZendriverError::Navigation(
-                "the frame's session or connection ended while waiting for it to load".into(),
+                "the frame's load tracker stopped while waiting for it to load".into(),
             )),
-            Ok(Ok(_)) => Ok(()),
+            Ok(Ok(load)) => match *load {
+                Load::Ended(end) => Err(wait_ended(end, "the frame to load")),
+                Load::Loading | Load::Loaded => Ok(()),
+            },
         }
     }
 }
@@ -443,5 +460,47 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(res, Err(ZendriverError::Navigation(_))), "{res:?}");
+    }
+
+    /// A second start keeps the frame loading, and a start after the stop
+    /// makes it loading again: only the last stop counts.
+    #[tokio::test]
+    async fn only_a_stop_after_every_start_ends_the_load() {
+        let (mock, conn) = MockConnection::pair();
+        let session = SessionHandle::new(conn.clone(), "S1");
+        let tracker = LoadTracker::before_navigating(&session, "F");
+        let mut load = tracker.load.clone();
+        for (started, expected) in [
+            (true, Load::Loading),
+            (true, Load::Loading),
+            (false, Load::Loaded),
+            (true, Load::Loading),
+            (false, Load::Loaded),
+        ] {
+            emit(&mock, started, "F", "S1").await;
+            let seen = tokio::time::timeout(LONG, load.changed()).await;
+            assert!(seen.is_ok(), "no change after {started}");
+            assert_eq!(*load.borrow_and_update(), expected);
+        }
+        conn.shutdown();
+    }
+
+    /// A wait whose events overflowed their queue can't tell whether the
+    /// frame loaded: `EventStreamIncomplete`, not `Navigation`.
+    #[tokio::test]
+    async fn wait_reports_an_overflow_as_incomplete() {
+        let (mock, conn) = MockConnection::pair_with_session_queue_capacity(1);
+        let tracker = LoadTracker::before_navigating(&SessionHandle::new(conn.clone(), "S1"), "F");
+        for _ in 0..3 {
+            emit(&mock, true, "F", "S1").await;
+        }
+        let res = tokio::time::timeout(LONG, tracker.wait(LONG))
+            .await
+            .unwrap();
+        assert!(
+            matches!(res, Err(ZendriverError::EventStreamIncomplete)),
+            "{res:?}"
+        );
+        conn.shutdown();
     }
 }

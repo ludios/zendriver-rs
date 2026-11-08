@@ -1098,9 +1098,13 @@ impl Tab {
     /// # Errors
     ///
     /// Returns [`ZendriverError::Timeout`] when the main frame is still
-    /// loading after 30s; [`ZendriverError::Navigation`] if the tab is
-    /// closed or its connection closes first (because Chrome exited, or
-    /// zendriver shut the connection down).
+    /// loading after 30s; [`ZendriverError::EventStreamIncomplete`] when the
+    /// wait fell so far behind the tab's events that they overflowed its
+    /// queue; [`ZendriverError::Navigation`] if the tab is closed or its
+    /// connection closes or is replaced first (because Chrome exited,
+    /// zendriver shut the connection down, or a
+    /// [`Browser::reconnect`](crate::Browser::reconnect) moved it to a new
+    /// socket, where the tab's session doesn't exist).
     ///
     /// # Examples
     ///
@@ -1154,7 +1158,8 @@ impl Tab {
     /// error page because its destination couldn't be reached, or if the
     /// tab is closed or its connection closes or is replaced first (because
     /// Chrome exited, zendriver shut the connection down, or a
-    /// [`Browser::reconnect`](crate::Browser::reconnect) replaced it).
+    /// [`Browser::reconnect`](crate::Browser::reconnect) moved it to a new
+    /// socket, where the tab's session doesn't exist).
     ///
     /// # Examples
     ///
@@ -1207,14 +1212,13 @@ impl Tab {
     /// # Errors
     ///
     /// Returns [`ZendriverError::Timeout`] when the tab isn't at a matching,
-    /// loaded page within the timeout;
-    /// [`ZendriverError::EventStreamIncomplete`] when the wait fell so far
-    /// behind the tab's events that they overflowed its queue; and
+    /// loaded page within the timeout, and
     /// [`ZendriverError::Navigation`] when a navigation to a matching URL
     /// ends on Chrome's error page because it couldn't be reached, or if the
     /// tab is closed or its connection closes or is replaced first (because
     /// Chrome exited, zendriver shut the connection down, or a
-    /// [`Browser::reconnect`](crate::Browser::reconnect) replaced it).
+    /// [`Browser::reconnect`](crate::Browser::reconnect) moved it to a new
+    /// socket, where the tab's session doesn't exist).
     ///
     /// # Examples
     ///
