@@ -78,7 +78,7 @@ the clock starts at the first `.await`. A wait gets every event of the tab's
 main frame, in order. Closing the tab, Chrome exiting, or a
 `Browser::reconnect` that replaces the tab's connection ends a wait with a
 `Navigation` error. A wait whose events pile up unread until its queue
-overflows (65,536 of them) fails with `EventStreamIncomplete`, since the
+overflows (4,096 of them) fails with `EventStreamIncomplete`, since the
 navigation may have happened unseen.
 
 ## In the MCP server

@@ -159,7 +159,7 @@ pub(crate) async fn run(
         };
         match event.method.as_str() {
             "Page.frameAttached" => {
-                let Some(ev) = decode::<FrameAttachedEvent>(event) else {
+                let Some(ev) = decode::<FrameAttachedEvent>(&event) else {
                     continue;
                 };
                 let frame = Frame::new(
@@ -173,7 +173,7 @@ pub(crate) async fn run(
                 frames.write().await.insert(ev.frame_id, frame);
             }
             "Page.frameNavigated" => {
-                let Some(ev) = decode::<FrameNavigatedEvent>(event) else {
+                let Some(ev) = decode::<FrameNavigatedEvent>(&event) else {
                     continue;
                 };
                 let frame_id = ev.frame.id;
@@ -286,7 +286,7 @@ pub(crate) async fn run(
                 }
             }
             "Page.frameDetached" => {
-                let Some(ev) = decode::<FrameDetachedEvent>(event) else {
+                let Some(ev) = decode::<FrameDetachedEvent>(&event) else {
                     continue;
                 };
                 if let Some(frame) = frames.write().await.remove(&ev.frame_id) {
@@ -299,8 +299,8 @@ pub(crate) async fn run(
 }
 
 /// `event`'s params as a `T`, or `None` (with a warning) if they don't fit.
-fn decode<T: DeserializeOwned>(event: RawEvent) -> Option<T> {
-    match serde_json::from_value(event.params) {
+fn decode<T: DeserializeOwned>(event: &RawEvent) -> Option<T> {
+    match T::deserialize(&event.params) {
         Ok(decoded) => Some(decoded),
         Err(e) => {
             warn!(method = %event.method, error = %e, "frame::lifecycle: unreadable frame event; ignoring it");

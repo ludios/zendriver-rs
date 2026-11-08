@@ -417,7 +417,7 @@ mod tests {
     }
 
     /// The next item of `events`, which must come within a second.
-    async fn next_of(events: &mut SessionEvents) -> Option<Result<RawEvent, SessionEnd>> {
+    async fn next_of(events: &mut SessionEvents) -> Option<Result<Arc<RawEvent>, SessionEnd>> {
         tokio::time::timeout(std::time::Duration::from_secs(1), events.next())
             .await
             .unwrap()
@@ -429,7 +429,7 @@ mod tests {
         let mut methods = Vec::new();
         loop {
             match next_of(events).await.unwrap() {
-                Ok(event) => methods.push(event.method),
+                Ok(event) => methods.push(event.method.clone()),
                 Err(end) => {
                     assert!(next_of(events).await.is_none(), "the end is the last item");
                     return (methods, end);

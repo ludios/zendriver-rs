@@ -24,9 +24,11 @@ use crate::frame::RawEvent;
 /// [`SessionHandle::events`](crate::session::SessionHandle::events) may have
 /// waiting before its stream ends with [`SessionEnd::Overflowed`].
 ///
-/// A queue takes memory only for the events waiting in it, and holds only
-/// the methods its subscriber asked for.
-pub const SESSION_QUEUE_CAPACITY: usize = 1 << 16;
+/// A queue holds only the methods its subscriber asked for, and the
+/// subscribers that want an event share one copy of it. A subscriber that
+/// keeps up never comes near this; one that has this many events waiting
+/// has stopped reading, and the bound caps the memory it holds.
+pub const SESSION_QUEUE_CAPACITY: usize = 4096;
 
 /// Why a stream of [`SessionHandle::events`](crate::session::SessionHandle::events)
 /// ended: no event of its session will come after this.
@@ -63,7 +65,7 @@ pub enum SessionEnd {
 #[derive(Debug)]
 pub struct SessionEvents {
     /// The subscriber's queue; `None` once the stream has yielded its end.
-    queue: Option<mpsc::Receiver<RawEvent>>,
+    queue: Option<mpsc::Receiver<Arc<RawEvent>>>,
     /// Why the queue's sender was dropped, set before the drop. Unset if
     /// the sender was dropped with the connection itself.
     end: Arc<OnceLock<SessionEnd>>,
@@ -81,7 +83,7 @@ impl SessionEvents {
 }
 
 impl Stream for SessionEvents {
-    type Item = Result<RawEvent, SessionEnd>;
+    type Item = Result<Arc<RawEvent>, SessionEnd>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let Some(queue) = self.queue.as_mut() else {
@@ -109,7 +111,7 @@ struct Route {
     /// for every method of that domain.
     methods: Box<[&'static str]>,
     /// The sending end of the subscriber's queue.
-    queue: mpsc::Sender<RawEvent>,
+    queue: mpsc::Sender<Arc<RawEvent>>,
     /// Shared with the subscriber's [`SessionEvents`].
     end: Arc<OnceLock<SessionEnd>>,
 }
@@ -247,7 +249,8 @@ impl Routes {
     }
 
     /// Put `event`, which the actor of generation `generation` received, on
-    /// the queue of each subscriber that wants it.
+    /// the queue of each subscriber that wants it. The subscribers share one
+    /// copy of it, made only if one of them wants it.
     pub(crate) fn dispatch(&mut self, generation: u64, event: &RawEvent) {
         if generation != self.generation {
             return;
@@ -255,6 +258,7 @@ impl Routes {
         let Some(routes) = self.by_session.get_mut(&event.session_id) else {
             return;
         };
+        let mut shared: Option<Arc<RawEvent>> = None;
         routes.retain(|route| {
             if route.queue.is_closed() {
                 return false;
@@ -262,7 +266,8 @@ impl Routes {
             if !route.wants(&event.method) {
                 return true;
             }
-            match route.queue.try_send(event.clone()) {
+            let shared = shared.get_or_insert_with(|| Arc::new(event.clone()));
+            match route.queue.try_send(Arc::clone(shared)) {
                 Ok(()) => true,
                 Err(TrySendError::Full(_)) => {
                     warn!(
@@ -382,7 +387,7 @@ mod tests {
         let mut methods = Vec::new();
         loop {
             match events.next().await.unwrap() {
-                Ok(event) => methods.push(event.method),
+                Ok(event) => methods.push(event.method.clone()),
                 Err(end) => {
                     assert!(events.next().await.is_none(), "the end is the last item");
                     return (methods, end);
