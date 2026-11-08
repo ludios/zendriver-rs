@@ -1,6 +1,8 @@
 //! Playwright-style actionability predicates: visible / stable / enabled /
-//! receives_pointer. Each runs a small JS function on the element's remote
-//! handle via `Element::call_on_main` and returns a `bool`.
+//! receives_pointer. The first three each run a small JS function on the
+//! element's remote handle via `Element::call_on_main` and return a `bool`;
+//! receives_pointer asks Chrome's own hit test (`DOM.getNodeForLocation`)
+//! and runs JS only to tell whether the node hit is inside the element.
 //!
 //! `call_on_main` binds the element as the first positional argument, so
 //! every body opens `function(el, ...)` and any caller-supplied arguments
@@ -115,9 +117,9 @@ impl ActionabilityCheck {
     };
 
     /// How many `Runtime.callFunctionOn` probes one pass of
-    /// [`wait_actionable`] sends for this set: one per enabled JavaScript
-    /// predicate (visible, enabled, stable). The hit test, when enabled,
-    /// follows them, as CDP calls of its own.
+    /// [`wait_actionable`] sends for this set when every probe passes: one
+    /// per enabled JavaScript predicate (visible, enabled, stable). The hit
+    /// test, when enabled, follows them, as CDP calls of its own.
     ///
     /// Exists so a test fixture can serve exactly the gate's calls without
     /// hard-coding a count per preset: a count that drifts from the set does
@@ -356,12 +358,20 @@ pub(crate) async fn check_enabled(el: &Element) -> Result<bool> {
     Ok(res.get("value").and_then(|v| v.as_bool()).unwrap_or(false))
 }
 
-/// Whether the node with the backend id `node` is `el` or inside it,
-/// counting a shadow root's content as inside its host.
+/// Whether the node with the backend id `node` is `el` or inside it.
+///
+/// Inside means reachable from `node` by walking up the flat tree as far as
+/// the page's isolated world can see it: a pseudo-element counts as its
+/// element, slotted content as inside its slot (only in an open shadow
+/// root, since `assignedSlot` hides a closed one's), a shadow root's
+/// content as inside its host, and an iframe's document as inside the
+/// `<iframe>` (only for an iframe of the same origin, whose `frameElement`
+/// the walk can read).
 ///
 /// Resolves `node` into `el`'s world, whose context id `el`'s object id
-/// holds, and walks up from it there. A node that Chrome won't resolve into
-/// that world (one in another frame's document, say) isn't inside `el`.
+/// holds, and walks up from it there. A node that Chrome resolves to no
+/// object there (one in a document of another origin), or that is gone by
+/// then, isn't inside `el`.
 async fn is_inside(el: &Element, node: i64) -> Result<bool> {
     let context_id =
         crate::isolated_world::context_id_of_object(&el.remote_object_id_cloned().await?)?;
@@ -374,7 +384,7 @@ async fn is_inside(el: &Element, node: i64) -> Result<bool> {
         .await;
     let resolved = match resolved {
         Ok(resolved) => resolved,
-        Err(ZendriverError::Cdp { .. }) => return Ok(false),
+        Err(e) if crate::element::refresh::is_stale_node_error(&e) => return Ok(false),
         Err(e) => return Err(e),
     };
     let Some(object_id) = resolved["object"]["objectId"].as_str() else {
@@ -385,8 +395,14 @@ async fn is_inside(el: &Element, node: i64) -> Result<bool> {
     let js = r#"
         function(el, node) {
             const parentOf = Object.getOwnPropertyDescriptor(Node.prototype, 'parentNode').get;
-            for (let n = node; n; n = parentOf.call(n) || n.host) {
+            let n = node instanceof Node ? node : node.element;
+            while (n) {
                 if (n === el) return true;
+                if (n instanceof Document) {
+                    n = n.defaultView && n.defaultView.frameElement;
+                } else {
+                    n = (n instanceof Element && n.assignedSlot) || parentOf.call(n) || n.host;
+                }
             }
             return false;
         }
@@ -404,22 +420,30 @@ async fn is_inside(el: &Element, node: i64) -> Result<bool> {
 
 /// `true` iff a click at the point that will actually be clicked would land
 /// on the element or inside it (see [`is_inside`]). Returns `false` when
-/// something else covers the point.
+/// something else is at the point (an overlay, a sticky header, the element
+/// itself with `pointer-events: none` letting the click through), or nothing
+/// is (the point is outside the viewport).
 ///
 /// Asks Chrome's own hit test, `DOM.getNodeForLocation`, at the point of the
-/// page that `Input.dispatchMouseEvent` will use: the element's
+/// page that `Input.dispatchMouseEvent` will use, to the nearest whole pixel
+/// (the command takes integers): the element's
 /// [`crate::Element::bounding_box`] plus `position` (or its centre), plus the
 /// page's scroll offset, since `DOM.getNodeForLocation` takes a point of the
 /// page rather than of the viewport. That hit test sees into shadow roots,
-/// closed ones too, where `document.elementFromPoint` stops at the host;
-/// it sees across frames, so an overlay in the top page that covers an
-/// element in an iframe counts; and, like a real click, it passes through
-/// `pointer-events: none`.
+/// closed ones too, where `document.elementFromPoint` stops at the host; it
+/// starts from the top frame of the tab's process, so an overlay in the top
+/// page that covers an element in a same-process iframe counts; and, like a
+/// real click, it passes through `pointer-events: none`.
 ///
 /// `position` is the caller's offset from the bbox top-left, matching
 /// [`crate::ClickOptions::position`]; `None` hit-tests the centre. Probing a
 /// point the dispatch will not use lets the gate pass while the real click
 /// lands on an overlay.
+///
+/// # Errors
+///
+/// The error of a CDP call, or [`ZendriverError::Navigation`] when
+/// `Page.getLayoutMetrics` reports no scroll offset.
 pub(crate) async fn check_receives_pointer(
     el: &Element,
     position: Option<(f64, f64)>,
@@ -430,17 +454,24 @@ pub(crate) async fn check_receives_pointer(
     if bbox.width <= 0.0 || bbox.height <= 0.0 {
         return Ok(false);
     }
-    let (dx, dy) = position.unwrap_or((bbox.width / 2.0, bbox.height / 2.0));
     let tab = el.tab();
     let metrics = tab.call("Page.getLayoutMetrics", json!({})).await?;
-    let scroll_x = metrics["cssLayoutViewport"]["pageX"]
-        .as_f64()
-        .unwrap_or(0.0);
-    let scroll_y = metrics["cssLayoutViewport"]["pageY"]
-        .as_f64()
-        .unwrap_or(0.0);
+    let viewport = &metrics["cssLayoutViewport"];
+    let (Some(scroll_x), Some(scroll_y)) = (viewport["pageX"].as_f64(), viewport["pageY"].as_f64())
+    else {
+        return Err(ZendriverError::Navigation(
+            "Page.getLayoutMetrics returned no cssLayoutViewport scroll offset".into(),
+        ));
+    };
+    let (dx, dy) = position.unwrap_or((bbox.width / 2.0, bbox.height / 2.0));
     let x = (bbox.x + dx + scroll_x).round();
     let y = (bbox.y + dy + scroll_y).round();
+    // A point Chrome can't take (an offset that isn't finite, or beyond
+    // `i32`) can't be clicked either.
+    let in_range = |v: f64| v.is_finite() && v.abs() <= f64::from(i32::MAX);
+    if !in_range(x) || !in_range(y) {
+        return Ok(false);
+    }
     let hit = tab
         .call(
             "DOM.getNodeForLocation",
@@ -449,14 +480,16 @@ pub(crate) async fn check_receives_pointer(
         .await;
     let hit = match hit {
         Ok(hit) => hit,
-        // Nothing there: the point is outside the page.
+        // Nothing there: the point is outside the viewport.
         Err(ZendriverError::Cdp { ref message, .. }) if message.contains("No node found") => {
             return Ok(false);
         }
         Err(e) => return Err(e),
     };
     let Some(hit) = hit["backendNodeId"].as_i64() else {
-        return Ok(false);
+        return Err(ZendriverError::Navigation(
+            "DOM.getNodeForLocation returned no backendNodeId".into(),
+        ));
     };
     if hit == el.backend_node_id_cloned().await? {
         return Ok(true);
@@ -667,8 +700,11 @@ mod tests {
 
     /// Drive one `check_receives_pointer` probe for an element with backend
     /// id 99 and the box of [`box_model_reply`], on a page scrolled down by
-    /// 300 px, with the hit test answering `hit`. Hands back the point it
-    /// hit-tested, and the probe's verdict.
+    /// 300 px, with the hit test answering `hit` (a backend node id, or the
+    /// message of an error). The element's object id is `object_id`, and
+    /// `at` is the click position (see [`check_receives_pointer`]). Hands
+    /// back the point that the probe hit-tested, and the probe's task, for
+    /// its verdict.
     async fn probe_pointer(
         mock: &mut MockConnection,
         conn: &zendriver_transport::Connection,

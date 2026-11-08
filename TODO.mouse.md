@@ -167,7 +167,7 @@ The durations mix the model with how it's played back. ghost-cursor's are 16.7 m
     `hover` uses the same order, with its own check and no press.
   - **Wording:** drop `ClickOptions`' "None clicks at the bbox center" wording.
   - **Explicit offsets:** an offset (`ClickOptions` with `Some((dx, dy))`) still ends exactly on that offset.
-  - **Shadow roots:** the hit test doesn't descend into shadow roots, so an element inside one fails it. Fix it here, or file it in TODO.md.
+  - **Shadow roots:** since `99717a632` the hit test is Chrome's `DOM.getNodeForLocation`, which sees into shadow roots. A hit on content slotted into a closed shadow root still counts as outside the element, since `assignedSlot` hides a closed root's slots.
   - Tags: `chrome`.
 - [ ] **4. Replace `InputProfile`'s mouse fields with the model's settings** (decision 2).
   - `native()` keeps a near-instant path; `spoofed()`/`coherent()` take cursorflow's defaults.

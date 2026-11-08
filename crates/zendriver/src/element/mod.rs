@@ -398,11 +398,11 @@ mod tests {
     /// leading parameter to absorb that handle.
     ///
     /// The ordering is the whole contract, so this passes real extra
-    /// arguments and asserts where each one lands. `check_receives_pointer(el,
-    /// dx, dy)` depends on it: push the extras ahead of the handle instead and
-    /// every multi-argument probe shifts by one — `dx` would arrive holding
-    /// the element, `Number.isFinite` would reject it, and the hit test would
-    /// silently fall back to the centre on every positioned click.
+    /// arguments and asserts where each one lands. The hit test's
+    /// `function(el, node)` depends on it: push the extras ahead of the
+    /// handle instead and every multi-argument probe shifts by one — `el`
+    /// would arrive holding the node hit, and the hit test would ask
+    /// whether the element is inside the node rather than the reverse.
     #[tokio::test]
     async fn call_on_main_binds_the_element_ahead_of_the_callers_arguments() {
         let (mut mock, conn) = MockConnection::pair();
