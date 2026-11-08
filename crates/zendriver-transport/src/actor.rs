@@ -1,11 +1,12 @@
 //! ConnectionActor: tokio task owning the WebSocket. Routes commands and
-//! responses by id, fans events out on a broadcast bus, and dispatches
-//! `TargetObserver`s on `Target.attachedToTarget`.
+//! responses by id, fans events out on a broadcast bus and onto the queues
+//! of each session's subscribers, and dispatches `TargetObserver`s on
+//! `Target.attachedToTarget`.
 
 use std::any::Any;
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use futures::{FutureExt, SinkExt, StreamExt};
@@ -18,6 +19,7 @@ use tracing::{debug, error, trace, warn};
 use crate::connection::{Connection, ConnectionInner, GenerationEnd};
 use crate::frame::{AccountedRawEvent, CdpCommand, CdpInbound, CdpRpcError, RawEvent};
 use crate::observer::{ObserverFailurePolicy, PausedSession, TargetInfo, TargetObserver};
+use crate::routes::{self, Routes, SessionEnd};
 
 /// Outbound command sent from a `Connection` handle to the actor.
 #[derive(Debug)]
@@ -198,6 +200,10 @@ pub(crate) async fn run_actor<S>(
 {
     let mut pending: HashMap<u64, PendingCall> = HashMap::new();
     let mut next_id: u64 = 1;
+    // The subscribers of each session's events. `None` if the connection is
+    // gone already, or in a test that runs the actor without one.
+    let routes: Option<Arc<Mutex<Routes>>> =
+        weak_inner.upgrade().map(|inner| Arc::clone(&inner.routes));
     // Per-generation monotonic counter for `AccountedRawEvent::Event::sequence`.
     // Reset to 1 on every actor run (a fresh call to `run_actor`, i.e. every
     // reconnect); only advances when `accounted_tx` actually has a
@@ -389,12 +395,8 @@ pub(crate) async fn run_actor<S>(
                                             // now sees the detach on the bus
                                             // or finds it here, never neither
                                             // (see `SessionHandle::subscribe_accounted`).
-                                            if let Some(inner) = weak_inner.upgrade() {
-                                                inner
-                                                    .detached_sessions
-                                                    .lock()
-                                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                                    .insert(ev.session_id.clone());
+                                            if let Some(routes) = &routes {
+                                                routes::lock(routes).detach(&ev.session_id);
                                             }
                                             if !observers.is_empty() {
                                                 // Mirror the `attachedToTarget` path:
@@ -451,6 +453,9 @@ pub(crate) async fn run_actor<S>(
                                     }
                                 }
                                 let ev = RawEvent { method, params, session_id };
+                                if let Some(routes) = &routes {
+                                    routes::lock(routes).dispatch(accounted.generation, &ev);
+                                }
                                 // Gate the per-event clone + accounted-bus send
                                 // behind an actual subscriber: cloning `ev`
                                 // (method String + params Value — potentially
@@ -509,6 +514,17 @@ pub(crate) async fn run_actor<S>(
             *end = Some(ended);
             let _ = accounted.tx.send(ended.announcement(accounted.generation));
         }
+    }
+
+    // Outside `generation_end`'s lock: `Routes` keeps its own generation, so
+    // this does nothing if a reconnect has replaced this actor.
+    if let Some(routes) = &routes {
+        let end = if drain_code == crate::connection::DISCONNECTED_CODE {
+            SessionEnd::Disconnected
+        } else {
+            SessionEnd::Shutdown
+        };
+        routes::lock(routes).end_generation(accounted.generation, end);
     }
 
     // Drain pending into transport errors so callers don't hang. `drain_code`

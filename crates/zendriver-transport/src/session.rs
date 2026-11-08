@@ -15,6 +15,7 @@ use serde_json::Value;
 use crate::connection::Connection;
 use crate::error::CallError;
 use crate::frame::{AccountedRawEvent, RawEvent};
+use crate::routes::{self, SessionEvents};
 
 /// Cheap-to-clone handle binding a [`Connection`] to a specific CDP session.
 ///
@@ -32,16 +33,22 @@ struct Inner {
     conn: Connection,
     /// `Some(id)` for a flat session; `None` for a root (per-target) session.
     session_id: Option<String>,
+    /// The [`Connection::connection_generation`] when this handle was made.
+    /// A flat session doesn't survive a [`Connection::reconnect`], so a
+    /// handle made before one names a session that is gone.
+    generation: u64,
 }
 
 impl SessionHandle {
     /// Construct a flat handle around `conn` scoped to `session_id` (a session
     /// multiplexed over a shared, flattened browser socket).
     pub fn new(conn: Connection, session_id: impl Into<String>) -> Self {
+        let generation = conn.connection_generation();
         Self {
             inner: Arc::new(Inner {
                 conn,
                 session_id: Some(session_id.into()),
+                generation,
             }),
         }
     }
@@ -50,10 +57,12 @@ impl SessionHandle {
     /// (e.g. `/devtools/page/<targetId>`): commands carry no `sessionId` and
     /// event filtering matches frames that likewise carry none.
     pub fn new_root(conn: Connection) -> Self {
+        let generation = conn.connection_generation();
         Self {
             inner: Arc::new(Inner {
                 conn,
                 session_id: None,
+                generation,
             }),
         }
     }
@@ -81,6 +90,61 @@ impl SessionHandle {
             .conn
             .call_raw(method, params, self.inner.session_id.clone())
             .await
+    }
+
+    /// Subscribe to this session's events whose method is one of `methods`,
+    /// in the order Chrome sent them, with none lost. An entry of `methods`
+    /// that ends in `.` (such as `"Network."`) stands for every method of
+    /// that domain; any other entry stands for one method.
+    ///
+    /// The stream yields `Ok` for each such event that arrives after this
+    /// call, and then one `Err` saying why no more will come
+    /// ([`SessionEnd`](crate::routes::SessionEnd)), and then ends:
+    ///
+    /// - `Detached`: Chrome detached the session (a flat session only).
+    /// - `Disconnected` / `Shutdown`: the connection's socket died, or the
+    ///   connection was shut down.
+    /// - `Reconnected`: [`Connection::reconnect`] moved the connection to a
+    ///   new socket. A flat session doesn't exist there; the root session
+    ///   does, but a new subscription is needed for its events there, and
+    ///   the events sent in between are lost.
+    /// - `Overflowed`: [`SESSION_QUEUE_CAPACITY`](crate::routes::SESSION_QUEUE_CAPACITY)
+    ///   events were waiting to be read when another arrived. The stream
+    ///   ends rather than skip it.
+    ///
+    /// A subscription made after its session's end yields that end at once.
+    ///
+    /// Unlike [`Self::subscribe`] and [`Self::subscribe_accounted`], which
+    /// filter one broadcast of every event of the connection, each stream
+    /// here has its own queue, filled by the connection's actor with only
+    /// the events asked for.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `methods` is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use futures::StreamExt;
+    ///
+    /// # async fn example(session: zendriver_transport::SessionHandle) {
+    /// let mut frames = session.events(&["Page.frameAttached", "Page.frameDetached"]);
+    /// while let Some(Ok(event)) = frames.next().await {
+    ///     println!("{}: {}", event.method, event.params["frameId"]);
+    /// }
+    /// # }
+    /// ```
+    pub fn events(&self, methods: &[&'static str]) -> SessionEvents {
+        assert!(
+            !methods.is_empty(),
+            "a subscription needs at least one method"
+        );
+        routes::lock(&self.inner.conn.inner.routes).subscribe(
+            self.session_id(),
+            self.inner.generation,
+            methods,
+        )
     }
 
     /// Subscribe to events of type `T` on this session. Matches a flat session's
@@ -132,15 +196,9 @@ impl SessionHandle {
         // (because it subscribed later) is found here.
         let raw = self.inner.conn.subscribe_raw_accounted();
         let session_id = self.inner.session_id.clone();
-        let detached_already = session_id.as_ref().is_some_and(|sid| {
-            self.inner
-                .conn
-                .inner
-                .detached_sessions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains(sid)
-        });
+        let detached_already = session_id
+            .as_ref()
+            .is_some_and(|sid| routes::lock(&self.inner.conn.inner.routes).is_detached(sid));
         let past_detach = detached_already.then(|| AccountedRawEvent::Shutdown {
             generation: self.inner.conn.connection_generation(),
         });
@@ -185,6 +243,7 @@ mod tests {
     use super::*;
     use crate::connection::spawn_actor;
     use crate::connection::test_only::duplex_pair;
+    use crate::routes::SessionEnd;
     use crate::testing::MockConnection;
     use serde_json::json;
     use tokio_tungstenite::tungstenite::Message;
@@ -336,5 +395,131 @@ mod tests {
             Some(AccountedRawEvent::Shutdown { generation: 1 }) => {}
             other => panic!("expected Shutdown, got {other:?}"),
         }
+    }
+
+    /// The next item of `events`, which must come within a second.
+    async fn next_of(events: &mut SessionEvents) -> Option<Result<RawEvent, SessionEnd>> {
+        tokio::time::timeout(std::time::Duration::from_secs(1), events.next())
+            .await
+            .unwrap()
+    }
+
+    /// The methods of the events `events` yields until its end, which must
+    /// come within a second, and the end.
+    async fn drain(events: &mut SessionEvents) -> (Vec<String>, SessionEnd) {
+        let mut methods = Vec::new();
+        loop {
+            match next_of(events).await.unwrap() {
+                Ok(event) => methods.push(event.method),
+                Err(end) => {
+                    assert!(next_of(events).await.is_none(), "the end is the last item");
+                    return (methods, end);
+                }
+            }
+        }
+    }
+
+    /// Through the actor: a session's stream gets its methods of its
+    /// session, in the order sent, and ends at its detach.
+    #[tokio::test]
+    async fn events_come_in_order_and_end_at_the_detach() {
+        let (mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn, "S1");
+        let mut events = sess.events(&["Page.frameAttached", "Page.frameDetached"]);
+
+        for (method, session) in [
+            ("Page.frameAttached", "S1"),
+            ("Page.frameNavigated", "S1"),
+            ("Page.frameAttached", "S2"),
+            ("Page.frameDetached", "S1"),
+            ("Page.frameAttached", "S1"),
+        ] {
+            mock.emit_event_for_session(method, json!({}), session)
+                .await;
+        }
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S1" }))
+            .await;
+
+        let (methods, end) = drain(&mut events).await;
+        assert_eq!(
+            methods,
+            [
+                "Page.frameAttached",
+                "Page.frameDetached",
+                "Page.frameAttached"
+            ]
+        );
+        assert_eq!(end, SessionEnd::Detached);
+        let (methods, end) = drain(&mut sess.events(&["Page."])).await;
+        assert!(methods.is_empty());
+        assert_eq!(
+            end,
+            SessionEnd::Detached,
+            "a later subscription ends at once"
+        );
+    }
+
+    /// Through the actor: a reconnect ends a flat session's stream, and a
+    /// handle made before it can't subscribe again; a root session can.
+    #[tokio::test]
+    async fn events_end_at_a_reconnect() {
+        let (mut mock, conn) = MockConnection::pair();
+        let flat = SessionHandle::new(conn.clone(), "S1");
+        let root = SessionHandle::new_root(conn.clone());
+        let mut flat_events = flat.events(&["Page."]);
+        let mut root_events = root.events(&["Page."]);
+        mock.reconnect(&conn);
+        assert_eq!(drain(&mut flat_events).await.1, SessionEnd::Reconnected);
+        assert_eq!(drain(&mut root_events).await.1, SessionEnd::Reconnected);
+        assert_eq!(
+            drain(&mut flat.events(&["Page."])).await.1,
+            SessionEnd::Reconnected
+        );
+
+        let mut root_events = root.events(&["Page."]);
+        mock.emit_event("Page.loadEventFired", json!({})).await;
+        assert_eq!(
+            next_of(&mut root_events).await.unwrap().unwrap().method,
+            "Page.loadEventFired"
+        );
+    }
+
+    /// Through the actor: the socket's death and a shutdown end every
+    /// stream, and later subscriptions at once.
+    #[tokio::test]
+    async fn events_end_with_the_connection() {
+        let (mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let mut events = sess.events(&["Page."]);
+        mock.emit_event_for_session("Page.loadEventFired", json!({}), "S1")
+            .await;
+        mock.disconnect();
+        let (methods, end) = drain(&mut events).await;
+        assert_eq!(methods, ["Page.loadEventFired"]);
+        assert_eq!(end, SessionEnd::Disconnected);
+        assert_eq!(
+            drain(&mut sess.events(&["Page."])).await.1,
+            SessionEnd::Disconnected
+        );
+
+        let (_mock, conn) = MockConnection::pair();
+        let mut events = SessionHandle::new_root(conn.clone()).events(&["Page."]);
+        conn.shutdown();
+        assert_eq!(drain(&mut events).await.1, SessionEnd::Shutdown);
+    }
+
+    /// Through the actor: a subscriber that doesn't read loses its stream,
+    /// not some of its events.
+    #[tokio::test]
+    async fn events_overflow_ends_the_stream() {
+        let (mock, conn) = MockConnection::pair_with_session_queue_capacity(2);
+        let sess = SessionHandle::new(conn, "S1");
+        let mut events = sess.events(&["Page."]);
+        for method in ["Page.a", "Page.b", "Page.c", "Page.d"] {
+            mock.emit_event_for_session(method, json!({}), "S1").await;
+        }
+        let (methods, end) = drain(&mut events).await;
+        assert_eq!(methods, ["Page.a", "Page.b"]);
+        assert_eq!(end, SessionEnd::Overflowed);
     }
 }

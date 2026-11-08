@@ -124,6 +124,18 @@ impl MockConnection {
         (mock, conn)
     }
 
+    /// Variant of [`Self::pair`] whose
+    /// [`SessionHandle::events`](crate::SessionHandle::events) subscribers
+    /// each get a queue of `capacity` events, so that a test can make one
+    /// end with [`crate::SessionEnd::Overflowed`] by emitting more than
+    /// `capacity` events before the subscriber reads any.
+    #[must_use]
+    pub fn pair_with_session_queue_capacity(capacity: usize) -> (Self, Connection) {
+        let (mock, conn) = Self::pair();
+        conn.set_session_queue_capacity(capacity);
+        (mock, conn)
+    }
+
     /// Block until the driver sends a command whose `method` field matches.
     /// Returns the command id. Wrap in [`tokio::time::timeout`] at test sites
     /// — there is no built-in timeout.

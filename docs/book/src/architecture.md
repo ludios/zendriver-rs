@@ -54,8 +54,13 @@ clone that wraps that sender. The actor task:
    a response to a command or an event), and routes them.
 3. For responses: looks up the pending `oneshot::Sender` in a
    `HashMap<id, oneshot::Sender<Result<Value>>>` and resolves it.
-4. For events: fans them out via a `tokio::sync::broadcast` so every
-   subscriber gets a copy without blocking the actor loop.
+4. For events: puts each event on the queue of every subscriber of its
+   session that asked for its method (`SessionHandle::events`: in the
+   order Chrome sent them, with none lost; a subscriber that falls
+   65,536 events behind loses its stream instead). It also fans every
+   event out via a `tokio::sync::broadcast` for the raw, connection-wide
+   subscribers, which can fall behind and miss events. Neither blocks
+   the actor loop.
 5. For `Target.attachedToTarget`: invokes each registered
    [`TargetObserver`] (stealth applies its overrides, and any JS
    bootstrap, here) **before**

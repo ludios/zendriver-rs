@@ -1,6 +1,5 @@
 //! `Connection` — the public handle to the transport actor.
 
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -19,6 +18,7 @@ use crate::actor::{
 use crate::error::{CallError, TransportError};
 use crate::frame::{AccountedRawEvent, RawEvent};
 use crate::observer::TargetObserver;
+use crate::routes::{self, Routes};
 
 /// Default ceiling on a single observer's `on_target_attached` future, applied
 /// before the actor releases the debugger via
@@ -163,12 +163,15 @@ pub(crate) struct ConnectionInner {
     /// replays a past end). It also tells a call that finds the actor gone
     /// why it is gone; see [`actor_gone_error`].
     pub(crate) generation_end: Mutex<Option<GenerationEnd>>,
-    /// The sessions that Chrome has detached (`Target.detachedFromTarget`),
-    /// recorded by the actor before it broadcasts the detach, so that a
+    /// The subscribers of each session's events
+    /// ([`SessionHandle::events`](crate::session::SessionHandle::events)),
+    /// and the sessions Chrome has detached. Shared with the actor, which
+    /// takes it when it starts (holding the `ConnectionInner` itself would
+    /// keep the actor alive forever). The actor records a detach here before
+    /// it broadcasts the detach, so that a
     /// [`SessionHandle::subscribe_accounted`](crate::session::SessionHandle::subscribe_accounted)
-    /// that starts after the detach still ends. Grows by one entry per
-    /// detached session over the connection's life.
-    pub(crate) detached_sessions: Mutex<HashSet<String>>,
+    /// that starts after the detach still ends.
+    pub(crate) routes: Arc<Mutex<Routes>>,
     /// Cancellation token of the *current* actor. Swapped on reconnect: the
     /// old actor is cancelled (its already-dead `pending` drains) and the new
     /// actor gets a fresh token. Each spawned actor owns its own clone, so
@@ -222,7 +225,7 @@ impl std::fmt::Debug for ConnectionInner {
             .field("accounted_tx", &self.accounted_tx)
             .field("generation", &self.generation)
             .field("generation_end", &self.generation_end)
-            .field("detached_sessions", &self.detached_sessions)
+            .field("routes", &self.routes)
             .field("shutdown", &self.shutdown)
             .field("observer_timeout", &self.observer_timeout)
             .field("call_timeout_ms", &self.call_timeout_ms)
@@ -694,6 +697,7 @@ impl Connection {
         // Announce the transition BEFORE spawning the new actor, so a
         // subscriber that exists now never observes an event tagged with the
         // new generation before `Reconnected`.
+        routes::lock(&self.inner.routes).start_generation(new_generation);
         let _ = self
             .inner
             .accounted_tx
@@ -792,6 +796,16 @@ impl Connection {
     /// (and for tests that override the default).
     pub(crate) fn observer_timeout(&self) -> Duration {
         self.inner.observer_timeout
+    }
+
+    /// Give each later subscriber of
+    /// [`SessionHandle::events`](crate::session::SessionHandle::events) a
+    /// queue of `capacity` events instead of
+    /// [`SESSION_QUEUE_CAPACITY`](crate::routes::SESSION_QUEUE_CAPACITY), so
+    /// that a test can make one overflow.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn set_session_queue_capacity(&self, capacity: usize) {
+        routes::lock(&self.inner.routes).set_capacity(capacity);
     }
 }
 
@@ -935,7 +949,7 @@ where
         accounted_tx: accounted_tx.clone(),
         generation: AtomicU64::new(1),
         generation_end: Mutex::new(None),
-        detached_sessions: Mutex::new(HashSet::new()),
+        routes: Arc::new(Mutex::new(Routes::new())),
         shutdown: Mutex::new(shutdown.clone()),
         observer_timeout,
         call_timeout_ms: AtomicU64::new(DEFAULT_CALL_TIMEOUT.as_millis() as u64),
@@ -1421,7 +1435,7 @@ mod tests {
             accounted_tx,
             generation: AtomicU64::new(1),
             generation_end: Mutex::new(None),
-            detached_sessions: Mutex::new(HashSet::new()),
+            routes: Arc::new(Mutex::new(Routes::new())),
             shutdown: Mutex::new(CancellationToken::new()),
             observer_timeout: DEFAULT_OBSERVER_TIMEOUT,
             call_timeout_ms: AtomicU64::new(DEFAULT_CALL_TIMEOUT.as_millis() as u64),

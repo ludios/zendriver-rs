@@ -1,5 +1,5 @@
 //! Internal CDP transport for `zendriver`: WebSocket I/O, command/response
-//! routing, event broadcast.
+//! routing, event delivery.
 //!
 //! > [!WARNING]
 //! > This crate has **no independent SemVer contract** — its surface may
@@ -15,6 +15,9 @@
 //! - [`Connection`] — cheap, clonable handle to the actor task. All `Tab`s
 //!   and `Element`s hold one.
 //! - [`SessionHandle`] — a connection scoped to a particular CDP `sessionId`.
+//!   Its [`events`](session::SessionHandle::events) stream delivers the
+//!   session's events in order, with none lost ([`SessionEvents`],
+//!   ending with a [`SessionEnd`]).
 //! - [`CdpCommand`] / [`CdpInbound`] / [`CdpRpcError`] / [`RawEvent`] — wire
 //!   types.
 //! - [`AccountedRawEvent`] — opt-in loss-accounted alternative to
@@ -40,6 +43,7 @@ pub mod connection;
 pub mod error;
 pub mod frame;
 pub mod observer;
+pub mod routes;
 pub mod session;
 
 #[cfg(any(test, feature = "testing"))]
@@ -55,4 +59,5 @@ pub use frame::{AccountedRawEvent, CdpCommand, CdpInbound, CdpRpcError, RawEvent
 pub use observer::{
     ObserverError, ObserverFailurePolicy, PausedSession, TargetInfo, TargetObserver,
 };
+pub use routes::{SESSION_QUEUE_CAPACITY, SessionEnd, SessionEvents};
 pub use session::SessionHandle;
