@@ -236,19 +236,17 @@ The subscriber task is canceled before the error returns, so there's no
 leaked listener.
 
 If the connection to Chrome drops, reconnects, or is shut down, or the tab
-closes, or a broadcast subscriber falls behind while an expectation is
-waiting, the future instead resolves to
+closes, while an expectation is waiting, or the expectation falls so far
+behind its events that their queue overflows (4,096 of them unread), the
+future instead resolves to
 [`ZendriverError::EventStreamIncomplete`](https://docs.rs/zendriver/latest/zendriver/enum.ZendriverError.html#variant.EventStreamIncomplete)
 — distinct from `Timeout` because the awaited event may in fact have fired,
 but the delivery gap means it can no longer be confirmed either way. Treat it
 as "re-establish and re-wait" (unless you closed the tab or browser
 yourself), not as "it didn't happen".
 
-> **Note:** the delivery lag that triggers this is connection-wide, not
-> scoped to the awaited event — a `Lagged` boundary on the shared CDP
-> broadcast can abort an `expect_*` wait even when the lag was on
-> unrelated traffic, so callers on event-heavy pages may see
-> `EventStreamIncomplete` more often.
+An expectation's queue holds only the awaited method's events of its own
+tab, so traffic of other methods or other tabs never fills it.
 
 ## When to use which
 

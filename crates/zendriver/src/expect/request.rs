@@ -349,32 +349,37 @@ mod tests {
         conn.shutdown();
     }
 
-    /// Sibling of the disconnect test above, forcing a `Lagged` boundary
-    /// instead: `MockConnection::pair_with_accounted_capacity(2)` gives the
-    /// accounted bus a 2-slot capacity, so pushing 5 unrelated events
-    /// overflows it and the next accounted poll reports `Lagged`. Per the
-    /// documented policy on [`crate::expect::watch`], `Lagged` can't prove
-    /// the awaited request wasn't among the dropped frames, so it also
+    /// Sibling of the disconnect test above, ending the subscription with an
+    /// overflow instead: with 2-slot queues, five requests that arrive
+    /// before the expectation's task reads any overflow its queue. Per the
+    /// documented policy on [`crate::expect::watch`], an overflow can't
+    /// prove the awaited request wasn't among the events lost, so it also
     /// surfaces as `EventStreamIncomplete` rather than `Timeout`.
     #[tokio::test]
-    async fn expect_request_returns_event_stream_incomplete_on_lagged_boundary() {
-        let (mock, conn) = MockConnection::pair_with_accounted_capacity(2);
+    async fn expect_request_returns_event_stream_incomplete_on_overflow() {
+        let (mock, conn) = MockConnection::pair_with_session_queue_capacity(2);
         let session = SessionHandle::new(conn.clone(), "S1");
 
         let expectation = register(&session, UrlMatcher::from("/api/"));
 
-        // Overflow the 2-slot accounted bus with unrelated events before the
-        // expectation's subscriber ever gets to poll it.
         for i in 0..5u32 {
-            mock.emit_event("Test.dummy", json!({ "i": i })).await;
+            mock.emit_event_for_session(
+                "Network.requestWillBeSent",
+                json!({
+                    "requestId": format!("R{i}"),
+                    "request": { "url": "https://other.test/", "method": "GET" }
+                }),
+                "S1",
+            )
+            .await;
         }
 
         let res = tokio::time::timeout(Duration::from_secs(2), expectation)
             .await
-            .expect("expectation did not resolve within 2s after the lag");
+            .expect("expectation did not resolve within 2s after the overflow");
         assert!(
             matches!(res, Err(ZendriverError::EventStreamIncomplete)),
-            "expected EventStreamIncomplete after a Lagged boundary, got {res:?}",
+            "expected EventStreamIncomplete after an overflow, got {res:?}",
         );
 
         conn.shutdown();

@@ -27,40 +27,30 @@ pub mod response;
 pub use crate::url_matcher::UrlMatcher;
 
 use futures::{Stream, StreamExt};
-use zendriver_transport::{AccountedRawEvent, SessionHandle};
+use zendriver_transport::SessionHandle;
 
 use crate::error::{Result, ZendriverError};
 
 /// Subscribe to `method`-shaped events scoped to `session`, decoded via
 /// `T`'s [`serde::de::DeserializeOwned`] impl. Backs every `expect_*`
-/// subscriber task — riding [`SessionHandle::subscribe_accounted`]
-/// (rather than the plain [`SessionHandle::subscribe`]) so a delivery-loss
-/// boundary crossed while a wait is in progress is visible instead of
-/// silently vanishing.
+/// subscriber task, on [`SessionHandle::events`], which delivers the
+/// session's `method` events in order and without gaps until it ends.
 ///
 /// Yields `Ok(T)` for every successfully-decoded `method` event on this
 /// session. Yields `Err(`[`ZendriverError::EventStreamIncomplete`]`)` on:
 ///
-/// - [`AccountedRawEvent::Disconnected`] / [`AccountedRawEvent::Shutdown`] /
-///   [`AccountedRawEvent::Reconnected`] — the watched stream is gone, so the
-///   caller can no longer prove the awaited condition didn't occur just
-///   before the boundary. (A flat session's stream also ends with
-///   `Shutdown` when Chrome detaches the session, as it does when
-///   [`crate::Tab::close`] closes a tab without its own socket.)
-/// - [`AccountedRawEvent::Lagged`] — this subscriber missed frames it can't
-///   recover. There's no way to prove the awaited event wasn't among them,
-///   so a "no show" (`Timeout`) would be a possibly-wrong claim. Treated the
-///   same as an outright disconnect — mirrors the `IdleLossPolicy::Strict`
-///   precedent in `Tab::wait_for_idle_opts`, which makes the identical call
-///   for the same reason.
+/// - The subscription's end, whatever its reason
+///   ([`SessionEnd`](zendriver_transport::SessionEnd)): the session
+///   detached (as when [`crate::Tab::close`] closes a tab without its own
+///   socket), its socket died or was shut or replaced, or the waiting
+///   expectation fell so far behind its events that their queue overflowed.
+///   Either way the caller can no longer prove the awaited condition didn't
+///   occur just before the end, so a "no show" (`Timeout`) would be a
+///   possibly-wrong claim.
 /// - A decode failure on an event that otherwise matches `method` +
 ///   `session` — the event we were waiting for arrived in a shape we can't
 ///   parse, which leaves us just as unable to confirm the awaited condition
 ///   as an outright loss would.
-///
-/// Events for any other method or session are silently skipped: they were
-/// never candidates for the awaited condition, so their absence from the
-/// output isn't a loss of anything this caller cares about.
 pub(crate) fn watch<T>(
     session: &SessionHandle,
     method: &'static str,
@@ -68,33 +58,9 @@ pub(crate) fn watch<T>(
 where
     T: serde::de::DeserializeOwned + Send + 'static,
 {
-    let raw = session.subscribe_accounted();
-    Box::pin(raw.filter_map(move |acc| async move {
-        match acc {
-            AccountedRawEvent::Event { event, .. } => {
-                if event.method == method {
-                    match serde_json::from_value::<T>(event.params) {
-                        Ok(v) => Some(Ok(v)),
-                        Err(_) => Some(Err(ZendriverError::EventStreamIncomplete)),
-                    }
-                } else {
-                    None
-                }
-            }
-            // coverage: `Reconnected` and `Shutdown` share this arm with
-            // `Lagged` / `Disconnected`. Each boundary has its own
-            // end-to-end test
-            // (`expect_response_returns_event_stream_incomplete_on_{reconnect,disconnect,shutdown,detach}`,
-            // plus the `Lagged` capacity harness) — if this arm is ever
-            // split (e.g. reconnect-specific retry semantics), keep those
-            // per-boundary tests so coverage doesn't silently regress.
-            AccountedRawEvent::Lagged { .. }
-            | AccountedRawEvent::Reconnected { .. }
-            | AccountedRawEvent::Disconnected { .. }
-            | AccountedRawEvent::Shutdown { .. } => {
-                Some(Err(ZendriverError::EventStreamIncomplete))
-            }
-        }
+    Box::pin(session.events(&[method]).map(|next| {
+        let event = next.map_err(|_| ZendriverError::EventStreamIncomplete)?;
+        T::deserialize(&event.params).map_err(|_| ZendriverError::EventStreamIncomplete)
     }))
 }
 

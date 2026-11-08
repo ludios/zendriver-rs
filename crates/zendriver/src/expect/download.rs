@@ -39,14 +39,14 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use serde::Deserialize;
 use tempfile::TempDir;
 use tokio::sync::{oneshot, watch};
 use tokio::time::Sleep;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::warn;
-use zendriver_transport::{AccountedRawEvent, Connection, SessionHandle};
+use zendriver_transport::{Connection, SessionEnd, SessionEvents, SessionHandle};
 
 use crate::browser::BrowserInner;
 use crate::download_behavior::DownloadMode;
@@ -254,18 +254,22 @@ impl Downloads {
         Ok(dir)
     }
 
-    /// What the follower knows, after starting it if it isn't running yet.
-    /// `conn` is the browser's own connection. The follower sees every
-    /// event that Chrome sends after this returns.
+    /// What the follower knows, after starting it if it isn't running yet
+    /// (or has stopped, because the connection's socket died or was shut
+    /// down). `conn` is the browser's own connection. The follower sees
+    /// every event that Chrome sends after this returns.
     fn records(&self, conn: &Connection) -> Arc<Mutex<Records>> {
         let mut follower = lock(&self.follower);
         if let Some(follower) = follower.as_ref() {
-            return follower.records.clone();
+            if !lock(&follower.records).ended {
+                return follower.records.clone();
+            }
         }
         let records = Arc::new(Mutex::new(Records::default()));
         let stop = CancellationToken::new();
-        let events = conn.subscribe_raw_accounted();
-        tokio::spawn(follow(events, records.clone(), stop.clone()));
+        let session = SessionHandle::new_root(conn.clone());
+        let events = session.events(FOLLOWED);
+        tokio::spawn(follow(session, events, records.clone(), stop.clone()));
         *follower = Some(Follower {
             records: records.clone(),
             _stop: stop.drop_guard(),
@@ -289,32 +293,28 @@ struct DownloadProgressEvent {
     file_path: Option<PathBuf>,
 }
 
-/// Follow `events`, the browser connection's events, into `records`, until
-/// `stop` is cancelled or the connection is shut down; then end every
-/// download still in progress as [`DownloadProgressState::Unknown`].
+/// The events of the browser's own session that the follower reads. (A
+/// page session that turned download events on would send copies of its
+/// own, which aren't read.)
+const FOLLOWED: &[&str] = &["Browser.downloadProgress"];
+
+/// Follow `events`, the browser's own `session`'s subscription to
+/// [`FOLLOWED`], into `records`, until `stop` is cancelled or the
+/// connection's socket dies or is shut down; then end every download still
+/// in progress as [`DownloadProgressState::Unknown`].
 async fn follow(
-    mut events: impl Stream<Item = AccountedRawEvent> + Unpin,
+    session: SessionHandle,
+    mut events: SessionEvents,
     records: Arc<Mutex<Records>>,
     stop: CancellationToken,
 ) {
     loop {
-        let event = tokio::select! {
+        let next = tokio::select! {
             () = stop.cancelled() => None,
-            event = events.next() => event,
+            next = events.next() => next,
         };
-        let Some(event) = event else {
-            let mut records = lock(&records);
-            records.lose_track();
-            records.ended = true;
-            return;
-        };
-        match event {
-            AccountedRawEvent::Event { event, .. } => {
-                // Only the browser session's: a page session that turned
-                // download events on would send copies of its own.
-                if event.session_id.is_some() || event.method != "Browser.downloadProgress" {
-                    continue;
-                }
+        match next {
+            Some(Ok(event)) => {
                 match DownloadProgressEvent::deserialize(&event.params) {
                     Ok(ev) => {
                         let progress = Progress {
@@ -336,15 +336,20 @@ async fn follow(
                     }
                 }
             }
-            AccountedRawEvent::Shutdown { .. } => {
+            // Some downloads' events may be lost: those that overflowed
+            // the queue, or those sent while the connection moved to a new
+            // socket (where the browser's own session goes on).
+            Some(Err(SessionEnd::Overflowed | SessionEnd::Reconnected)) => {
+                lock(&records).lose_track();
+                events = session.events(FOLLOWED);
+            }
+            // The socket died or was shut down, or the follower was stopped.
+            Some(Err(_)) | None => {
                 let mut records = lock(&records);
                 records.lose_track();
                 records.ended = true;
                 return;
             }
-            // A lag, a reconnect, or the socket's death (after which a
-            // reconnect may follow) may have cost some downloads' events.
-            _ => lock(&records).lose_track(),
         }
     }
 }
