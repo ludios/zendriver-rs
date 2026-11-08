@@ -147,7 +147,8 @@ pub(crate) async fn serve_scroll_into_view(mock: &mut MockConnection) {
 }
 
 /// Serve one pass of the actionability gate for `require`, answering every
-/// predicate `true`.
+/// predicate `true`, and, when `require` hit-tests, the hit test (see
+/// [`serve_hit_test`]).
 ///
 /// Takes the check set rather than a count so the number of probes is derived
 /// from the same value the code under test gates on. A hand-written count
@@ -155,7 +156,35 @@ pub(crate) async fn serve_scroll_into_view(mock: &mut MockConnection) {
 /// unrelated `Runtime.callFunctionOn`, and the test dies later at an
 /// `expect` for a frame that was already eaten.
 pub(crate) async fn serve_gate_probes(mock: &mut MockConnection, require: ActionabilityCheck) {
-    for _ in 0..require.probe_count() {
+    for _ in 0..require.js_probe_count() {
         serve_call(mock, json!({ "value": true, "type": "boolean" })).await;
     }
+    if require.receives_pointer {
+        serve_hit_test(mock).await;
+    }
+}
+
+/// A `DOM.getBoxModel` reply for a 100x50 box whose top-left corner is at
+/// (10, 20), all four of its boxes alike.
+pub(crate) fn box_model_reply() -> Value {
+    let quad = json!([10.0, 20.0, 110.0, 20.0, 110.0, 70.0, 10.0, 70.0]);
+    json!({ "model": {
+        "content": quad, "padding": quad, "border": quad, "margin": quad,
+        "width": 100, "height": 50,
+    } })
+}
+
+/// Serve the gate's hit test (`check_receives_pointer`): the element's box
+/// ([`box_model_reply`]), a page scrolled nowhere, and a hit on the element
+/// itself, whose backend node id the box request names.
+pub(crate) async fn serve_hit_test(mock: &mut MockConnection) {
+    let id = expect(mock, "DOM.getBoxModel").await;
+    let element = mock.last_sent()["params"]["backendNodeId"].clone();
+    mock.reply(id, box_model_reply()).await;
+    let id = expect(mock, "Page.getLayoutMetrics").await;
+    let viewport = json!({ "cssLayoutViewport": { "pageX": 0, "pageY": 0 } });
+    mock.reply(id, viewport).await;
+    let id = expect(mock, "DOM.getNodeForLocation").await;
+    mock.reply(id, json!({ "backendNodeId": element, "frameId": "F" }))
+        .await;
 }

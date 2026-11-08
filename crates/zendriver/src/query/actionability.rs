@@ -33,10 +33,12 @@
 //! `tests/actionability.rs` runs `check_enabled` on each case that its doc
 //! lists, and checks that a click waits for its control to be enabled.
 //!
-//! `check_stable` has no live fixture at all, and `check_receives_pointer`
-//! has only `tests/element_world_regressions.rs`'s click inside an iframe,
-//! where nothing covers the element. Widening either means writing the
-//! fixture that would catch the mistake; do not assume one is waiting.
+//! `tests/actionability.rs` also runs `check_receives_pointer` on an element
+//! in a closed shadow root, and on one that an overlay covers;
+//! `tests/element_world_regressions.rs` clicks inside an iframe. Every
+//! gated click in the live tests runs `check_stable`, but nothing checks
+//! that it holds an animating element back; widening it means writing the
+//! fixture that would catch the mistake.
 
 use std::time::Duration;
 
@@ -113,18 +115,17 @@ impl ActionabilityCheck {
     };
 
     /// How many `Runtime.callFunctionOn` probes one pass of
-    /// [`wait_actionable`] sends for this set — one per enabled predicate.
+    /// [`wait_actionable`] sends for this set: one per enabled JavaScript
+    /// predicate (visible, enabled, stable). The hit test, when enabled,
+    /// follows them, as CDP calls of its own.
     ///
     /// Exists so a test fixture can serve exactly the gate's calls without
     /// hard-coding a count per preset: a count that drifts from the set does
     /// not fail cleanly, it eats the *next* unrelated call and the failure
     /// surfaces at a later, unrelated `expect`.
     #[cfg(test)]
-    pub(crate) const fn probe_count(self) -> usize {
-        self.visible as usize
-            + self.enabled as usize
-            + self.stable as usize
-            + self.receives_pointer as usize
+    pub(crate) const fn js_probe_count(self) -> usize {
+        self.visible as usize + self.enabled as usize + self.stable as usize
     }
 }
 
@@ -355,11 +356,65 @@ pub(crate) async fn check_enabled(el: &Element) -> Result<bool> {
     Ok(res.get("value").and_then(|v| v.as_bool()).unwrap_or(false))
 }
 
-/// `true` iff a synthesized click at the point that will actually be clicked
-/// would land on the element (or one of its descendants). Walks the ancestor
-/// chain of `document.elementFromPoint(cx, cy)`; if our element appears in that
-/// chain, pointer events reach it. Returns `false` when a sibling overlay
-/// covers the hit point.
+/// Whether the node with the backend id `node` is `el` or inside it,
+/// counting a shadow root's content as inside its host.
+///
+/// Resolves `node` into `el`'s world, whose context id `el`'s object id
+/// holds, and walks up from it there. A node that Chrome won't resolve into
+/// that world (one in another frame's document, say) isn't inside `el`.
+async fn is_inside(el: &Element, node: i64) -> Result<bool> {
+    let context_id =
+        crate::isolated_world::context_id_of_object(&el.remote_object_id_cloned().await?)?;
+    let tab = el.tab();
+    let resolved = tab
+        .call(
+            "DOM.resolveNode",
+            json!({ "backendNodeId": node, "executionContextId": context_id }),
+        )
+        .await;
+    let resolved = match resolved {
+        Ok(resolved) => resolved,
+        Err(ZendriverError::Cdp { .. }) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let Some(object_id) = resolved["object"]["objectId"].as_str() else {
+        return Ok(false);
+    };
+    // `Node.prototype`'s getter, not `n.parentNode`: a form's control named
+    // `parentNode` hides the form's own.
+    let js = r#"
+        function(el, node) {
+            const parentOf = Object.getOwnPropertyDescriptor(Node.prototype, 'parentNode').get;
+            for (let n = node; n; n = parentOf.call(n) || n.host) {
+                if (n === el) return true;
+            }
+            return false;
+        }
+    "#;
+    let res = el
+        .call_on_main(js, json!([{ "objectId": object_id }]))
+        .await;
+    // Best effort: a handle left behind only holds memory until its
+    // document goes away.
+    let _ = tab
+        .call("Runtime.releaseObject", json!({ "objectId": object_id }))
+        .await;
+    Ok(res?.get("value").and_then(|v| v.as_bool()).unwrap_or(false))
+}
+
+/// `true` iff a click at the point that will actually be clicked would land
+/// on the element or inside it (see [`is_inside`]). Returns `false` when
+/// something else covers the point.
+///
+/// Asks Chrome's own hit test, `DOM.getNodeForLocation`, at the point of the
+/// page that `Input.dispatchMouseEvent` will use: the element's
+/// [`crate::Element::bounding_box`] plus `position` (or its centre), plus the
+/// page's scroll offset, since `DOM.getNodeForLocation` takes a point of the
+/// page rather than of the viewport. That hit test sees into shadow roots,
+/// closed ones too, where `document.elementFromPoint` stops at the host;
+/// it sees across frames, so an overlay in the top page that covers an
+/// element in an iframe counts; and, like a real click, it passes through
+/// `pointer-events: none`.
 ///
 /// `position` is the caller's offset from the bbox top-left, matching
 /// [`crate::ClickOptions::position`]; `None` hit-tests the centre. Probing a
@@ -369,40 +424,44 @@ pub(crate) async fn check_receives_pointer(
     el: &Element,
     position: Option<(f64, f64)>,
 ) -> Result<bool> {
-    let js = r#"
-        function(el, dx, dy) {
-            if (!el || !el.isConnected) return false;
-            const rect = el.getBoundingClientRect();
-            if (rect.width <= 0 || rect.height <= 0) return false;
-            // A caller with no explicit position passes no arguments at all,
-            // so dx/dy arrive as `undefined` — `Number.isFinite` covers that
-            // and any non-numeric junk in one test, falling back to the centre.
-            const cx = Number.isFinite(dx) ? rect.left + dx : rect.left + rect.width / 2;
-            const cy = Number.isFinite(dy) ? rect.top + dy : rect.top + rect.height / 2;
-            let hit = document.elementFromPoint(cx, cy);
-            while (hit) {
-                if (hit === el) return true;
-                hit = hit.parentElement;
-            }
-            return false;
-        }
-    "#;
-    // `Runtime.callFunctionOn` takes an array of CallArgument *objects*, so
-    // each coordinate has to be wrapped in `{ "value": … }`; passing the bare
-    // numbers made Chrome reject the whole call with "Invalid parameters"
-    // ("Failed to deserialize params.arguments"), which failed every gated
-    // `click` / `hover` / `tap` against a real browser. The mock tests could
-    // not catch it — `MockConnection` doesn't validate CDP parameter shapes.
-    //
-    // `call_on_main` prepends the element handle, so these land at
-    // arguments[1] / arguments[2] — which is where the leading `el`
-    // parameter in the declaration above leaves `dx` / `dy`.
-    let args = match position {
-        Some((dx, dy)) => json!([{ "value": dx }, { "value": dy }]),
-        None => json!([]),
+    let Some(bbox) = el.bounding_box().await? else {
+        return Ok(false);
     };
-    let res = el.call_on_main(js, args).await?;
-    Ok(res.get("value").and_then(|v| v.as_bool()).unwrap_or(false))
+    if bbox.width <= 0.0 || bbox.height <= 0.0 {
+        return Ok(false);
+    }
+    let (dx, dy) = position.unwrap_or((bbox.width / 2.0, bbox.height / 2.0));
+    let tab = el.tab();
+    let metrics = tab.call("Page.getLayoutMetrics", json!({})).await?;
+    let scroll_x = metrics["cssLayoutViewport"]["pageX"]
+        .as_f64()
+        .unwrap_or(0.0);
+    let scroll_y = metrics["cssLayoutViewport"]["pageY"]
+        .as_f64()
+        .unwrap_or(0.0);
+    let x = (bbox.x + dx + scroll_x).round();
+    let y = (bbox.y + dy + scroll_y).round();
+    let hit = tab
+        .call(
+            "DOM.getNodeForLocation",
+            json!({ "x": x as i64, "y": y as i64 }),
+        )
+        .await;
+    let hit = match hit {
+        Ok(hit) => hit,
+        // Nothing there: the point is outside the page.
+        Err(ZendriverError::Cdp { ref message, .. }) if message.contains("No node found") => {
+            return Ok(false);
+        }
+        Err(e) => return Err(e),
+    };
+    let Some(hit) = hit["backendNodeId"].as_i64() else {
+        return Ok(false);
+    };
+    if hit == el.backend_node_id_cloned().await? {
+        return Ok(true);
+    }
+    is_inside(el, hit).await
 }
 
 /// Poll each predicate in `require` at 50 ms intervals until all enabled
@@ -459,7 +518,7 @@ pub(crate) async fn wait_actionable(
 mod tests {
     use super::*;
     use crate::tab::Tab;
-    use crate::test_support::{js_params, serve_call};
+    use crate::test_support::{box_model_reply, expect, js_params, serve_call};
     use serde_json::Value;
     use zendriver_transport::SessionHandle;
     use zendriver_transport::testing::MockConnection;
@@ -606,66 +665,107 @@ mod tests {
         assert!(shown, "a `true` probe result must resolve to visible");
     }
 
-    /// `check_receives_pointer` must wrap its coordinates as CallArgument
-    /// *objects* (`{ "value": … }`).
-    ///
-    /// Regression pin for a live-only bug: the bare `[dx, dy]` this used to
-    /// send made Chrome reject the whole call with `-32602 Invalid parameters`
-    /// ("Failed to deserialize params.arguments"), so every gated `click` /
-    /// `hover` / `tap` failed against a real browser while the mock suite
-    /// stayed green — `MockConnection` replays frames without validating CDP
-    /// parameter shapes. Hence an explicit assertion on the shape.
-    #[tokio::test]
-    async fn check_receives_pointer_wraps_its_coordinates_as_call_arguments() {
-        // `call_on_main` prepends the element handle, so the coordinates are
-        // the second and third arguments — each one an object, never a bare
-        // number.
-        assert_eq!(
-            probe_pointer_args(Some((3.0, 4.0))).await,
-            json!([{ "objectId": "R1" }, { "value": 3.0 }, { "value": 4.0 }]),
-            "an explicit click position must travel as two CallArgument objects",
-        );
-
-        // No position → no coordinates at all, leaving dx/dy `undefined` in
-        // the JS, which is what its `Number.isFinite` centre-fallback reads.
-        assert_eq!(
-            probe_pointer_args(None).await,
-            json!([{ "objectId": "R1" }]),
-            "a centre hit-test must send no coordinates rather than bare nulls",
-        );
-    }
-
-    /// Drive one `check_receives_pointer` probe against a fresh mock and hand
-    /// back the `arguments` array it put on the wire.
-    async fn probe_pointer_args(at: Option<(f64, f64)>) -> Value {
-        let (mut mock, conn) = MockConnection::pair();
+    /// Drive one `check_receives_pointer` probe for an element with backend
+    /// id 99 and the box of [`box_model_reply`], on a page scrolled down by
+    /// 300 px, with the hit test answering `hit`. Hands back the point it
+    /// hit-tested, and the probe's verdict.
+    async fn probe_pointer(
+        mock: &mut MockConnection,
+        conn: &zendriver_transport::Connection,
+        object_id: &str,
+        at: Option<(f64, f64)>,
+        hit: Result<i64, &str>,
+    ) -> (Value, tokio::task::JoinHandle<Result<bool>>) {
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let tab = Tab::new_for_test(sess);
-        let el = Element::from_jsret(tab, 99, "R1".to_string());
-
-        // Spawn before serving: nothing goes out until the probe is running.
+        let el = Element::from_jsret(Tab::new_for_test(sess), 99, object_id.to_string());
         let fut = tokio::spawn(async move { check_receives_pointer(&el, at).await });
 
-        let params = serve_call(&mut mock, json!({ "value": true, "type": "boolean" })).await;
-
-        assert!(fut.await.unwrap().unwrap());
-        conn.shutdown();
-        params["arguments"].clone()
+        let id = expect(mock, "DOM.getBoxModel").await;
+        mock.reply(id, box_model_reply()).await;
+        let id = expect(mock, "Page.getLayoutMetrics").await;
+        let viewport = json!({ "cssLayoutViewport": { "pageX": 0, "pageY": 300 } });
+        mock.reply(id, viewport).await;
+        let id = expect(mock, "DOM.getNodeForLocation").await;
+        let point = mock.last_sent()["params"].clone();
+        match hit {
+            Ok(node) => {
+                mock.reply(id, json!({ "backendNodeId": node, "frameId": "F" }))
+                    .await
+            }
+            Err(message) => mock.reply_err(id, -32000, message).await,
+        }
+        (point, fut)
     }
 
-    /// Every predicate binds the element as its first positional argument,
-    /// and `check_receives_pointer` takes its coordinates in `(dx, dy)` order.
+    /// The hit test probes the point of the page that the click will use:
+    /// the box's top-left corner plus the position (else the box's centre),
+    /// plus the page's scroll offset. A hit on the element itself passes
+    /// with no further call.
+    #[tokio::test]
+    async fn check_receives_pointer_hit_tests_the_clicks_point_of_the_page() {
+        for (at, x, y) in [(None, 60, 345), (Some((3.0, 4.0)), 13, 324)] {
+            let (mut mock, conn) = MockConnection::pair();
+            let (point, fut) = probe_pointer(&mut mock, &conn, "1.5.1", at, Ok(99)).await;
+            assert_eq!(point["x"], x, "{at:?}");
+            assert_eq!(point["y"], y, "{at:?}");
+            assert!(point.get("ignorePointerEventsNone").is_none(), "{point}");
+            assert!(fut.await.unwrap().unwrap(), "{at:?}");
+            conn.shutdown();
+        }
+    }
+
+    /// Nothing at the point (outside the page) fails the hit test.
+    #[tokio::test]
+    async fn check_receives_pointer_fails_where_nothing_is() {
+        let (mut mock, conn) = MockConnection::pair();
+        let nothing = Err("No node found at given location");
+        let (_, fut) = probe_pointer(&mut mock, &conn, "1.5.1", None, nothing).await;
+        assert!(!fut.await.unwrap().unwrap());
+        conn.shutdown();
+    }
+
+    /// A hit on another node passes iff that node is inside the element:
+    /// the node is resolved into the element's world (whose context id the
+    /// element's object id holds), the walk up from it runs there, and the
+    /// node's handle is released.
+    #[tokio::test]
+    async fn check_receives_pointer_asks_whether_another_hit_is_inside() {
+        for inside in [true, false] {
+            let (mut mock, conn) = MockConnection::pair();
+            let (_, fut) = probe_pointer(&mut mock, &conn, "1.5.1", None, Ok(7)).await;
+            let id = expect(&mut mock, "DOM.resolveNode").await;
+            assert_eq!(mock.last_sent()["params"]["backendNodeId"], 7);
+            assert_eq!(mock.last_sent()["params"]["executionContextId"], 5);
+            mock.reply(id, json!({ "object": { "objectId": "1.5.2" } }))
+                .await;
+            let call = serve_call(&mut mock, json!({ "value": inside, "type": "boolean" })).await;
+            assert_eq!(
+                call["arguments"],
+                json!([{ "objectId": "1.5.1" }, { "objectId": "1.5.2" }])
+            );
+            assert_eq!(
+                js_params(call["functionDeclaration"].as_str().unwrap()),
+                ["el", "node"]
+            );
+            let id = expect(&mut mock, "Runtime.releaseObject").await;
+            assert_eq!(mock.last_sent()["params"]["objectId"], "1.5.2");
+            mock.reply(id, json!({})).await;
+            assert_eq!(fut.await.unwrap().unwrap(), inside);
+            conn.shutdown();
+        }
+    }
+
+    /// Every JavaScript predicate binds the element as its first positional
+    /// argument.
     ///
     /// `call_on_main` prepends the element handle to `arguments`, so a body
     /// that forgot its leading `el` parameter would silently read the handle
-    /// as its first *caller* argument — and, for the three no-argument
+    /// as its first *caller* argument — and, for the two no-argument
     /// predicates, see `el` as `undefined` and answer `false` for everything.
-    /// This drives all four past that in one go.
+    /// This drives all three past that in one go.
     ///
     /// The whole parameter list is asserted, not just the leading name: a
-    /// `starts_with("function(el")` check accepts `function(elephant, dy, dx)`
-    /// — right prefix, transposed coordinates, every hit-test off by the
-    /// difference between the two offsets.
+    /// `starts_with("function(el")` check also accepts `function(elephant)`.
     #[tokio::test]
     async fn every_predicate_binds_the_element_as_its_first_argument() {
         let (mut mock, conn) = MockConnection::pair();
@@ -680,17 +780,16 @@ mod tests {
                     check_visible(&e, Within::Anywhere).await.unwrap(),
                     check_enabled(&e).await.unwrap(),
                     check_stable(&e).await.unwrap(),
-                    check_receives_pointer(&e, None).await.unwrap(),
                 )
             }
         });
 
         let mut calls = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..3 {
             calls.push(serve_call(&mut mock, json!({ "value": true, "type": "boolean" })).await);
         }
 
-        assert_eq!(fut.await.unwrap(), (true, true, true, true));
+        assert_eq!(fut.await.unwrap(), (true, true, true));
 
         let sources: Vec<&str> = calls
             .iter()
@@ -706,17 +805,10 @@ mod tests {
             "{}",
             sources[2]
         );
-        assert!(sources[3].contains("elementFromPoint"), "{}", sources[3]);
 
-        // The visibility check binds `inViewport` after `el`; the next two
-        // predicates bind `el` and nothing else; the hit-test binds the two
-        // offsets after it, dx before dy.
-        let expected = [
-            vec!["el", "inViewport"],
-            vec!["el"],
-            vec!["el"],
-            vec!["el", "dx", "dy"],
-        ];
+        // The visibility check binds `inViewport` after `el`; the other two
+        // predicates bind `el` and nothing else.
+        let expected = [vec!["el", "inViewport"], vec!["el"], vec!["el"]];
         for ((call, js), want) in calls.iter().zip(&sources).zip(expected) {
             assert_eq!(js_params(js), want, "{js}");
             assert_eq!(

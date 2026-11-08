@@ -117,3 +117,57 @@ async fn a_click_waits_for_its_fieldset_to_be_enabled() {
     assert_eq!(eval(&tab, "window.clicked === true").await, true);
     browser.close().await;
 }
+
+/// A button in a closed shadow root, one that an overlay covers, and one
+/// under an overlay that pointer events pass through.
+const POINTER_PAGE: &str = r#"<!doctype html>
+<div id="host"></div>
+<div style="position: relative">
+  <button id="covered" onclick="window.coveredClicked = true">Covered</button>
+  <div style="position: absolute; inset: 0; background: rgba(0, 0, 0, 0.5)"></div>
+</div>
+<div style="position: relative">
+  <button id="see-through" onclick="window.seeThroughClicked = true">See-through</button>
+  <div style="position: absolute; inset: 0; pointer-events: none"></div>
+</div>
+<script>
+document.getElementById('host').attachShadow({ mode: 'closed' }).innerHTML =
+  '<button onclick="window.shadowClicked = true">In a closed shadow root</button>';
+</script>"#;
+
+/// The hit test sees into a closed shadow root and through
+/// `pointer-events: none`, and refuses a click that an overlay covers.
+#[tokio::test]
+async fn a_click_lands_where_chromes_hit_test_says() {
+    let page = Router::new().route("/pointer", get(|| async { Html(POINTER_PAGE) }));
+    let server = FixtureServer::start_with(page).await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url("127.0.0.1", "/pointer")).await;
+
+    let shadow = tab
+        .find()
+        .role_named(zendriver::AriaRole::Button, "closed shadow root")
+        .one()
+        .await
+        .expect("the button in the closed shadow root");
+    shadow.click().await.expect("click in the shadow root");
+    assert_eq!(eval(&tab, "window.shadowClicked === true").await, true);
+
+    let see_through = tab.find().css("#see-through").one().await.expect("button");
+    see_through
+        .click()
+        .await
+        .expect("click through the overlay");
+    assert_eq!(eval(&tab, "window.seeThroughClicked === true").await, true);
+
+    let covered = tab.find().css("#covered").one().await.expect("button");
+    match tokio::time::timeout(Duration::from_secs(15), covered.click()).await {
+        Ok(Err(zendriver::ZendriverError::NotActionable(_, reason))) => {
+            assert!(reason.contains("occluded"), "{reason}");
+        }
+        other => panic!("expected NotActionable for #covered, got {other:?}"),
+    }
+    assert_eq!(eval(&tab, "window.coveredClicked === true").await, false);
+    browser.close().await;
+}
