@@ -169,10 +169,11 @@ scope. This means:
 
 For the main-world escape hatch, use `evaluate_main(...)`. It dispatches
 the same `Runtime.evaluate` but targets the page's default context.
-`Frame::evaluate_main` targets the frame's own main world, which
-zendriver finds without `Runtime.enable` (a well-known automation tell):
-`DOM.resolveNode` with no context id wraps the frame's document in that
-world, and V8 writes the world's context id into the returned object's id.
+On an iframe, `Frame::evaluate_main` targets the iframe's own main world,
+which zendriver finds without `Runtime.enable` (a well-known automation
+tell): `DOM.resolveNode` with no context id wraps the iframe's document in
+that world, and V8 writes the world's context id into the returned
+object's id.
 
 Element queries (`find()` / `find_all()`) and everything done to the
 elements they return run in the isolated world too, that of the frame

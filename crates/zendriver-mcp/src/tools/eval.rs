@@ -21,8 +21,7 @@
 //!
 //! When set, dispatches through [`zendriver::Frame::evaluate`] /
 //! `evaluate_main` instead of the tab-level helpers. `Frame::evaluate_main`
-//! lands in the frame's own main world, both for an OOPIF and for an iframe
-//! in the page's process.
+//! lands in the frame's own main world.
 
 use std::sync::Arc;
 
