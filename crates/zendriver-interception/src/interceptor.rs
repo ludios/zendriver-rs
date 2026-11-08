@@ -69,7 +69,7 @@ use serde::Deserialize as _;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, warn};
-use zendriver_transport::{AccountedRawEvent, CallError, RawEvent, SessionHandle};
+use zendriver_transport::{CallError, RawEvent, SessionEnd, SessionHandle};
 
 use crate::error::InterceptionError;
 use crate::fetch::{
@@ -628,9 +628,9 @@ pub(crate) enum Command {
     Answered(u64),
 }
 
-/// A session's events, with its connection's reports of lost events and
-/// of the socket's end (see [`session_events`]).
-type SessionEvents = Pin<Box<dyn Stream<Item = AccountedRawEvent> + Send>>;
+/// A session's `Fetch` events, in order, until one `Err` says why they
+/// stopped (see [`session_events`]).
+type SessionEvents = Pin<Box<dyn Stream<Item = Result<Arc<RawEvent>, SessionEnd>> + Send>>;
 
 /// How long the multiplexer remembers having answered a proxy challenge with
 /// the credentials. Chrome repeats a challenge whose credentials the proxy
@@ -706,21 +706,21 @@ fn auth_response(
     })
 }
 
-/// `session`'s events, read from its loss-accounted stream
-/// ([`SessionHandle::subscribe_accounted`]), which also says when events
-/// were lost, and when the socket died. A flat session's stream yields a
-/// `Shutdown` and ends when the session detaches. The returned stream also
-/// ends at once when the socket is shut or replaced (either cancels the
-/// socket's shutdown token), skipping the events still queued, since no
-/// answer to them could be sent.
+/// `session`'s `Fetch` events ([`SessionHandle::events`]), in order, until
+/// one `Err` says why they stopped (for example, the session detached).
+/// The returned stream also ends at once, with no `Err`, when the socket is
+/// shut or replaced (either cancels the socket's shutdown token), skipping
+/// the events still queued, since no answer to them could be sent.
 fn session_events(session: &SessionHandle) -> SessionEvents {
     let shut = session.connection().shutdown_token().cancelled_owned();
-    Box::pin(session.subscribe_accounted().take_until(shut))
+    Box::pin(session.events(&["Fetch."]).take_until(shut))
 }
 
 /// The next of `events`, or `None` if they ended. Never ready while there
 /// are no events to read.
-async fn next_event(events: &mut Option<SessionEvents>) -> Option<AccountedRawEvent> {
+async fn next_event(
+    events: &mut Option<SessionEvents>,
+) -> Option<Result<Arc<RawEvent>, SessionEnd>> {
     match events {
         Some(events) => events.next().await,
         None => std::future::pending().await,
@@ -1141,7 +1141,7 @@ impl Mux {
         }
     }
 
-    fn on_event(&mut self, event: RawEvent) {
+    fn on_event(&mut self, event: &RawEvent) {
         match event.method.as_str() {
             "Fetch.requestPaused" => self.dispatch(&event.params),
             "Fetch.authRequired" => self.authenticate(&event.params),
@@ -1149,15 +1149,15 @@ impl Mux {
         }
     }
 
-    /// Some events were lost, so a request paused then may have been missed,
-    /// and would stay paused for good: disable `Fetch`, which continues
-    /// every request still paused (including those a stream holds), and
-    /// enable it again.
-    async fn recover(&mut self, missed: u64) {
+    /// The events overflowed their queue, so a request paused since may
+    /// have been missed, and would stay paused for good: disable `Fetch`,
+    /// which continues every request still paused (including those a
+    /// stream holds), subscribe again, and enable `Fetch` again.
+    async fn recover(&mut self) {
         warn!(
-            missed,
-            "interception: lost events; disabling Fetch, which continues every paused request, then enabling it again"
+            "interception: its Fetch events overflowed their queue; disabling Fetch, which continues every paused request, then enabling it again"
         );
+        self.events = None;
         match self.session.call("Fetch.disable", json!({})).await {
             // It released every pause.
             Ok(_) => self.held.clear(),
@@ -1165,18 +1165,9 @@ impl Mux {
                 warn!(error = %e, "interception: Fetch.disable failed; the held pauses stay held")
             }
         }
-        let held_open = !self.held.is_empty();
-        let applied = configure(
-            &self.session,
-            &self.slots,
-            self.proxy_auth.as_ref(),
-            held_open,
-        )
-        .await;
-        if let Err(e) = applied {
+        if let Err(e) = self.apply().await {
             warn!(error = %e, "interception: Fetch.enable failed; the entries are inert");
         }
-        self.unsubscribe_if_idle();
     }
 
     /// Nothing can send the multiplexer commands any more (the last
@@ -1320,17 +1311,11 @@ async fn run(
                 mux.obey(command).await;
             }
             event = next_event(&mut mux.events) => match event {
-                Some(AccountedRawEvent::Event { event, .. }) => mux.on_event(event),
-                Some(AccountedRawEvent::Lagged { missed, .. }) => mux.recover(missed).await,
-                // A reconnect gives the connection a new socket, where this
-                // session doesn't exist. A `Shutdown` may also mean that the
-                // session detached from its target.
-                Some(
-                    AccountedRawEvent::Reconnected { .. }
-                    | AccountedRawEvent::Disconnected { .. }
-                    | AccountedRawEvent::Shutdown { .. },
-                )
-                | None => mux.end(),
+                Some(Ok(event)) => mux.on_event(&event),
+                Some(Err(SessionEnd::Overflowed)) => mux.recover().await,
+                // Any other end: the session detached, or its socket died or
+                // was shut or replaced (a new socket doesn't have it).
+                Some(Err(_)) | None => mux.end(),
             },
         }
     }
@@ -2032,17 +2017,19 @@ mod tests {
         conn.shutdown();
     }
 
-    /// Lost events make the multiplexer disable `Fetch` (which continues
-    /// any pause it missed) and enable it again with every entry's pattern.
+    /// An overflow of its events' queue makes the multiplexer disable
+    /// `Fetch` (which continues any pause it missed) and enable it again
+    /// with every entry's pattern.
     #[tokio::test]
-    async fn lost_events_disable_fetch_and_enable_it_again() {
-        let (mut mock, conn) = MockConnection::pair_with_accounted_capacity(4);
+    async fn an_overflow_disables_fetch_and_enables_it_again() {
+        let (mut mock, conn) = MockConnection::pair_with_session_queue_capacity(4);
         let interceptor = Interceptor::new(SessionHandle::new(conn.clone(), "S1"));
         let first = vec![rule("*/a/*", Action::Block(AbortReason::Failed))];
         let (_first, _) = applied(&mut mock, interceptor.insert(first, Position::Last)).await;
 
         // While the multiplexer waits for Chrome, more events arrive than
-        // its bus holds.
+        // its queue holds (of a method it ignores, so the only commands it
+        // sends are the recovery's).
         let second = vec![rule("*/b/*", Action::Block(AbortReason::Failed))];
         let second = tokio::spawn({
             let interceptor = interceptor.clone();
@@ -2050,7 +2037,7 @@ mod tests {
         });
         let id = mock.expect_cmd("Fetch.enable").await;
         for _ in 0..10 {
-            mock.emit_event_for_session("Network.dataReceived", json!({}), "S1")
+            mock.emit_event_for_session("Fetch.unknown", json!({}), "S1")
                 .await;
         }
         mock.reply(id, json!({})).await;
@@ -2074,7 +2061,7 @@ mod tests {
     /// is still failed.
     #[tokio::test]
     async fn a_refused_recovery_keeps_the_held_pauses() {
-        let (mut mock, conn) = MockConnection::pair_with_accounted_capacity(4);
+        let (mut mock, conn) = MockConnection::pair_with_session_queue_capacity(4);
         let interceptor = Interceptor::new(SessionHandle::new(conn.clone(), "S1"));
         let (mut stream, _) = applied(
             &mut mock,
@@ -2088,7 +2075,8 @@ mod tests {
             .unwrap();
 
         // While the multiplexer waits for Chrome, more events arrive than
-        // its bus holds.
+        // its queue holds (of a method it ignores, so the only commands it
+        // sends are the recovery's).
         let rules = vec![rule("*/b/*", Action::Block(AbortReason::Failed))];
         let insert = tokio::spawn({
             let interceptor = interceptor.clone();
@@ -2096,7 +2084,7 @@ mod tests {
         });
         let id = mock.expect_cmd("Fetch.enable").await;
         for _ in 0..10 {
-            mock.emit_event_for_session("Network.dataReceived", json!({}), "S1")
+            mock.emit_event_for_session("Fetch.unknown", json!({}), "S1")
                 .await;
         }
         mock.reply(id, json!({})).await;
