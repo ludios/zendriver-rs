@@ -165,10 +165,14 @@ injects:
 
 It also sends `Emulation.setHardwareConcurrencyOverride`, so Chrome's own
 `navigator.hardwareConcurrency` reports the persona's CPU count, and
-`Emulation.setCPUPerformanceOverride`, so `navigator.cpuPerformance`
-reports the tier that Chrome gives that count (from 1 for low to 4 for
-ultra) instead of the host's tier. A dedicated worker still reports the
-host's count and memory: no override or patch reaches it.
+when that count isn't the host's, `Emulation.setCPUPerformanceOverride`,
+so `navigator.cpuPerformance` reports the tier that Chrome would most
+likely give that count (from 1 for low to 4 for ultra) instead of the
+host's tier. That override needs Chrome 153 or newer; on Chrome 152 the
+page reports the host's tier. (For the host's own count, Chrome's tier is
+left alone: Chrome also weighs the host's CPU model, which a persona
+doesn't name.) A dedicated worker still reports the host's count and
+memory: no override or patch reaches it.
 
 Everything else comes from Chrome itself, as under `native()`: the
 launch flags hide `navigator.webdriver` and stop WebRTC from gathering

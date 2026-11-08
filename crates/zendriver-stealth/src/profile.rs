@@ -183,9 +183,10 @@ impl StealthProfile {
     /// CDP or at launch: `navigator.deviceMemory`, the WebGL and WebGPU
     /// values, noise on canvas, audio and client rects, fonts, and hardware
     /// hints (see [`Persona`](crate::Persona)). It also sends
-    /// `Emulation.setHardwareConcurrencyOverride`, and
-    /// `Emulation.setCPUPerformanceOverride` with the tier that Chrome gives
-    /// that CPU count (`navigator.cpuPerformance`; Chrome 153 on).
+    /// `Emulation.setHardwareConcurrencyOverride`, and, for a CPU count
+    /// other than the host's, `Emulation.setCPUPerformanceOverride` with the
+    /// tier that Chrome would most likely give that count
+    /// (`navigator.cpuPerformance`; Chrome 153 on).
     ///
     /// Each patch replaces a Chrome function with a JS one, which
     /// lie-detecting scripts (such as creepjs) can find, so use `spoofed`
@@ -250,8 +251,9 @@ impl StealthProfile {
         self
     }
     /// Override the reported `navigator.hardwareConcurrency` (CPU count).
-    /// Under `spoofed`, `navigator.cpuPerformance` reports the tier that
-    /// Chrome gives this count.
+    /// Under `spoofed`, when this isn't the host's count,
+    /// `navigator.cpuPerformance` reports the tier that Chrome would most
+    /// likely give it (on Chrome 153 or newer).
     ///
     /// Clamped to `2..=32` at resolve time — values outside that range are
     /// implausibly low/high and trip simple heuristics.

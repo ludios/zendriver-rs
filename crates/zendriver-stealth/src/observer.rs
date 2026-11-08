@@ -14,7 +14,7 @@ use zendriver_transport::{CallError, ObserverError, PausedSession, TargetObserve
 use crate::patches::{bootstrap_script, bootstrap_script_native_webgl};
 use crate::persona::GeoPos;
 use crate::persona::specs::{ScreenSpec, UaMetadata};
-use crate::{Fingerprint, Persona, Platform, ProfileKind, StealthError, StealthProfile};
+use crate::{Fingerprint, Persona, ProfileKind, StealthError, StealthProfile};
 
 /// The height that [`headless_screen_switches`] leaves for a taskbar when the
 /// screen has no `avail_height`; the default that [`ScreenSpec`] documents.
@@ -248,6 +248,9 @@ pub struct StealthObserver {
     /// fingerprint-derived value outright. Field-wise rather than
     /// whole-value, which is why it is not folded into `fingerprint`.
     ua_metadata: Option<UaMetadata>,
+    /// The `navigator.cpuPerformance` tier that `Spoofed` reports, or `None`
+    /// to leave Chrome's (see [`cpu_tier_override`]).
+    cpu_tier: Option<&'static str>,
 }
 
 impl StealthObserver {
@@ -297,12 +300,20 @@ impl StealthObserver {
         };
         let geolocation = persona.geolocation;
         let ua_metadata = persona.ua.as_ref().and_then(|u| u.ua_metadata.clone());
+        let claimed = match &ua_metadata {
+            Some(custom) => custom.resolve(&fingerprint.ua_metadata),
+            None => fingerprint.ua_metadata.clone(),
+        };
+        let apple_silicon = claimed.platform == "macOS" && claimed.architecture == "arm";
+        let host_cores = u32::try_from(num_cpus::get()).unwrap_or(u32::MAX);
+        let cpu_tier = cpu_tier_override(fingerprint.cpu_count, host_cores, apple_silicon);
         Self {
             profile,
             fingerprint,
             bootstrap,
             geolocation,
             ua_metadata,
+            cpu_tier,
         }
     }
 
@@ -347,9 +358,10 @@ impl StealthObserver {
     }
 }
 
-/// The `navigator.cpuPerformance` tier that Chrome reports on a machine
-/// with `cores` logical processors, as `Emulation.setCPUPerformanceOverride`
-/// names it. `apple_silicon`: whether the CPU is one of Apple's M series.
+/// The `navigator.cpuPerformance` tier that Chrome would most likely report
+/// on a machine with `cores` logical processors, as
+/// `Emulation.setCPUPerformanceOverride` names it. `apple_silicon`: whether
+/// the CPU is one of Apple's M series.
 ///
 /// Chrome derives the tier from the processor count and the CPU's model
 /// (`GetTierFromCpuInfo` in Chromium's
@@ -368,6 +380,22 @@ fn cpu_performance_tier(cores: u32, apple_silicon: bool) -> &'static str {
         5..=10 => "high",
         _ => "ultra",
     }
+}
+
+/// The `navigator.cpuPerformance` tier to report for a page told that it
+/// has `cores` logical processors, on a host with `host_cores`; or `None`
+/// to leave Chrome's own tier. `apple_silicon`: whether the identity claims
+/// an Apple M-series CPU.
+///
+/// Chrome's own tier is the right one when `cores` is the host's count,
+/// since Chrome also weighs the host's CPU model, which a fingerprint
+/// doesn't name. Otherwise the page would pair the persona's count with the
+/// host's tier, which Chrome would derive from neither.
+fn cpu_tier_override(cores: u32, host_cores: u32, apple_silicon: bool) -> Option<&'static str> {
+    if cores == host_cores {
+        return None;
+    }
+    Some(cpu_performance_tier(cores, apple_silicon))
 }
 
 #[async_trait::async_trait]
@@ -442,11 +470,11 @@ impl TargetObserver for StealthObserver {
         // `navigator.hardwareConcurrency`, in the page and its same-process
         // iframes; a worker still reports the host's.
         //
-        // `navigator.cpuPerformance` (Chrome 152 on, in windows only) follows
-        // the same count, since Chrome derives it from the host's processors
-        // and a real machine never pairs the persona's count with the host's
-        // tier. Chrome only has the override from 153 on, so a Chrome without
-        // it reports the host's tier.
+        // `navigator.cpuPerformance` (Chrome 152 on; only on a window's
+        // `navigator`, not a worker's, and only in a secure context) follows
+        // the same count when it isn't the host's (see `cpu_tier_override`).
+        // Chrome has the override only from 153 on; on an older Chrome the
+        // page reports the host's tier.
         //
         // Chrome rejects a count outside 1 to `i32::MAX`, which would fail the
         // page's setup; the page then reports the host's count and tier.
@@ -465,17 +493,22 @@ impl TargetObserver for StealthObserver {
                     json!({ "hardwareConcurrency": cores }),
                 )
                 .await?;
-            let apple_silicon = self.fingerprint.platform == Platform::MacIntel
-                && user_agent_metadata.architecture == "arm";
-            let tier = cpu_performance_tier(cores, apple_silicon);
-            let reply = session
-                .call(
-                    "Emulation.setCPUPerformanceOverride",
-                    json!({ "performanceTier": tier }),
-                )
-                .await;
-            if !matches!(reply, Err(CallError::Rpc(-32601, ..))) {
-                reply?;
+            if let Some(tier) = self.cpu_tier {
+                let reply = session
+                    .call(
+                        "Emulation.setCPUPerformanceOverride",
+                        json!({ "performanceTier": tier }),
+                    )
+                    .await;
+                if matches!(reply, Err(CallError::Rpc(-32601, ..))) {
+                    tracing::debug!(
+                        tier,
+                        "Chrome lacks Emulation.setCPUPerformanceOverride (added in 153); \
+                         the page reports the host's CPU tier"
+                    );
+                } else {
+                    reply?;
+                }
             }
         }
 
@@ -588,6 +621,14 @@ mod tests {
     use serde_json::json;
     use zendriver_transport::testing::MockConnection;
 
+    /// This host's logical processor count. A fingerprint with this count
+    /// gets no `Emulation.setCPUPerformanceOverride` (see
+    /// [`cpu_tier_override`]), so the command sequences below don't depend
+    /// on the host.
+    fn host_cores() -> u32 {
+        u32::try_from(num_cpus::get()).unwrap()
+    }
+
     /// `Emulation.setUserAgentOverride` carries the platform on TWO distinct axes, and they
     /// must not be swapped:
     ///
@@ -635,7 +676,7 @@ mod tests {
             platform: Platform::MacIntel,
             chrome_major: 120,
             chrome_full: "120.0.6099.234".into(),
-            cpu_count: 10,
+            cpu_count: host_cores(),
             memory_gb: 8,
             ua_string: crate::ua::compose_ua_string(Platform::MacIntel, "120.0.6099.234"),
             ua_metadata: crate::UserAgentMetadata::realistic(
@@ -676,7 +717,6 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
-            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
@@ -717,7 +757,7 @@ mod tests {
             platform: Platform::MacIntel,
             chrome_major: 120,
             chrome_full: "120.0.6099.234".into(),
-            cpu_count: 10,
+            cpu_count: host_cores(),
             memory_gb: 8,
             ua_string: crate::ua::compose_ua_string(Platform::MacIntel, "120.0.6099.234"),
             ua_metadata: crate::UserAgentMetadata::realistic(
@@ -755,7 +795,6 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
-            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setLocaleOverride",
             "Page.addScriptToEvaluateOnNewDocument",
@@ -804,7 +843,7 @@ mod tests {
             platform: Platform::MacIntel,
             chrome_major: 120,
             chrome_full: "120.0.6099.234".into(),
-            cpu_count: 10,
+            cpu_count: host_cores(),
             memory_gb: 8,
             ua_string: crate::ua::compose_ua_string(Platform::MacIntel, "120.0.6099.234"),
             ua_metadata: crate::UserAgentMetadata::realistic(
@@ -842,7 +881,6 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
-            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setLocaleOverride",
             "Page.addScriptToEvaluateOnNewDocument",
@@ -876,7 +914,7 @@ mod tests {
             platform: Platform::MacIntel,
             chrome_major: 120,
             chrome_full: "120.0.6099.234".into(),
-            cpu_count: 10,
+            cpu_count: host_cores(),
             memory_gb: 8,
             ua_string: crate::ua::compose_ua_string(Platform::MacIntel, "120.0.6099.234"),
             ua_metadata: crate::UserAgentMetadata::realistic(
@@ -913,7 +951,6 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
-            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
@@ -947,7 +984,7 @@ mod tests {
             platform: Platform::MacIntel,
             chrome_major: 120,
             chrome_full: "120.0.6099.234".into(),
-            cpu_count: 10,
+            cpu_count: host_cores(),
             memory_gb: 8,
             ua_string: crate::ua::compose_ua_string(Platform::MacIntel, "120.0.6099.234"),
             ua_metadata: crate::UserAgentMetadata::realistic(
@@ -984,7 +1021,6 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
-            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
@@ -1015,7 +1051,7 @@ mod tests {
             platform: Platform::MacIntel,
             chrome_major: 120,
             chrome_full: "120.0.6099.234".into(),
-            cpu_count: 10,
+            cpu_count: host_cores(),
             memory_gb: 8,
             ua_string: crate::ua::compose_ua_string(Platform::MacIntel, "120.0.6099.234"),
             ua_metadata: crate::UserAgentMetadata::realistic(
@@ -1060,7 +1096,6 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
-            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Emulation.setGeolocationOverride",
             "Page.addScriptToEvaluateOnNewDocument",
@@ -1088,7 +1123,7 @@ mod tests {
             platform: Platform::MacIntel,
             chrome_major: 120,
             chrome_full: "120.0.6099.234".into(),
-            cpu_count: 10,
+            cpu_count: host_cores(),
             memory_gb: 8,
             ua_string: crate::ua::compose_ua_string(Platform::MacIntel, "120.0.6099.234"),
             ua_metadata: crate::UserAgentMetadata::realistic(
@@ -1136,7 +1171,6 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
-            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
@@ -1166,7 +1200,7 @@ mod tests {
             platform: Platform::MacIntel,
             chrome_major: 120,
             chrome_full: "120.0.6099.234".into(),
-            cpu_count: 10,
+            cpu_count: host_cores(),
             memory_gb: 8,
             ua_string: crate::ua::compose_ua_string(Platform::MacIntel, "120.0.6099.234"),
             ua_metadata: crate::UserAgentMetadata::realistic(
@@ -1205,7 +1239,6 @@ mod tests {
             "Page.enable",
             "Emulation.setUserAgentOverride",
             "Emulation.setHardwareConcurrencyOverride",
-            "Emulation.setCPUPerformanceOverride",
             "Emulation.setFocusEmulationEnabled",
             "Page.addScriptToEvaluateOnNewDocument",
             "Runtime.runIfWaitingForDebugger",
@@ -1234,7 +1267,7 @@ mod tests {
             platform: Platform::MacIntel,
             chrome_major: 120,
             chrome_full: "120.0.6099.234".into(),
-            cpu_count: 10,
+            cpu_count: host_cores(),
             memory_gb: 8,
             ua_string: crate::ua::compose_ua_string(Platform::MacIntel, "120.0.6099.234"),
             ua_metadata: crate::UserAgentMetadata::realistic(
@@ -1308,7 +1341,7 @@ mod tests {
             platform: Platform::MacIntel,
             chrome_major: 120,
             chrome_full: "120.0.6099.234".into(),
-            cpu_count: 10,
+            cpu_count: host_cores(),
             memory_gb: 8,
             ua_string: String::new(),
             ua_metadata: crate::UserAgentMetadata::realistic(
@@ -1538,10 +1571,48 @@ mod persona_reaches_cdp_tests {
                 Some(expected),
                 "persona hardware_concurrency {pinned:?}"
             );
+        }
+    }
+
+    /// This host's logical processor count.
+    fn host_cores() -> u32 {
+        u32::try_from(num_cpus::get()).unwrap()
+    }
+
+    #[test]
+    fn cpu_tier_override_leaves_the_hosts_own_count_to_chrome() {
+        assert_eq!(cpu_tier_override(8, 8, true), None);
+        assert_eq!(cpu_tier_override(6, 32, false), Some("high"));
+        assert_eq!(cpu_tier_override(8, 16, true), Some("ultra"));
+    }
+
+    /// The observer reports a tier for a CPU count other than the host's,
+    /// and leaves Chrome's own tier for the host's count.
+    #[tokio::test]
+    async fn spoofed_reports_a_cpu_tier_only_for_a_count_other_than_the_hosts() {
+        let host = host_cores();
+        for (pinned, tier) in [
+            (host, None),
+            (host + 1, Some(cpu_performance_tier(host + 1, false))),
+        ] {
+            let persona = Persona {
+                hardware_concurrency: Some(pinned),
+                ..Persona::default()
+            };
+            let frames = drive_attach(StealthObserver::with_persona(
+                StealthProfile::spoofed(),
+                bare_fingerprint(),
+                persona,
+            ))
+            .await;
+            let sent = frames
+                .iter()
+                .find(|f| f["method"] == "Emulation.setCPUPerformanceOverride")
+                .map(|f| f["params"]["performanceTier"].clone());
             assert_eq!(
-                params(&frames, "Emulation.setCPUPerformanceOverride")["performanceTier"],
-                if expected > 10 { "ultra" } else { "high" },
-                "persona hardware_concurrency {pinned:?}"
+                sent,
+                tier.map(Value::from),
+                "{pinned} of the host's {host} CPUs"
             );
         }
     }
@@ -1570,15 +1641,18 @@ mod persona_reaches_cdp_tests {
         }
     }
 
-    /// A Mac persona whose UA-CH architecture is `arm` has an M-series CPU,
-    /// which Chrome rates a tier higher at 8 to 10 cores.
-    #[tokio::test]
-    async fn spoofed_rates_an_arm_macs_cpu_as_apple_silicon() {
-        let fp = Fingerprint {
-            cpu_count: 8,
-            ..bare_fingerprint()
-        };
-        for (architecture, tier) in [(None, "high"), (Some("arm"), "ultra")] {
+    /// A Mac persona whose UA-CH architecture is `arm` claims an M-series
+    /// CPU, which Chrome rates a tier higher at 8 to 10 cores; an `arm`
+    /// Windows persona doesn't.
+    #[test]
+    fn an_arm_mac_persona_gets_the_tier_of_apple_silicon() {
+        let cores = if host_cores() == 8 { 9 } else { 8 };
+        let cases = [
+            (Platform::MacIntel, None, "high"),
+            (Platform::MacIntel, Some("arm"), "ultra"),
+            (Platform::Win32, Some("arm"), "high"),
+        ];
+        for (platform, architecture, tier) in cases {
             let ua = architecture.map(|a| crate::persona::specs::UaSpec {
                 ua_metadata: Some(UaMetadata {
                     architecture: Some(a.into()),
@@ -1587,19 +1661,20 @@ mod persona_reaches_cdp_tests {
                 ..Default::default()
             });
             let persona = Persona {
+                platform: Some(platform),
+                hardware_concurrency: Some(cores),
                 ua,
                 ..Persona::default()
             };
-            let frames = drive_attach(StealthObserver::with_persona(
+            let observer = StealthObserver::with_persona(
                 StealthProfile::spoofed(),
-                fp.clone(),
+                bare_fingerprint(),
                 persona,
-            ))
-            .await;
+            );
             assert_eq!(
-                params(&frames, "Emulation.setCPUPerformanceOverride")["performanceTier"],
-                tier,
-                "architecture {architecture:?}"
+                observer.cpu_tier,
+                Some(tier),
+                "{platform:?}, {architecture:?}"
             );
         }
     }
@@ -1609,13 +1684,20 @@ mod persona_reaches_cdp_tests {
     #[tokio::test]
     async fn spoofed_goes_on_without_the_cpu_tier_override() {
         let missing = ["Emulation.setCPUPerformanceOverride"];
-        let observer = StealthObserver::with_persona(
-            StealthProfile::spoofed(),
-            bare_fingerprint(),
-            Persona::default(),
-        );
+        let persona = Persona {
+            hardware_concurrency: Some(host_cores() + 1),
+            ..Persona::default()
+        };
+        let observer =
+            StealthObserver::with_persona(StealthProfile::spoofed(), bare_fingerprint(), persona);
         let frames = drive_attach_without(observer, &missing).await;
         let methods = method_names(&frames);
+        assert!(
+            methods
+                .iter()
+                .any(|m| m == "Emulation.setCPUPerformanceOverride"),
+            "{methods:?}"
+        );
         assert!(
             methods
                 .iter()
