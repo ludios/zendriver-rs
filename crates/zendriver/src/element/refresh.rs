@@ -183,9 +183,11 @@ fn resolve_origin<'a>(
 ///     when they observe a cleared id mid-flight).
 ///   - `ZendriverError::Navigation(m)` or `ZendriverError::Cdp { message:
 ///     m, .. }` where `m` contains `"No node with given id"`, `"Cannot find
-///     context"`, or `"does not belong to the document"` (what
+///     context"`, `"does not belong to the document"` (what
 ///     `DOM.resolveNode` answers for a node of a document that a navigation
-///     replaced). The `From<CallError>` impl in `error.rs` maps `-32000
+///     replaced), or `"Node is detached from document"` (what
+///     `DOM.scrollIntoViewIfNeeded` answers for a node that the page
+///     removed). The `From<CallError>` impl in `error.rs` maps `-32000
 ///     "Cannot find context"` into the Navigation variant; DOM-domain stale
 ///     errors arrive as Cdp.
 pub(crate) fn is_stale_node_error(e: &ZendriverError) -> bool {
@@ -195,6 +197,7 @@ pub(crate) fn is_stale_node_error(e: &ZendriverError) -> bool {
             message.contains("No node with given id")
                 || message.contains("Cannot find context")
                 || message.contains("does not belong to the document")
+                || message.contains("Node is detached from document")
         }
         _ => false,
     }

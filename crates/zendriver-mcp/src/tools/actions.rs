@@ -648,7 +648,8 @@ pub struct ScrollInput {
     pub selector: Selector,
 }
 
-/// Scroll an element into the center of its scroll container.
+/// Scroll an element into view if it isn't already (see
+/// [`zendriver::Element::scroll_into_view`]).
 ///
 /// No snapshot — the layout-shift side effect is best inspected via a
 /// follow-up `browser_html` / `browser_element_state` call if the agent

@@ -78,3 +78,26 @@ async fn an_action_needs_the_element_in_the_viewport() {
     }
     browser.close().await;
 }
+
+/// An action doesn't scroll an element that is already fully in view, as a
+/// person wouldn't, even when it sits near the edge of the viewport.
+#[tokio::test]
+async fn an_action_leaves_an_element_in_view_where_it_is() {
+    let server = FixtureServer::start().await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    load(&tab, &server.url("127.0.0.1", "/below-fold")).await;
+    // `#below`'s bottom edge 20 px above the viewport's.
+    let scrolled = eval(
+        &tab,
+        "(() => { const b = document.getElementById('below').getBoundingClientRect(); \
+         scrollBy(0, b.bottom - innerHeight + 20); return scrollY; })()",
+    )
+    .await;
+
+    let below = tab.find().css("#below").one().await.expect("#below");
+    below.click().await.expect("click #below");
+    assert_eq!(eval(&tab, "window.belowClicked").await, true);
+    assert_eq!(eval(&tab, "scrollY").await, scrolled, "the click scrolled");
+    browser.close().await;
+}

@@ -138,16 +138,12 @@ pub(crate) async fn drain_mouse_dispatches(mock: &mut MockConnection) -> Vec<Val
     frames
 }
 
-/// Serve the `scroll_into_view` an action runs before its actionability
-/// gate, asserting the call really is that scroll — a fixture that silently
-/// absorbed the first `Runtime.callFunctionOn` would keep passing if the
-/// scroll ever went missing, which is the regression this guards.
+/// Serve the `scroll_into_view` (`DOM.scrollIntoViewIfNeeded`) that an
+/// action runs before its actionability gate. Waiting for that very command
+/// fails the test if the scroll ever goes missing.
 pub(crate) async fn serve_scroll_into_view(mock: &mut MockConnection) {
-    let js = serve_call_js(mock, json!({ "type": "undefined" })).await;
-    assert!(
-        js.contains("scrollIntoView"),
-        "expected scroll_into_view ahead of the actionability gate, got: {js}"
-    );
+    let id = expect(mock, "DOM.scrollIntoViewIfNeeded").await;
+    mock.reply(id, json!({})).await;
 }
 
 /// Serve one pass of the actionability gate for `require`, answering every

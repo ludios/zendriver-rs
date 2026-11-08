@@ -29,11 +29,10 @@
 //! otherwise fail the gate outright.
 //!
 //! `scroll_into_view`: no actionability gate (this *is* the visibility
-//! prereq other actions wait for). Calls `el.scrollIntoView({ block:
-//! 'center', behavior: 'instant' })`. `block: 'center'` matches Playwright
-//! (avoids sticky headers/footers obscuring the element after the scroll);
-//! `behavior: 'instant'` skips animation so the post-scroll bbox is final
-//! by the time the next CDP call runs.
+//! prereq other actions wait for). Sends `DOM.scrollIntoViewIfNeeded`,
+//! Chrome's own scroll, which moves nothing when the element is already in
+//! view, as a person wouldn't, and is instant, so the post-scroll bbox is
+//! final by the time the next CDP call runs.
 
 use std::path::Path;
 use std::time::Duration;
@@ -452,11 +451,18 @@ impl Element {
         .await
     }
 
-    /// Scroll this element into view, centered in its scroll container.
+    /// Scroll this element into view, if it isn't already, with Chrome's
+    /// own `DOM.scrollIntoViewIfNeeded`.
     ///
-    /// Synchronous (`behavior: 'instant'`) so the post-scroll bbox is final
-    /// by the time the next CDP call (e.g. `bounding_box`) runs — important
-    /// because subsequent action steps assume the layout is settled.
+    /// In each scroll container (and the page), an element that is already
+    /// fully in view isn't scrolled at all; one that is partly in view is
+    /// scrolled just far enough to be in view; and any other is centered.
+    /// So an element under a sticky header counts as in view and stays under
+    /// it; the actionability gate then reports it occluded. The scroll is
+    /// instant, so the post-scroll bbox is final by the time the next CDP
+    /// call (e.g. `bounding_box`) runs. An element with no box (under
+    /// `display: none`) isn't scrolled, and no error is raised: the gate
+    /// reports it not visible.
     ///
     /// No actionability gate: this method IS the visibility prerequisite
     /// for the other actions; gating it on visibility would deadlock.
@@ -473,13 +479,23 @@ impl Element {
     /// ```
     pub async fn scroll_into_view(&self) -> Result<()> {
         self.with_refresh(|| async move {
-            let _ = self
-                .call_on_main(
-                    "function(){ this.scrollIntoView({block:'center',behavior:'instant'}); }",
-                    json!([]),
+            let object_id = self.remote_object_id_cloned().await?;
+            let res = self
+                .inner
+                .tab
+                .call(
+                    "DOM.scrollIntoViewIfNeeded",
+                    json!({ "objectId": object_id }),
                 )
-                .await?;
-            Ok(())
+                .await;
+            match res {
+                Err(ZendriverError::Cdp { ref message, .. })
+                    if message.contains("does not have a layout object") =>
+                {
+                    Ok(())
+                }
+                other => other.map(drop),
+            }
         })
         .await
     }
@@ -946,17 +962,8 @@ mod tests {
             async move { e.hover().await }
         });
 
-        // Step 1: scroll_into_view → Runtime.callFunctionOn.
-        let id = expect(&mut mock, "Runtime.callFunctionOn").await;
-        let sent = mock.last_sent();
-        assert!(
-            sent["params"]["functionDeclaration"]
-                .as_str()
-                .unwrap()
-                .contains("scrollIntoView")
-        );
-        mock.reply(id, json!({ "result": { "type": "undefined" } }))
-            .await;
+        // Step 1: scroll_into_view.
+        serve_scroll_into_view(&mut mock).await;
 
         // Step 2: actionability gate — visible → stable → receives_pointer
         // (gate order is visible → enabled → stable → receives_pointer, and
@@ -1033,10 +1040,8 @@ mod tests {
             async move { e.click().await }
         });
 
-        // Step 1: scroll_into_view → Runtime.callFunctionOn.
-        let id = expect(&mut mock, "Runtime.callFunctionOn").await;
-        mock.reply(id, json!({ "result": { "type": "undefined" } }))
-            .await;
+        // Step 1: scroll_into_view.
+        serve_scroll_into_view(&mut mock).await;
 
         // Step 2: actionability gate (FULL = visible → enabled → stable →
         // receives_pointer); reply true to each.
@@ -1125,10 +1130,8 @@ mod tests {
             async move { e.tap().await }
         });
 
-        // Step 1: scroll_into_view → Runtime.callFunctionOn.
-        let id = expect(&mut mock, "Runtime.callFunctionOn").await;
-        mock.reply(id, json!({ "result": { "type": "undefined" } }))
-            .await;
+        // Step 1: scroll_into_view.
+        serve_scroll_into_view(&mut mock).await;
 
         // Step 2: actionability gate (FULL = visible → enabled → stable →
         // receives_pointer), matching `click`'s gate.
@@ -1460,16 +1463,8 @@ mod tests {
             async move { e.flash(Duration::from_millis(500)).await }
         });
 
-        // Step 1: scroll_into_view → Runtime.callFunctionOn.
-        let id = expect(&mut mock, "Runtime.callFunctionOn").await;
-        assert!(
-            mock.last_sent()["params"]["functionDeclaration"]
-                .as_str()
-                .unwrap()
-                .contains("scrollIntoView")
-        );
-        mock.reply(id, json!({ "result": { "type": "undefined" } }))
-            .await;
+        // Step 1: scroll_into_view.
+        serve_scroll_into_view(&mut mock).await;
 
         // Step 2: bounding_box → DOM.getBoxModel. Box top-left (10,20), 100x50
         // ⇒ center (60, 45).
@@ -1564,16 +1559,8 @@ mod tests {
             async move { e.mouse_drag((300.0, 200.0), 4).await }
         });
 
-        // Step 1: scroll_into_view → Runtime.callFunctionOn.
-        let id = expect(&mut mock, "Runtime.callFunctionOn").await;
-        assert!(
-            mock.last_sent()["params"]["functionDeclaration"]
-                .as_str()
-                .unwrap()
-                .contains("scrollIntoView")
-        );
-        mock.reply(id, json!({ "result": { "type": "undefined" } }))
-            .await;
+        // Step 1: scroll_into_view.
+        serve_scroll_into_view(&mut mock).await;
 
         // Step 2: bounding_box → DOM.getBoxModel. Box top-left (10,20), 100x50
         // ⇒ center (60, 45) = the drag source.

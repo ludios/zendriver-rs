@@ -472,10 +472,10 @@ impl ZendriverServer {
         actions::focus(self.state.clone(), input).await.map(Json)
     }
 
-    /// Scroll an element into the center of its scroll container.
+    /// Scroll an element into view if it isn't already.
     #[tool(
         name = "browser_scroll_into_view",
-        description = "Scroll an element into the center of its scroll container (`block: 'center', behavior: 'instant'`). Synchronous — the post-scroll bbox is final by the time the call returns."
+        description = "Scroll an element into view if it isn't already, with Chrome's `DOM.scrollIntoViewIfNeeded`: an element already fully in view isn't scrolled, one partly in view is scrolled just into view, and any other is centered. Instant — the post-scroll bbox is final by the time the call returns."
     )]
     pub async fn browser_scroll_into_view(
         &self,

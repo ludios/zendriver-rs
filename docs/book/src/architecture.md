@@ -182,8 +182,9 @@ object's id.
 
 Element queries (`find()` / `find_all()`) and everything done to the
 elements they return run in the isolated world too, that of the frame
-the element is in: the reads, the actionability checks,
-`scroll_into_view`, `focus`, the value setter. So
+the element is in: the reads, the actionability checks, `focus`, the
+value setter. (`scroll_into_view` runs no JavaScript at all: it is
+Chrome's `DOM.scrollIntoViewIfNeeded`.) So
 a page that wraps `querySelectorAll`, `getBoundingClientRect`,
 `dispatchEvent` and the like neither sees these calls nor can falsify
 their answers; DOM changes and the events they fire still reach the

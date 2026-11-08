@@ -165,7 +165,7 @@ impl Element {
 mod tests {
     use super::*;
     use crate::tab::Tab;
-    use crate::test_support::{expect, serve_call_js};
+    use crate::test_support::{expect, serve_call_js, serve_scroll_into_view};
     use zendriver_transport::SessionHandle;
     use zendriver_transport::testing::MockConnection;
 
@@ -184,16 +184,7 @@ mod tests {
         // Step 1: scroll_into_view — MUST land before both the gate and the
         // measurement, or an off-screen element is rejected as "not visible"
         // and, past that, clipped from stale coordinates.
-        let id = expect(&mut mock, "Runtime.callFunctionOn").await;
-        assert!(
-            mock.last_sent()["params"]["functionDeclaration"]
-                .as_str()
-                .unwrap()
-                .contains("scrollIntoView"),
-            "the scroll must be dispatched before the gate and DOM.getBoxModel",
-        );
-        mock.reply(id, json!({ "result": { "type": "undefined" } }))
-            .await;
+        serve_scroll_into_view(&mut mock).await;
 
         // Step 2: actionability gate (VISIBLE_ONLY = only check_visible).
         //
@@ -202,7 +193,7 @@ mod tests {
         // not the scroll" is the property this test needs.
         let gate_js = serve_call_js(&mut mock, json!({ "value": true, "type": "boolean" })).await;
         assert!(
-            gate_js.contains("getBoundingClientRect") && !gate_js.contains("scrollIntoView"),
+            gate_js.contains("getBoundingClientRect"),
             "expected the visibility predicate after the scroll, got: {gate_js}",
         );
 
