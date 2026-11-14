@@ -57,9 +57,6 @@ tokio-stream       = { version = "0.1",   features = ["sync"] }
 futures            = { version = "0.3" }
 async-trait        = { version = "0.1" }
 
-# External — CDP
-chromiumoxide_cdp  = { version = "0.7" }
-
 # External — serde
 serde              = { version = "1",     features = ["derive"] }
 serde_json         = { version = "1" }

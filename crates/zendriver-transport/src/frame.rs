@@ -1,5 +1,5 @@
-//! CDP frame envelope types. Wraps `chromiumoxide_cdp` typed parameters with
-//! the id / method / session_id envelope CDP requires on the wire.
+//! CDP frame envelope types: the id / method / session_id envelope that CDP
+//! requires on the wire, around JSON parameters.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -64,8 +64,8 @@ pub struct CdpRpcError {
 
 /// Untyped event as it leaves the actor's broadcast bus.
 ///
-/// Subscribers downcast to a `chromiumoxide_cdp` typed event by matching on
-/// `method` and deserializing `params`.
+/// Subscribers match on `method` and deserialize `params` into a type of
+/// their own.
 #[derive(Debug, Clone)]
 pub struct RawEvent {
     /// Dotted CDP event name, e.g. `"Page.frameStoppedLoading"`.

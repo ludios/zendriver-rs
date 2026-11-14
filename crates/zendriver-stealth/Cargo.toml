@@ -26,7 +26,6 @@ geo = []
 
 [dependencies]
 zendriver-transport.workspace = true
-chromiumoxide_cdp.workspace   = true
 tokio.workspace               = true
 async-trait.workspace         = true
 futures.workspace             = true

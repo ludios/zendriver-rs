@@ -68,7 +68,6 @@ zendriver-imperva             = { workspace = true, optional = true }
 zendriver-datadome            = { workspace = true, optional = true }
 zendriver-fetcher             = { workspace = true, optional = true }
 async-trait.workspace         = true
-chromiumoxide_cdp.workspace   = true
 tokio.workspace               = true
 tokio-util.workspace          = true
 serde.workspace               = true
