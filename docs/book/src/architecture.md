@@ -108,12 +108,24 @@ care". zendriver-rs has two layers:
   paused, so they land before any page script.
   No race; no need for the script to detect its own arrival timing.
 
-Auto-attach is filtered to `page` and `iframe` targets. Worker
-targets, service workers above all, are excluded on purpose: Chrome
+The browser's auto-attach is filtered to `page` and `iframe` targets.
+Service workers and shared workers are excluded on purpose: Chrome
 will not terminate a worker while a debugger session is attached to it,
 so attaching to every one of them leaked a renderer process per worker
-on a long-lived browser. Nothing in zendriver drives worker targets, so
-excluding them costs no functionality.
+on a long-lived browser.
+
+That auto-attach reports top-level targets only. A cross-site iframe
+runs in another renderer process than its page's (an out-of-process
+iframe), as a target of its own, which Chrome reports only to the
+session of its parent frame's target. So the first observer in the chain
+turns on auto-attach on the session of every page, and of every
+out-of-process iframe, while it is paused. Each out-of-process iframe is
+then paused before its first script too, and the same observer chain
+runs on it: that is how the stealth setup, and what your own observers
+set up, reaches the cross-site iframes of a page. A page's dedicated
+workers and worklets attach the same way, only because Chrome wouldn't
+start them otherwise; zendriver sets nothing up in them, keeps them from
+your observers, and releases them. They end with their page.
 
 The same observer chain re-applies stealth on every new tab — that's
 why `Browser::new_tab()` gives you a fully stealth-patched tab without

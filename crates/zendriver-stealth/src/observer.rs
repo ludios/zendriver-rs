@@ -224,8 +224,10 @@ fn headless_screen_switches(screen: &ScreenSpec) -> Result<Vec<String>, StealthE
 }
 
 /// Observer that applies a [`StealthProfile`] + [`Fingerprint`] to every page
-/// target. Workers and iframes are skipped — workers have no DOM and iframes
-/// inherit patches from the parent target in flat session mode.
+/// target, and to every out-of-process iframe target: such an iframe runs in
+/// another renderer process than its page's, so nothing set on the page's
+/// session reaches it. (An iframe in its page's process isn't a target; the
+/// page's setup covers it.) Workers and worklets get no setup.
 #[derive(Debug)]
 pub struct StealthObserver {
     profile: StealthProfile,
@@ -417,9 +419,11 @@ impl TargetObserver for StealthObserver {
     }
 
     async fn on_target_attached(&self, session: PausedSession<'_>) -> Result<(), ObserverError> {
-        // Workers + iframes are skipped — workers have no DOM; iframes inherit
-        // patches via the parent in flat mode.
-        if session.target_info.kind != "page" {
+        // An out-of-process iframe is a target of its own, in another
+        // renderer process than its page's, so no override or script of the
+        // page's session reaches it: it gets the page's whole setup. Workers
+        // and worklets get none.
+        if !matches!(session.target_info.kind.as_str(), "page" | "iframe") {
             return Ok(());
         }
         if self.profile.kind() == ProfileKind::Off {
@@ -525,7 +529,9 @@ impl TargetObserver for StealthObserver {
         }
 
         // Focus emulation keeps the (always-backgrounded) headless tab from
-        // reporting `document.hasFocus()` false.
+        // reporting `document.hasFocus()` false. An out-of-process iframe
+        // needs its own: without it, the iframe's document stays unfocused
+        // when its page focuses the iframe.
         session
             .call(
                 "Emulation.setFocusEmulationEnabled",
@@ -547,15 +553,17 @@ impl TargetObserver for StealthObserver {
         // Chrome's native locale; we don't force one.
         let effective_locale = crate::lang::effective_locale(&self.fingerprint);
         if let Some(ref locale) = effective_locale {
-            // `Emulation.setLocaleOverride` is browser-global: only one override
-            // can be in effect at a time. A page with a cross-origin OOPIF (its
-            // own target -> its own session) attaches this observer per session,
-            // so a later session finds the override already set by the first and
-            // Chrome replies `[-32000] Another locale override is already in
-            // effect`. That is benign — the same coherent locale is already
-            // applied — and must NOT propagate: propagating detaches the observer
-            // and strips the frame's remaining patches (CSP bypass, the bootstrap
-            // fingerprint script). Tolerate that one reply; surface every other error.
+            // A renderer process holds one `Emulation.setLocaleOverride` for
+            // all of its targets. So a target that isn't the first in its
+            // process (the second iframe of a site in a page) finds the
+            // override already set by the first's session, and Chrome
+            // replies `[-32000] Another locale override is already in
+            // effect`. That is benign — the same locale is already applied —
+            // and must NOT propagate: propagating detaches the target without
+            // the rest of its setup (CSP bypass, the bootstrap script).
+            // Tolerate that one reply; surface every other error. (Chrome
+            // accepts a timezone override that repeats the one its process
+            // holds.)
             match session
                 .call("Emulation.setLocaleOverride", json!({ "locale": locale }))
                 .await
@@ -845,9 +853,11 @@ mod tests {
 
     #[tokio::test]
     async fn locale_override_already_in_effect_does_not_detach_the_observer() {
-        // `Emulation.setLocaleOverride` is browser-global. A cross-origin OOPIF
-        // attaches this observer to its own session, where the override is
-        // already in effect from the first session, so Chrome replies -32000.
+        // A renderer process holds one `Emulation.setLocaleOverride` for all
+        // of its targets. A second target in a process (a second iframe of a
+        // site in a page) attaches this observer to its own session, where
+        // the override is already in effect from the first, so Chrome
+        // replies -32000.
         // The observer must tolerate that reply and keep applying the frame's
         // remaining patches (CSP bypass, the bootstrap script) instead of
         // detaching — otherwise the OOPIF loses its stealth surface.
@@ -886,7 +896,7 @@ mod tests {
         )
         .await;
 
-        // Reply to setLocaleOverride with the browser-global "already in effect"
+        // Reply to setLocaleOverride with the "already in effect"
         // error; OK to everything else. Seeing the commands AFTER setLocaleOverride
         // proves the observer tolerated the error rather than detaching.
         for expected in [
@@ -1444,13 +1454,28 @@ mod persona_reaches_cdp_tests {
     /// missing override shows up as an absent entry in the returned list, and
     /// a wedged observer fails on the per-frame budget instead of hanging.
     async fn drive_attach(observer: StealthObserver) -> Vec<Value> {
-        drive_attach_without(observer, &[]).await
+        drive_attach_of("page", observer, &[]).await
     }
 
     /// [`drive_attach`], against a Chrome that lacks each command in
     /// `missing`: it answers them `-32601`, as Chrome answers a command it
     /// doesn't have.
     async fn drive_attach_without(observer: StealthObserver, missing: &[&str]) -> Vec<Value> {
+        let refused: Vec<_> = missing
+            .iter()
+            .map(|method| (*method, -32601, "wasn't found"))
+            .collect();
+        drive_attach_of("page", observer, &refused).await
+    }
+
+    /// [`drive_attach`] for a target of type `kind`, against a Chrome that
+    /// answers each command in `refused` (`(method, code, message)`) with
+    /// that error.
+    async fn drive_attach_of(
+        kind: &str,
+        observer: StealthObserver,
+        refused: &[(&str, i32, &str)],
+    ) -> Vec<Value> {
         const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
         let (mut mock, conn) =
@@ -1462,7 +1487,7 @@ mod persona_reaches_cdp_tests {
                 "sessionId": "S1",
                 "targetInfo": {
                     "targetId": "T1",
-                    "type": "page",
+                    "type": kind,
                     "url": "about:blank",
                     "attached": true,
                 },
@@ -1474,11 +1499,9 @@ mod persona_reaches_cdp_tests {
         let mut frames = Vec::new();
         while let Some((method, id)) = mock.recv_cmd_timeout(FRAME_BUDGET).await {
             frames.push(mock.last_sent().clone());
-            if missing.contains(&method.as_str()) {
-                mock.reply_err(id, -32601, &format!("'{method}' wasn't found"))
-                    .await;
-            } else {
-                mock.reply(id, json!({})).await;
+            match refused.iter().find(|(refused, ..)| *refused == method) {
+                Some((_, code, message)) => mock.reply_err(id, *code, message).await,
+                None => mock.reply(id, json!({})).await,
             }
             if method == "Runtime.runIfWaitingForDebugger" || method == "Target.detachFromTarget" {
                 break;
@@ -1516,6 +1539,56 @@ mod persona_reaches_cdp_tests {
                     method_names(frames)
                 )
             })
+    }
+
+    /// A spoofed observer whose fingerprint pins a timezone and a locale, and
+    /// whose persona pins a geolocation.
+    fn observer_with_every_override() -> StealthObserver {
+        let fingerprint = Fingerprint {
+            timezone: Some("Europe/Berlin".into()),
+            locale: Some("de-DE".into()),
+            ..bare_fingerprint()
+        };
+        let persona = crate::Persona {
+            geolocation: Some(crate::persona::GeoPos {
+                latitude: 52.52,
+                longitude: 13.405,
+                accuracy: None,
+            }),
+            ..crate::Persona::default()
+        };
+        StealthObserver::with_persona(StealthProfile::spoofed(), fingerprint, persona)
+    }
+
+    /// An out-of-process iframe gets its page's whole setup.
+    #[tokio::test]
+    async fn an_out_of_process_iframe_gets_its_pages_setup() {
+        let page = method_names(&drive_attach(observer_with_every_override()).await);
+        let iframe =
+            method_names(&drive_attach_of("iframe", observer_with_every_override(), &[]).await);
+        assert_eq!(
+            page,
+            [
+                "Page.enable",
+                "Emulation.setUserAgentOverride",
+                "Emulation.setHardwareConcurrencyOverride",
+                "Emulation.setCPUPerformanceOverride",
+                "Emulation.setFocusEmulationEnabled",
+                "Emulation.setTimezoneOverride",
+                "Emulation.setLocaleOverride",
+                "Emulation.setGeolocationOverride",
+                "Page.addScriptToEvaluateOnNewDocument",
+                "Runtime.runIfWaitingForDebugger",
+            ]
+        );
+        assert_eq!(iframe, page);
+    }
+
+    /// A worker is released without any setup.
+    #[tokio::test]
+    async fn a_worker_gets_no_setup() {
+        let frames = drive_attach_of("worker", observer_with_every_override(), &[]).await;
+        assert_eq!(method_names(&frames), ["Runtime.runIfWaitingForDebugger"]);
     }
 
     /// A persona's platform reaches the UA, the UA client hints and

@@ -100,12 +100,10 @@ Also for this round:
 ### Frames and elements
 - [ ] **Stale-handle refresh of a frame element re-runs the selector on the top-level page.** Re-resolve inside the frame instead. *(QE #2)* Test `chrome`.
 - [ ] **`best_match` handles refresh to a different element.** *(QE #9)* Test `chrome`.
-- [ ] **OOPIF fixes.** A spike on 2026-10-31 found that OOPIFs are never attached, under every profile, and that every profile makes them (site isolation is on, see "Launch flags" under Stealth), so all of these are reachable. `Target.getTargets` lists the iframe target with `attached: false`, and `tab.frames()` / `frame_by_url` never see it.
-  - per-page-session auto-attach (Chrome does attach the OOPIF then). Send it on the session that will deliver the `attachedToTarget` to the `TabRegistrar`: the per-tab socket runs no observers.
-  - register a parent frame entry for the remote frame. Today the parent's frames map has none, so `register_oopif_frame` can't find a parent.
+- [ ] **OOPIF fixes.** OOPIFs attach since 2026-11-14 (each page's session auto-attaches them, see `ChildTargetAutoAttach`), and get the stealth setup. But `tab.frames()` / `frame_by_url` still don't show them: after the load of a page with a cross-site iframe, `tab.frames()` lists only the main frame (Chrome 157). Every profile makes OOPIFs (site isolation is on, see "Launch flags" under Stealth), so all of these are reachable.
+  - keep the frame's entry when the iframe becomes remote. `register_oopif_frame` does run for the OOPIF (it logs no warning), so presumably the parent's `frameDetached` with reason `swap` then removes the entry *(FI #5)*. Nothing follows the OOPIF session's own `Page.frame*` events either, so such an entry's URL would stay empty.
   - elements bound to the OOPIF's session *(QE #3)*
   - parent id *(FI #4)*
-  - `frameDetached` with reason `swap` *(FI #5)*
   - in-flight request leak in the idle tracker *(TAB #5)*
   - `force_open_shadow_roots` *(TAB #10)*
 
@@ -147,7 +145,7 @@ Also for this round:
 - [ ] **`geo_auto()` captures the proxy at call time.** Calling `.geo_auto().proxy(..)` in that order probes from the real IP. *(BR #6)* Test `unit` on builder order.
 
 ### Transport and input
-- [ ] **One socket for every target: stages 2 and 3 of the event model** *(decided 2026-11-08)*. Stage 1, ordered per-session event queues (`SessionHandle::events`), is done. Stage 2: attach OOPIFs on their page's session (see "OOPIF fixes" above). Stage 3: run every target as a flat session on the browser's socket, and delete `per_tab_session` and its fallback. The per-tab socket keeps OOPIF attaches from the registrar, makes stealth's setup during the debugger pause slower (no pipelining across two sockets), turns prerender off, and lets `tab.set_user_agent` beat stealth's override whatever the order of the writes (Chrome applies emulation in the order that sessions attached).
+- [ ] **One socket for every target: stages 2 and 3 of the event model** *(decided 2026-11-08)*. Stage 1, ordered per-session event queues (`SessionHandle::events`), is done. Stage 2: OOPIFs attach on their page's session since 2026-11-14; their `Frame`s remain (see "OOPIF fixes" above). Stage 3: run every target as a flat session on the browser's socket, and delete `per_tab_session` and its fallback. The per-tab socket makes stealth's setup during the debugger pause slower (no pipelining across two sockets), turns prerender off, and lets `tab.set_user_agent` beat stealth's override whatever the order of the writes (Chrome applies emulation in the order that sessions attached).
 - [ ] **A reply frame that fails to parse hangs its caller for 180 s.** Fail the pending caller instead. *(TI #9)* Test `unit`.
 - [ ] **An event frame that fails to parse is dropped without a trace on its session's streams.** `serde_json`'s recursion limit (128) rejects valid deep events (a reviewer saw `DOM.setChildNodes` for a DOM 70 elements deep fail on Chrome 157); the actor logs a warning and drops the frame, and `SessionHandle::events` goes on with the next event as if none were missing. Parse without the limit (`serde_json`'s `unbounded_depth`, with `serde_stacker` against stack overflow). Test `unit`: replay a deep frame.
 - [ ] **A socket write that never completes keeps the actor from noticing its shutdown**, so neither its pending calls nor its session streams end. *(found reviewing `6fbfdd6cd`)*
