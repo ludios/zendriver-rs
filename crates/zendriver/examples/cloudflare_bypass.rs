@@ -77,7 +77,10 @@ async fn main() -> zendriver::Result<()> {
         Err(e) => return Err(e.into()),
     }
 
-    let title = tab.title().await?;
+    // `document.title` rather than `Tab::title`, which asks the browser:
+    // right after the challenge page is replaced, its copy can still be the
+    // challenge page's title.
+    let title: String = tab.evaluate("document.title").await?;
     println!("title = {title:?}");
 
     browser.close().await?;

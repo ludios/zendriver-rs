@@ -55,8 +55,8 @@ pub(crate) const WIDGET_NODE: i64 = 42;
 pub(crate) enum Widget {
     /// No widget is mounted.
     Absent,
-    /// A widget is mounted, and measures as this rect once scrolled into
-    /// view: `Value::Null` for a widget that is not a click target.
+    /// A widget is mounted, and measures as this rect: `Value::Null` for a
+    /// widget that is not a click target.
     Mounted(Value),
 }
 
@@ -95,8 +95,7 @@ impl Page {
         }
     }
 
-    /// The same page with a widget that measures `at` once scrolled into
-    /// view.
+    /// The same page with a widget that measures `at`.
     pub fn widget_at(mut self, at: Value) -> Self {
         self.widget = Widget::Mounted(at);
         self
@@ -142,12 +141,16 @@ impl Page {
         self
     }
 
-    /// Chrome's reply to `method` with `params`, on this page, when the
-    /// isolated world made last has context id `world` and the widget was
-    /// `scrolled` into view earlier in the tick. Asserts that the poll and
-    /// the measurement run in that world, and that the widget is measured
-    /// only after a scroll.
-    fn reply(&self, method: &str, params: &Value, world: i64, scrolled: bool) -> Value {
+    /// The context id of the isolated world in this page's document: one
+    /// per document, as Chrome has it (`D1` → 1, `D2` → 2).
+    fn context(&self) -> i64 {
+        self.document.trim_start_matches('D').parse().unwrap()
+    }
+
+    /// Chrome's reply to `method` with `params`, on this page. Asserts that
+    /// the poll and the measurements run in the document's isolated world.
+    fn reply(&self, method: &str, params: &Value) -> Value {
+        let world = self.context();
         let mounted = matches!(self.widget, Widget::Mounted(_));
         match method {
             "Page.createIsolatedWorld" => {
@@ -194,10 +197,6 @@ impl Page {
                     params["executionContextId"], world,
                     "measured outside the world"
                 );
-                assert!(
-                    scrolled,
-                    "measured the widget before scrolling it into view"
-                );
                 json!({ "object": { "type": "object", "objectId": "WIDGET_OBJECT" } })
             }
             "Runtime.callFunctionOn" => {
@@ -243,9 +242,6 @@ pub(crate) async fn serve(mock: &mut MockConnection, page: impl Fn(usize) -> Pag
     let mut polls = 0usize;
     let mut tick = 0usize;
     let mut current = page(0);
-    let mut scrolled = false;
-    // Context id of the isolated world made last; 0 before the first.
-    let mut world = 0;
 
     while let Some((method, id)) = mock.recv_cmd_timeout(DRAIN_BUDGET).await {
         let params = mock.last_sent()["params"].clone();
@@ -253,13 +249,6 @@ pub(crate) async fn serve(mock: &mut MockConnection, page: impl Fn(usize) -> Pag
             tick = polls;
             polls += 1;
             current = page(tick);
-            scrolled = false;
-        }
-        if method == SCROLL {
-            scrolled = true;
-        }
-        if method == "Page.createIsolatedWorld" {
-            world += 1;
         }
         let mut label = method.clone();
         if method == MOUSE {
@@ -270,12 +259,12 @@ pub(crate) async fn serve(mock: &mut MockConnection, page: impl Fn(usize) -> Pag
             label,
             params: params.clone(),
         });
-        if let (true, Some((code, message))) = (method == "Runtime.evaluate", current.poll_error) {
+        let poll_error = current.poll_error.filter(|_| method == "Runtime.evaluate");
+        if let Some((code, message)) = poll_error {
             mock.reply_err(id, code, message).await;
             continue;
         }
-        mock.reply(id, current.reply(&method, &params, world, scrolled))
-            .await;
+        mock.reply(id, current.reply(&method, &params)).await;
     }
     calls
 }

@@ -9,8 +9,9 @@
 //! held directly by the main frame, and it is listed in one of two places:
 //!
 //! - `Target.getTargets`, which lists a frame running in a process of its
-//!   own as an `"iframe"` target, along with its parent frame's id. The
-//!   cross-site widget is there under Chrome's default site isolation.
+//!   own as an `"iframe"` target, along with its parent frame's id (from
+//!   Chrome 141 on). The cross-site widget is there under Chrome's default
+//!   site isolation.
 //! - `Page.getFrameTree`, which lists the frames running in the page's own
 //!   process. The widget is there when site isolation is off (as with
 //!   `--disable-site-isolation-trials`).
@@ -22,7 +23,7 @@
 //! measured in.
 //!
 //! Everything this crate runs in the page runs in an isolated world (see
-//! `World`) rather than in the page's main world, where Cloudflare's
+//! `WORLD_NAME`) rather than in the page's main world, where Cloudflare's
 //! challenge script runs and can watch what is called.
 //!
 //! While the challenge is watched, the page can change under any one of
@@ -65,6 +66,9 @@ pub struct BoundingBox {
 /// under it.
 const SERVER_ERROR: i32 = -32000;
 
+/// The JSON-RPC code for invalid parameters.
+const INVALID_PARAMS: i32 = -32602;
+
 /// `result`, with a server-error answer turned into `Ok(None)`.
 ///
 /// A server error here means the page changed under the call (see the
@@ -92,8 +96,7 @@ fn completion_value(reply: &Value) -> Result<Value, CloudflareError> {
     Ok(reply["result"]["value"].clone())
 }
 
-/// An isolated world in the main frame's current document: where this
-/// crate's scripts run.
+/// The name of the isolated world this crate's scripts run in.
 ///
 /// Cloudflare's challenge script runs in the page's main world, where it
 /// can wrap any built-in — `querySelector`, `getBoundingClientRect` — and
@@ -102,52 +105,43 @@ fn completion_value(reply: &Value) -> Result<Value, CloudflareError> {
 /// every click and then served its challenge again; with the poll in an
 /// isolated world, the first click passed. A script in an isolated world
 /// has built-ins of its own, which no page script can reach.
-///
-/// A world belongs to one document, so a new one is made when a navigation
-/// replaces the document.
-#[derive(Debug)]
-pub(crate) struct World {
-    /// The `loaderId` of the document the world is in.
-    document: String,
-    /// The world's execution context id.
-    context: i64,
-}
-
-/// The name of the isolated worlds this crate makes.
 const WORLD_NAME: &str = "zendriver-cloudflare";
 
-/// The execution context id of an isolated world in `document` (a
-/// `loaderId`) of the main frame `main`: the one in `cached` if it was made
-/// for `document`, else a new one, which replaces it. `Ok(None)` when the
-/// page changed under the call.
-async fn world(
+/// The execution context id of this crate's isolated world in the main
+/// frame `main`'s current document; `Ok(None)` when the page changed under
+/// the call.
+///
+/// Asked for on every tick. Chrome keeps one world per name, with one
+/// context in each document, so a repeated call on the same document
+/// returns the same context and creates nothing — and a call after a
+/// navigation returns the new document's, which a cached id would not.
+async fn isolated_world(
     session: &SessionHandle,
     main: &str,
-    document: &str,
-    cached: &mut Option<World>,
 ) -> Result<Option<i64>, CloudflareError> {
-    if let Some(world) = cached.as_ref().filter(|w| w.document == document) {
-        return Ok(Some(world.context));
-    }
     let made = session
         .call(
             "Page.createIsolatedWorld",
             json!({ "frameId": main, "worldName": WORLD_NAME }),
         )
         .await;
-    let Some(made) = answered(made)? else {
+    // Chrome answers a frame id that went away meanwhile with invalid
+    // parameters rather than a server error.
+    let made = match made {
+        Err(CallError::Rpc(INVALID_PARAMS, message, _)) if message.contains("No frame") => {
+            return Ok(None);
+        }
+        made => answered(made)?,
+    };
+    let Some(made) = made else {
         return Ok(None);
     };
-    let Some(context) = made["executionContextId"].as_i64() else {
-        return Err(CloudflareError::JsError(format!(
+    match made["executionContextId"].as_i64() {
+        Some(context) => Ok(Some(context)),
+        None => Err(CloudflareError::JsError(format!(
             "Page.createIsolatedWorld named no context: {made}"
-        )));
-    };
-    *cached = Some(World {
-        document: document.to_string(),
-        context,
-    });
-    Ok(Some(context))
+        ))),
+    }
 }
 
 /// What one poll tick saw.
@@ -167,8 +161,8 @@ pub(crate) struct Observation {
     pub document: String,
     /// The document is still being parsed.
     pub loading: bool,
-    /// The isolated world the observation ran its script in, for the
-    /// measurement before a click to run in too.
+    /// The isolated world's context the observation ran its script in, for
+    /// the measurements before a click to run in too.
     pub context: i64,
 }
 
@@ -208,10 +202,6 @@ fn main_frame(tree: &Value) -> Result<(&str, &str), CloudflareError> {
 /// (in-process frames) and a `Target.getTargets` reply (frames in a process
 /// of their own). An empty `marker` matches no frame, since every URL
 /// contains the empty string.
-///
-/// Chrome before 141 gives a target no `parentFrameId`. Such a target is a
-/// candidate too, and `DOM.getFrameOwner` then turns away one that is not
-/// in this page.
 fn widget_frames(tree: &Value, targets: &Value, main: &str, marker: &str) -> Vec<String> {
     if marker.is_empty() {
         return Vec::new();
@@ -233,9 +223,8 @@ fn widget_frames(tree: &Value, targets: &Value, main: &str, marker: &str) -> Vec
         }
     }
     for target in targets["targetInfos"].as_array().into_iter().flatten() {
-        let parent = &target["parentFrameId"];
         if target["type"] == "iframe"
-            && (parent.is_null() || parent == main)
+            && target["parentFrameId"] == main
             && target["url"]
                 .as_str()
                 .is_some_and(|url| url.contains(marker))
@@ -258,7 +247,9 @@ async fn find_widget(
     marker: &str,
 ) -> Result<Option<i64>, CloudflareError> {
     // An explicit filter, or Chrome applies whatever discovery filter the
-    // session was given, which can leave the iframes out.
+    // session was given, which can leave the iframes out. A server error
+    // here is no navigation (the list is the browser's) but a refusal, such
+    // as a client that may not list targets, so it fails the run.
     let filter = json!({ "filter": [{ "type": "iframe" }] });
     let targets = session.call("Target.getTargets", filter).await?;
     for frame in widget_frames(tree, &targets, main, marker) {
@@ -276,9 +267,7 @@ async fn find_widget(
 }
 
 /// Scroll the widget `node` into view, unless it is already fully in view,
-/// then return its viewport rect when it is a click target (see
-/// [`js::MEASURE_FN`], run in the isolated world `context`); `Ok(None)`
-/// when it is not one, or is gone.
+/// then measure it as [`measure_widget`] does.
 ///
 /// The scroll is CDP's `DOM.scrollIntoViewIfNeeded`, which is instant
 /// whatever `scroll-behavior` the page sets, so the measurement reads where
@@ -298,7 +287,17 @@ pub(crate) async fn scroll_widget_into_view(
     // A server error is a widget gone or without a layout box, which the
     // measurement reports as `None` in its own right.
     answered(scrolled)?;
+    measure_widget(session, node, context).await
+}
 
+/// The viewport rect of the widget `node` when it is a click target (see
+/// [`js::MEASURE_FN`], run in the isolated world `context`); `Ok(None)`
+/// when it is not one, or is gone.
+pub(crate) async fn measure_widget(
+    session: &SessionHandle,
+    node: i64,
+    context: i64,
+) -> Result<Option<BoundingBox>, CloudflareError> {
     let resolved = session
         .call(
             "DOM.resolveNode",
@@ -338,10 +337,9 @@ pub(crate) async fn scroll_widget_into_view(
 }
 
 /// Observe the page once: the token, the markers, the widget and the
-/// document, running the poll evaluator in the isolated world in `world`
-/// (made, or made again for a new document, as needed). `Ok(None)` when the
-/// page changed under the observation, which says nothing about the
-/// challenge either way.
+/// document, running the poll evaluator in this crate's isolated world.
+/// `Ok(None)` when the page changed under the observation, which says
+/// nothing about the challenge either way.
 ///
 /// # Errors
 /// [`CloudflareError::JsError`] when the poll evaluator threw or a reply
@@ -350,15 +348,14 @@ pub(crate) async fn scroll_widget_into_view(
 pub(crate) async fn observe(
     session: &SessionHandle,
     selectors: &TurnstileSelectors,
-    world: &mut Option<World>,
 ) -> Result<Option<Observation>, CloudflareError> {
     let Some(tree) = answered(session.call("Page.getFrameTree", json!({})).await)? else {
         return Ok(None);
     };
     let (main, document) = main_frame(&tree)?;
-    // The world was made in `document`, so the evaluator reads `document`, or
-    // answers with a server error if a navigation replaced it meanwhile.
-    let Some(context) = self::world(session, main, document, world).await? else {
+    // The world's context is `document`'s, so the evaluator reads `document`,
+    // or answers with a server error if a navigation replaced it meanwhile.
+    let Some(context) = isolated_world(session, main).await? else {
         return Ok(None);
     };
     let evaluated = session
@@ -471,12 +468,10 @@ mod tests {
             json!({ "type": "iframe", "targetId": "OTHER_TAB", "parentFrameId": "ELSEWHERE", "url": format!("https://{MARKER}/b") }),
             json!({ "type": "page", "targetId": "PAGE", "url": format!("https://{MARKER}/c") }),
             json!({ "type": "iframe", "targetId": "ADS", "parentFrameId": "MAIN", "url": "https://ads.example/" }),
-            // Chrome before 141 names no parent: `DOM.getFrameOwner` decides.
-            json!({ "type": "iframe", "targetId": "OLD_CHROME", "url": format!("https://{MARKER}/d") }),
         ];
         assert_eq!(
             widget_frames(&tree(&[]), &targets(&infos), "MAIN", MARKER),
-            vec!["MINE".to_string(), "OLD_CHROME".to_string()]
+            vec!["MINE".to_string()]
         );
     }
 

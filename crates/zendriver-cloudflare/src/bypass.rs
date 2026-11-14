@@ -49,7 +49,7 @@ use tokio::time::Instant;
 use zendriver_transport::SessionHandle;
 
 use crate::click::click_at;
-use crate::detection::{observe, scroll_widget_into_view};
+use crate::detection::{measure_widget, observe, scroll_widget_into_view};
 use crate::error::CloudflareError;
 use crate::options::{ClickPolicy, ClickTarget, TurnstileSelectors};
 
@@ -290,10 +290,11 @@ impl<'a> CloudflareBypass<'a> {
         let mut clicks: u32 = 0;
         let mut ticks_since_click: u32 = 0;
         // The document the markers were last seen on (`None` while no marker
-        // has been seen), and the time they were first found missing since.
+        // has been seen), the time they were first found missing from it
+        // since, and whether a replacement without them is still loading.
         let mut challenge_document: Option<String> = None;
         let mut markers_gone_since: Option<Instant> = None;
-        let mut world = None;
+        let mut replacement_loading = false;
 
         let mut stall_ticks: u32 = 0;
         let mut warned_stall = false;
@@ -304,26 +305,28 @@ impl<'a> CloudflareBypass<'a> {
             // `None` is a tick on which the page changed under the
             // observation. It says nothing about the challenge, so it decides
             // nothing either.
-            if let Some(seen) = observe(self.session, &self.selectors, &mut world).await? {
+            if let Some(seen) = observe(self.session, &self.selectors).await? {
                 if let Some(token) = seen.token {
                     return Ok(ClearanceOutcome::TokenAcquired(token));
                 }
 
+                replacement_loading = false;
                 if seen.has_markers() {
                     challenge_document = Some(seen.document.clone());
                     markers_gone_since = None;
                 } else if let Some(challenge) = &challenge_document {
                     // Every marker seen earlier is gone. A new document must
-                    // be parsed before the run can say what is on it, however
-                    // long that takes; the same document only has to stay
-                    // this way for `SETTLE`, in case a navigation is coming.
-                    let since = *markers_gone_since.get_or_insert_with(Instant::now);
-                    let gone = if seen.document == *challenge {
-                        since.elapsed() >= SETTLE
+                    // be parsed before the run can say what is on it; the same
+                    // document only has to stay this way for `SETTLE`, in case
+                    // a navigation is coming.
+                    if seen.document == *challenge {
+                        let since = *markers_gone_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= SETTLE {
+                            return Ok(ClearanceOutcome::ChallengeGone);
+                        }
+                    } else if seen.loading {
+                        replacement_loading = true;
                     } else {
-                        !seen.loading
-                    };
-                    if gone {
                         return Ok(ClearanceOutcome::ChallengeGone);
                     }
                 }
@@ -333,24 +336,29 @@ impl<'a> CloudflareBypass<'a> {
                 // ticks after the click that landed, and a run spends at most
                 // `ClickPolicy::max_attempts` clicks. So at the defaults the
                 // second click lands on tick 4 (the click's own tick counts).
-                // `max_attempts: 0`
-                // never clicks at all, which also keeps the page from being
-                // scrolled.
+                // `max_attempts: 0` never clicks at all, which also keeps the
+                // page from being scrolled.
                 let may_click = clicks < self.click_policy.max_attempts
                     && (clicks == 0 || ticks_since_click >= self.click_policy.retry_ticks);
 
                 // Raw `Input.dispatchMouseEvent` coordinates are viewport
                 // relative, so a below-the-fold widget must be scrolled in and
-                // measured before the click can land on it. Measuring only
-                // here keeps a tick that will not click from touching the
+                // measured again before the click can land on it. Measuring
+                // first keeps a widget that is no click target (hidden, or
+                // zero-size) from scrolling the page, and measuring only on a
+                // tick that may click keeps the others from touching the
                 // widget at all.
                 let mut widget = None;
                 if may_click {
                     widget = seen.widget;
                 }
                 if let Some(node) = widget {
-                    let scrolled = scroll_widget_into_view(self.session, node, seen.context);
-                    if let Some(bbox) = scrolled.await? {
+                    let clickable = measure_widget(self.session, node, seen.context).await?;
+                    let mut bbox = None;
+                    if clickable.is_some() {
+                        bbox = scroll_widget_into_view(self.session, node, seen.context).await?;
+                    }
+                    if let Some(bbox) = bbox {
                         let target = ClickTarget {
                             bbox,
                             x: bbox.x + bbox.width * self.click_policy.x_fraction,
@@ -365,17 +373,15 @@ impl<'a> CloudflareBypass<'a> {
                         clicked = true;
                     }
                 }
-                stalled = seen.has_markers() && !clicked;
+                stalled = seen.widget.is_some();
             }
 
-            // A tick that saw a marker and did not land a click is a tick with
-            // no progress, the scroll-returned-`None` path included. That path
-            // used to skip the counter, so a widget that stayed mounted but
-            // stopped being measurable — the run this hint exists to explain —
-            // was the one run that could never produce it. A tick without
-            // markers is the page settling (or no challenge at all), and a
-            // tick without an observation is the page changing: neither is
-            // clicks going nowhere.
+            // A tick with a widget mounted and no click landed is a tick with
+            // no progress, the not-a-click-target path included: a widget that
+            // stays mounted but never measurable is the run this hint exists
+            // to explain. A tick without a widget is not: the page settling, a
+            // page of Cloudflare's leading on to the guarded one, or a page
+            // changing under the observation.
             //
             // Nor is a run where the caller set `max_attempts: 0`. The hint reads
             // "clicks are going nowhere, check stealth", and a run configured
@@ -406,6 +412,11 @@ impl<'a> CloudflareBypass<'a> {
             }
 
             if Instant::now() >= deadline {
+                // A replacement without markers that is still loading is past
+                // the challenge, if not yet read: not one that never resolved.
+                if replacement_loading {
+                    return Ok(ClearanceOutcome::ChallengeGone);
+                }
                 return Ok(ClearanceOutcome::TimedOut {
                     saw_challenge: challenge_document.is_some(),
                 });
@@ -617,12 +628,12 @@ mod tests {
         );
     }
 
-    /// A widget that mounts *late* and *below the fold* still gets clicked,
-    /// at its post-scroll position. Every other click test hands the driver
-    /// a widget on tick 0, so all of them pass against a driver that only
-    /// ever considers clicking on its first tick; this one does not.
+    /// A widget that mounts *late* still gets clicked. Every other click
+    /// test hands the driver a widget on tick 0, so all of them pass against
+    /// a driver that only ever considers clicking on its first tick; this
+    /// one does not.
     #[tokio::test]
-    async fn clicks_a_widget_that_mounts_late_and_below_the_fold() {
+    async fn clicks_a_widget_that_mounts_late() {
         /// Ticks that show markers but no widget yet.
         const EMPTY_TICKS: usize = 3;
 
@@ -726,35 +737,45 @@ mod tests {
         );
     }
 
-    /// A challenge that clears in place never brings a new document. Once its
+    /// A challenge that clears in place never brings a new document. When its
     /// markers have stayed gone for `SETTLE`, the run calls it gone; not a
-    /// moment before, since a navigation could still be on its way.
+    /// moment before, since a navigation could still be on its way. Neither
+    /// that wait nor the ticks before it on a page with markers but no
+    /// widget (a page of Cloudflare's) are clicks going nowhere, so they must
+    /// not tell the caller to go check stealth.
     #[tokio::test(start_paused = true)]
     async fn challenge_gone_in_place_waits_out_the_settle_period() {
+        /// Ticks of 100ms on a page with markers and no widget: past the ten
+        /// at which the stall hint would fire.
+        const MARKED_TICKS: usize = 15;
+
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let fut = tokio::spawn(async move {
-            let started = Instant::now();
+        let capture = LogCapture::new();
+        // Not spawned: `LogCapture` follows the future it wraps.
+        let driver = capture.capture(async {
+            let markers_gone = Instant::now() + Duration::from_millis(100) * MARKED_TICKS as u32;
             let outcome = CloudflareBypass::new(&sess)
-                .poll_interval(Duration::from_millis(250))
+                .poll_interval(Duration::from_millis(100))
                 .wait_for_clearance(Duration::from_secs(60))
                 .await;
-            (outcome, started.elapsed())
+            (outcome, Instant::now() - markers_gone)
         });
         let page = |tick| match tick {
-            0 => Page::challenge(),
+            t if t < MARKED_TICKS => Page::challenge(),
             _ => Page::challenge().no_light_markers(),
         };
-        serve(&mut mock, page).await;
-        let (outcome, elapsed) = fut.await.unwrap();
+        let ((outcome, settled_for), _) = tokio::join!(driver, serve(&mut mock, page));
 
+        assert!(matches!(outcome.unwrap(), ClearanceOutcome::ChallengeGone));
         assert!(
-            matches!(outcome.unwrap(), ClearanceOutcome::ChallengeGone),
-            "expected ChallengeGone"
+            settled_for >= SETTLE && settled_for < SETTLE + Duration::from_secs(1),
+            "ChallengeGone came {settled_for:?} after the markers went"
         );
         assert!(
-            elapsed >= SETTLE && elapsed < SETTLE + Duration::from_secs(1),
-            "ChallengeGone came {elapsed:?} into the run"
+            !capture.contains("clearance stalled"),
+            "captured {:?}",
+            capture.events()
         );
         conn.shutdown();
     }
@@ -765,8 +786,9 @@ mod tests {
     /// run has not read.
     #[tokio::test(start_paused = true)]
     async fn a_replacement_still_loading_is_waited_for_past_the_settle_period() {
-        /// Ticks of 250ms the replacement streams for: past `SETTLE`.
-        const LOADING_TICKS: usize = 20;
+        /// Ticks of 250ms the replacement streams for: two seconds past
+        /// `SETTLE`.
+        const LOADING_TICKS: usize = (SETTLE.as_millis() as usize + 2000) / 250;
 
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
@@ -798,35 +820,33 @@ mod tests {
         conn.shutdown();
     }
 
-    /// Waiting for the page to settle is not a stalled click, so it must not
-    /// tell the caller to go check stealth.
+    /// A replacement without markers that is still being parsed when the
+    /// deadline comes is past the challenge, if not yet read: reporting
+    /// `TimedOut { saw_challenge: true }` would say the challenge never
+    /// resolved.
     #[tokio::test(start_paused = true)]
-    async fn settling_is_never_blamed_on_stealth() {
+    async fn a_replacement_still_loading_at_the_deadline_is_challenge_gone() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
-        let capture = LogCapture::new();
-        let driver = capture.capture(async {
+        let fut = tokio::spawn(async move {
             CloudflareBypass::new(&sess)
-                .poll_interval(Duration::from_millis(100))
-                .wait_for_clearance(Duration::from_secs(60))
+                .poll_interval(Duration::from_millis(250))
+                .wait_for_clearance(Duration::from_secs(5))
                 .await
         });
         let page = |tick| match tick {
             0 => Page::challenge(),
-            _ => Page::challenge().no_light_markers(),
+            _ => Page::challenge()
+                .no_light_markers()
+                .document("D2")
+                .loading(),
         };
-        let (outcome, calls) = tokio::join!(driver, serve(&mut mock, page));
+        serve(&mut mock, page).await;
 
-        assert!(matches!(outcome.unwrap(), ClearanceOutcome::ChallengeGone));
-        assert!(
-            polls(&calls) > 20,
-            "the settle period spans more than ten ticks"
-        );
-        assert!(
-            !capture.contains("clearance stalled"),
-            "captured {:?}",
-            capture.events()
-        );
+        assert!(matches!(
+            fut.await.unwrap().unwrap(),
+            ClearanceOutcome::ChallengeGone
+        ));
         conn.shutdown();
     }
 
@@ -849,9 +869,9 @@ mod tests {
         assert_eq!(presses(&calls).len(), 1);
     }
 
-    /// The page navigating while it is watched makes Chrome answer with an
-    /// error ("Cannot find default execution context"). That is a tick with
-    /// nothing to report, not a failed run.
+    /// The page navigating while it is watched makes Chrome answer with a
+    /// server error ("Cannot find context with specified id"). That is a
+    /// tick with nothing to report, not a failed run.
     #[tokio::test]
     async fn an_error_answer_mid_navigation_skips_the_tick() {
         let (outcome, calls) = run(
@@ -1109,30 +1129,48 @@ mod tests {
         );
     }
 
-    /// The poll and the measurement run in an isolated world, out of the
-    /// page's sight (the fake page asserts which world each call names), and
-    /// a world is made once per document: again after a navigation, not on
-    /// every tick.
+    /// The poll and the measurements run in the isolated world of the
+    /// document they read (the fake page asserts which context each call
+    /// names, one per document), on both sides of a navigation.
     #[tokio::test]
-    async fn one_isolated_world_serves_each_document() {
+    async fn the_isolated_world_follows_the_document() {
         let (outcome, calls) = run(
             |b| b,
             |tick| match tick {
-                0 => Page::challenge(),
-                1 => Page::challenge().widget_at(widget_rect()),
-                2 | 3 => Page::challenge().document("D2"),
+                0 => Page::challenge().widget_at(widget_rect()),
+                1 | 2 => Page::challenge().document("D2"),
+                3..=5 => Page::challenge().document("D2").widget_at(widget_rect()),
                 _ => Page::challenge().document("D2").token(END_TOKEN),
             },
         )
         .await;
 
         assert_eq!(token_of(outcome), END_TOKEN);
-        let worlds = calls
-            .iter()
-            .filter(|c| c.label == "Page.createIsolatedWorld")
-            .count();
-        assert_eq!(worlds, 2, "one world for D1, one for D2");
-        assert_eq!(presses(&calls).len(), 1);
+        // The second click waits out the default cadence of four ticks.
+        let ticks: Vec<usize> = presses(&calls).iter().map(|(tick, _)| *tick).collect();
+        assert_eq!(ticks, vec![0, 4]);
+    }
+
+    /// A widget that is no click target (hidden, or zero-size) is never
+    /// scrolled to: scrolling the page for a widget the driver will not
+    /// click changes the page for nothing, on every tick.
+    #[tokio::test]
+    async fn a_widget_that_is_no_click_target_never_scrolls_the_page() {
+        let (outcome, calls) = run(
+            |b| b,
+            |tick| match tick {
+                0..=5 => Page::challenge().widget_at(Value::Null),
+                _ => Page::challenge().token(END_TOKEN),
+            },
+        )
+        .await;
+
+        assert_eq!(token_of(outcome), END_TOKEN);
+        assert!(
+            saw(&calls, "Runtime.callFunctionOn"),
+            "the widget was measured"
+        );
+        assert!(!saw(&calls, SCROLL), "and not scrolled to");
     }
 
     /// Only a server error reads as the page changing under the call. Any

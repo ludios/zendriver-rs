@@ -30,8 +30,7 @@ use std::time::Duration;
 use serde_json::json;
 use zendriver::{Browser, BrowserBuilder, ClearanceOutcome, Tab, TurnstileSelectors};
 use zendriver_testkit::axum::Router;
-use zendriver_testkit::axum::http::header::CONTENT_TYPE;
-use zendriver_testkit::axum::response::{Html, IntoResponse};
+use zendriver_testkit::axum::response::Html;
 use zendriver_testkit::axum::routing::get;
 use zendriver_testkit::{FixtureServer, SITE_A, assert_eventually, launch_for_test};
 
@@ -85,18 +84,14 @@ const PRECURSOR: &str = r#"<!doctype html>
 <script src="/cdn-cgi/challenge-platform/h/b/orchestrate/precursor_interstitial/v1?ray=1"></script>
 <script>setTimeout(() => location.replace("/guarded"), 1000);</script>"#;
 
-/// The page the challenge guards.
-const GUARDED: &str = "<!doctype html><title>Guarded page</title><p>guarded content</p>";
-
-/// Paths of the scripts Cloudflare's two pages load.
-const CHALLENGE_SCRIPT: &str = "/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1";
-const PRECURSOR_SCRIPT: &str =
-    "/cdn-cgi/challenge-platform/h/b/orchestrate/precursor_interstitial/v1";
-
-/// An empty script, for those paths.
-async fn empty_script() -> impl IntoResponse {
-    ([(CONTENT_TYPE, "text/javascript")], "")
-}
+/// The page the challenge guards. It loads Cloudflare's bot-management
+/// script, as a site's own page can, which must not read as a challenge.
+/// The fixture serves none of Cloudflare's scripts: the `<script>`
+/// elements, which are what the markers match, stay in the page either way.
+const GUARDED: &str = r#"<!doctype html>
+<title>Guarded page</title>
+<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>
+<p>guarded content</p>"#;
 
 fn routes() -> Router {
     Router::new()
@@ -104,8 +99,6 @@ fn routes() -> Router {
         .route(WIDGET_PATH, get(|| async { Html(WIDGET) }))
         .route("/precursor", get(|| async { Html(PRECURSOR) }))
         .route("/guarded", get(|| async { Html(GUARDED) }))
-        .route(CHALLENGE_SCRIPT, get(empty_script))
-        .route(PRECURSOR_SCRIPT, get(empty_script))
 }
 
 /// Whether Chrome lists the widget's frame as a target of its own, which it
