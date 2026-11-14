@@ -43,7 +43,10 @@ pub use mouse::MouseButton;
 /// when a [`crate::Tab`] is registered, and accessed via [`crate::Tab::input`].
 #[derive(Debug)]
 pub struct InputController {
-    pub(crate) state: Mutex<InputState>,
+    /// In an `Arc` so that a spawned task can own a lock on it, as the
+    /// cloudflare feature's human-like click does from its press to its
+    /// release.
+    pub(crate) state: Arc<Mutex<InputState>>,
     pub(crate) profile: InputProfile,
 }
 
@@ -77,7 +80,9 @@ pub(crate) struct InputState {
     /// Residual case neither shape covers: if the caller drops the gesture
     /// future mid-flight (cancellation, an outer `tokio::time::timeout`), no
     /// cleanup runs and the bit stays set. A `Drop` guard would not reliably
-    /// close that either, for the `try_lock` reason above.
+    /// close that either, for the `try_lock` reason above. Running the press
+    /// and the release in a spawned task would, as the cloudflare feature's
+    /// human-like click does.
     pub buttons_held: MouseButtonSet,
     pub modifiers_held: KeyModifiers,
     pub rng: rand::rngs::SmallRng,
@@ -101,13 +106,13 @@ impl InputController {
     #[must_use]
     pub fn new(profile: InputProfile) -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(InputState {
+            state: Arc::new(Mutex::new(InputState {
                 pointer_x: 0.0,
                 pointer_y: 0.0,
                 buttons_held: MouseButtonSet::empty(),
                 modifiers_held: KeyModifiers::empty(),
                 rng: rand::make_rng(),
-            }),
+            })),
             profile,
         })
     }
@@ -118,13 +123,13 @@ impl InputController {
     #[must_use]
     pub fn new_with_seed(profile: InputProfile, seed: u64) -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(InputState {
+            state: Arc::new(Mutex::new(InputState {
                 pointer_x: 0.0,
                 pointer_y: 0.0,
                 buttons_held: MouseButtonSet::empty(),
                 modifiers_held: KeyModifiers::empty(),
                 rng: rand::SeedableRng::seed_from_u64(seed),
-            }),
+            })),
             profile,
         })
     }

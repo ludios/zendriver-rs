@@ -142,9 +142,11 @@ it, shadow root or not. The tick then resolves in this order:
    checkbox (within 2 px of that point along each axis, where the press
    then lands) and a press held for about a tenth of a second — about a
    second in all, whatever the tab's `InputProfile` says. Every move is a
-   whole pixel inside the viewport. A widget that is mounted but hidden or
-   zero-sized is never clicked, since there is no meaningful point to
-   click.
+   whole pixel inside the viewport. Dropping the future of
+   `wait_for_clearance` while the button is down (e.g. because the page
+   has already had its answer) does not stop the release. A widget that
+   is mounted but hidden or zero-sized is never clicked, since there is
+   no meaningful point to click.
 3. **Retry, up to a cap.** Cloudflare drops clicks that land while the
    widget is still booting, so one run spends up to three of them, each
    at least four poll ticks after the last (about two seconds at the

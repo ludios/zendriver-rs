@@ -3205,8 +3205,10 @@ impl Tab {
     /// random point on the viewport's edge), a curved approach that speeds
     /// up and slows down, a move about every frame, with a slight tremor;
     /// a little jiggle on the checkbox; then a press held for about a tenth
-    /// of a second. Every move is a whole pixel inside the viewport. It
-    /// takes about a second, and ignores the tab's
+    /// of a second. Every move is a whole pixel inside the viewport.
+    /// Dropping the future of `wait_for_clearance` while the button is down
+    /// (e.g. because the page has already had its answer) does not stop the
+    /// release. The click takes about a second, and ignores the tab's
     /// [`InputProfile`](crate::stealth::InputProfile), whose default moves
     /// in a straight line as fast as the moves can be sent — the motion a
     /// bot check looks for.

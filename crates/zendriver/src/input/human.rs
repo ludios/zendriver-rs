@@ -14,6 +14,7 @@
 //! move onto it.
 
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rand::{Rng, RngExt};
@@ -218,11 +219,17 @@ async fn dispatch(
 ///
 /// Holds `input`'s lock for the whole gesture, so no other gesture that
 /// takes the lock (the tab's other mouse moves and clicks) runs in the
-/// middle of it, and records the pointer's position after each move. It
-/// records the button as released after the release, and does not record
-/// it as held in between: a gesture cut short between the press and the
-/// release — by an error, or by its future being dropped — leaves Chrome
-/// with the button down, and the record without it.
+/// middle of it, and records the pointer's position after each move.
+///
+/// The press, the hold and the release run in a spawned task, which
+/// finishes them even if the caller drops the returned future while the
+/// button is down: a page can answer a click during its hold, and a caller
+/// waiting for that answer may then drop the click. If the caller drops
+/// the future before the press, the click stops there, and nothing is
+/// pressed. The task records the button as released after the release, and
+/// does not record it as held in between: an error between the press and
+/// the release leaves Chrome with the button down, and the record without
+/// it.
 ///
 /// # Errors
 /// The error of the first CDP call that failed.
@@ -233,7 +240,7 @@ pub(crate) async fn click(
     y: f64,
 ) -> Result<(), CallError> {
     let viewport = viewport(session).await?;
-    let mut state = input.state.lock().await;
+    let mut state = Arc::clone(&input.state).lock_owned().await;
     let modifiers = state.modifiers_held.cdp_bits();
     let held = state.buttons_held;
     let start = Instant::now();
@@ -258,29 +265,41 @@ pub(crate) async fn click(
     let at = (state.pointer_x, state.pointer_y);
     let last = gesture.moves.last().map_or(Duration::ZERO, |step| step.at);
     tokio::time::sleep_until(start + last + gesture.settle).await;
-    let pressed = held | MouseButtonSet::LEFT;
-    dispatch(
-        session,
-        "mousePressed",
-        at,
-        Some("left"),
-        modifiers,
-        pressed,
-    )
-    .await?;
-    tokio::time::sleep(gesture.hold).await;
-    let released = held.difference(MouseButtonSet::LEFT);
-    dispatch(
-        session,
-        "mouseReleased",
-        at,
-        Some("left"),
-        modifiers,
-        released,
-    )
-    .await?;
-    state.buttons_held = released;
-    Ok(())
+
+    let session = session.clone();
+    let hold = gesture.hold;
+    let pressing = tokio::spawn(async move {
+        let pressed = held | MouseButtonSet::LEFT;
+        dispatch(
+            &session,
+            "mousePressed",
+            at,
+            Some("left"),
+            modifiers,
+            pressed,
+        )
+        .await?;
+        tokio::time::sleep(hold).await;
+        let released = held.difference(MouseButtonSet::LEFT);
+        dispatch(
+            &session,
+            "mouseReleased",
+            at,
+            Some("left"),
+            modifiers,
+            released,
+        )
+        .await?;
+        state.buttons_held = released;
+        Ok(())
+    });
+    match pressing.await {
+        Ok(result) => result,
+        // Nothing aborts the task, so it ends without a result only by
+        // panicking, or by the runtime's shutdown, for which `into_panic`
+        // panics too.
+        Err(error) => std::panic::resume_unwind(error.into_panic()),
+    }
 }
 
 #[cfg(test)]
@@ -507,6 +526,45 @@ mod tests {
         let state = input.state.lock().await;
         assert_eq!((state.pointer_x, state.pointer_y), last_move);
         assert!(state.buttons_held.is_empty());
+        conn.shutdown();
+    }
+
+    /// A click whose future is dropped while the button is down still
+    /// releases the button, and keeps the tab's other gestures out until it
+    /// has.
+    #[tokio::test(start_paused = true)]
+    async fn a_click_dropped_while_the_button_is_down_still_releases_it() {
+        let input = InputController::new_with_seed(InputProfile::native(), 11);
+        let (mut mock, conn) = MockConnection::pair();
+        let session = SessionHandle::new(conn.clone(), "S1");
+
+        let clicking = {
+            let input = input.clone();
+            tokio::spawn(async move { click(&input, &session, TO.0, TO.1).await })
+        };
+        let id = expect(&mut mock, "Page.getLayoutMetrics").await;
+        let size = json!({ "clientWidth": VIEWPORT.width, "clientHeight": VIEWPORT.height });
+        mock.reply(id, json!({ "cssLayoutViewport": size })).await;
+        let press = loop {
+            let id = expect(&mut mock, "Input.dispatchMouseEvent").await;
+            if mock.last_sent()["params"]["type"] == "mousePressed" {
+                break id;
+            }
+            mock.reply(id, json!({})).await;
+        };
+
+        clicking.abort();
+        assert!(clicking.await.unwrap_err().is_cancelled());
+        assert!(
+            input.state.try_lock().is_err(),
+            "no other gesture may run between the press and the release"
+        );
+        mock.reply(press, json!({})).await;
+        let release = expect(&mut mock, "Input.dispatchMouseEvent").await;
+        assert_eq!(mock.last_sent()["params"]["type"], "mouseReleased");
+        mock.reply(release, json!({})).await;
+
+        assert!(input.state.lock().await.buttons_held.is_empty());
         conn.shutdown();
     }
 }
