@@ -840,6 +840,9 @@ use std::time::Duration;
 use zendriver::{Browser, IpApiResolver};
 
 let browser = Browser::builder()
+    // Chrome's proxy; the resolver below must name the same one, since
+    // `geo_resolver(..)`, unlike `geo_auto()`, copies nothing from here.
+    .proxy("http://user:pass@residential-proxy.example:8000")
     .geo_resolver(
         IpApiResolver::new()
             .with_proxy(
