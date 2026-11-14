@@ -3109,7 +3109,7 @@ name = "zendriver"
 version = "0.5.28"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bitflags",
  "dirs",
  "futures",
@@ -3234,7 +3234,7 @@ name = "zendriver-interception"
 version = "0.3.20"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures",
  "glob",
  "insta",
@@ -3256,7 +3256,7 @@ version = "0.16.37"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "futures",
  "insta",
@@ -3312,7 +3312,7 @@ name = "zendriver-testkit"
 version = "0.0.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures",
  "serde_json",
  "sysinfo",

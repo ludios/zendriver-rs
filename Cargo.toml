@@ -75,7 +75,7 @@ regex              = "1"
 bitflags           = "2"
 unicode-segmentation = "1"
 rand               = { version = "0.9", default-features = false, features = ["std", "std_rng", "small_rng", "os_rng"] }
-base64             = "0.22"
+base64             = "0.23"
 # 0.13, matching proxybroker-rs so a project using both compiles one HTTP stack.
 #
 # `rustls-no-provider`, NOT `rustls`: the latter enables `__rustls-aws-lc-rs`, whose -sys
