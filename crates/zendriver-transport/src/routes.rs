@@ -304,9 +304,13 @@ impl Routes {
     /// `session_id`: end its subscribers' streams, and those of later
     /// subscribers, and do the same for the sessions attached through it,
     /// whose ends Chrome doesn't report.
-    pub(crate) fn detach(&mut self, generation: u64, session_id: &str) {
+    ///
+    /// Returns the ids of those other sessions: the ones attached through
+    /// `session_id`, at any depth.
+    pub(crate) fn detach(&mut self, generation: u64, session_id: &str) -> Vec<String> {
+        let mut descendants = Vec::new();
         if generation != self.generation {
-            return;
+            return descendants;
         }
         if let Some(parent) = self.parents.remove(session_id) {
             if let Some(siblings) = self.children.get_mut(&parent) {
@@ -325,8 +329,12 @@ impl Routes {
             {
                 route.finish(SessionEnd::Detached);
             }
+            if id != session_id {
+                descendants.push(id.clone());
+            }
             self.detached.insert(id);
         }
+        descendants
     }
 
     /// The actor of generation `generation` stopped, for the reason `end`
@@ -522,7 +530,7 @@ mod tests {
         let child = routes.subscribe(Some("C"), 1, &["Page."]);
         let grandchild = routes.subscribe(Some("G"), 1, &["Page."]);
         let mut other = routes.subscribe(Some("D"), 1, &["Page."]);
-        routes.detach(1, "P");
+        assert_eq!(routes.detach(1, "P"), ["C", "G"]);
         assert_eq!(drain(child).await.1, SessionEnd::Detached);
         assert_eq!(drain(grandchild).await.1, SessionEnd::Detached);
         let (_, end) = drain(routes.subscribe(Some("G"), 1, &["Page."])).await;
@@ -536,7 +544,7 @@ mod tests {
         let mut routes = Routes::new();
         routes.attach(1, "P", "C");
         let mut parent = routes.subscribe(Some("P"), 1, &["Page."]);
-        routes.detach(1, "C");
+        assert!(routes.detach(1, "C").is_empty());
         assert!(routes.children["P"].is_empty());
         assert!(routes.parents.is_empty());
         routes.dispatch(1, &event("Page.a", Some("P")));

@@ -17,8 +17,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, trace, warn};
 
 use crate::connection::{Connection, ConnectionInner, GenerationEnd};
+use crate::error::{CallError, TransportError};
 use crate::frame::{AccountedRawEvent, CdpCommand, CdpInbound, CdpRpcError, RawEvent};
-use crate::observer::{ObserverFailurePolicy, PausedSession, TargetInfo, TargetObserver};
+use crate::observer::{
+    ObserverError, ObserverFailurePolicy, PausedSession, TargetInfo, TargetObserver,
+};
 use crate::routes::{self, Routes, SessionEnd};
 
 /// Outbound command sent from a `Connection` handle to the actor.
@@ -419,23 +422,32 @@ pub(crate) async fn run_actor<S>(
                                 } else if method == "Target.detachedFromTarget" {
                                     match serde_json::from_value::<TargetDetached>(params.clone()) {
                                         Ok(ev) => {
-                                            let failed = fail_detached_session_pendings(
-                                                &mut pending,
-                                                &ev.session_id,
-                                            );
+                                            // The session, and the sessions
+                                            // attached through it: Chrome
+                                            // reports the end of none of
+                                            // those, so their streams,
+                                            // pending commands and observers
+                                            // learn of it here.
+                                            let mut ended = vec![ev.session_id.clone()];
+                                            if let Some(routes) = &routes {
+                                                ended.extend(
+                                                    routes::lock(routes)
+                                                        .detach(accounted.generation, &ev.session_id),
+                                                );
+                                            }
+                                            let mut failed = 0;
+                                            for session_id in &ended {
+                                                failed += fail_detached_session_pendings(
+                                                    &mut pending,
+                                                    session_id,
+                                                );
+                                            }
                                             if failed > 0 {
                                                 debug!(
                                                     session_id = %ev.session_id,
                                                     failed,
                                                     "failed the pending commands of a detached session"
                                                 );
-                                            }
-                                            // Ends the session's streams, and
-                                            // those of the sessions attached
-                                            // through it.
-                                            if let Some(routes) = &routes {
-                                                routes::lock(routes)
-                                                    .detach(accounted.generation, &ev.session_id);
                                             }
                                             if !observers.is_empty() {
                                                 // Mirror the `attachedToTarget` path:
@@ -456,9 +468,12 @@ pub(crate) async fn run_actor<S>(
                                                     // hang forever.
                                                     Duration::from_secs(5)
                                                 }};
-                                                for obs in &observers {
+                                                for (obs, sid) in observers
+                                                    .iter()
+                                                    .flat_map(|obs| ended.iter().map(move |sid| (obs, sid)))
+                                                {
                                                     let obs2 = obs.clone();
-                                                    let sid = ev.session_id.clone();
+                                                    let sid = sid.clone();
                                                     let name = obs2.name();
                                                     tokio::spawn(async move {
                                                         let fut = obs2.on_target_detached(&sid);
@@ -584,8 +599,10 @@ pub(crate) async fn run_actor<S>(
 /// after either: (a) every observer succeeds — in which case we release the
 /// debugger via `Runtime.runIfWaitingForDebugger`; (b) one observer errors or
 /// panics — we detach via `Target.detachFromTarget` and return without
-/// releasing; or (c) an observer exceeds `observer_timeout` — behavior then
-/// depends on [`TargetObserver::failure_policy`]:
+/// releasing (unless its error says that Chrome detached the session already,
+/// which ends the chain quietly); or (c) an observer exceeds
+/// `observer_timeout` — behavior then depends on
+/// [`TargetObserver::failure_policy`]:
 /// [`ObserverFailurePolicy::Required`] (the default) detaches the same as
 /// (b), fail closed, so a hung observer can never leave the page running
 /// without its setup; [`ObserverFailurePolicy::BestEffort`] logs a warning
@@ -629,6 +646,15 @@ async fn handle_target_attached(
         let fut = obs.on_target_attached(paused);
         match tokio::time::timeout(observer_timeout, AssertUnwindSafe(fut).catch_unwind()).await {
             Ok(Ok(Ok(()))) => continue,
+            // Chrome detached the session during its setup (the page removed
+            // the iframe, or the tab was closed): an ordinary end, with
+            // nothing left to detach.
+            Ok(Ok(Err(ObserverError::Call(CallError::Transport(
+                TransportError::SessionDetached,
+            ))))) => {
+                debug!(observer = name, %session_id, "the target went away during its setup");
+                return;
+            }
             Ok(Ok(Err(e))) => {
                 error!(observer = name, %session_id, error = %e, "observer failed; detaching");
                 detach_target(&conn, &session_id).await;

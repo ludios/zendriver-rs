@@ -417,6 +417,113 @@ mod tests {
         assert_eq!(drain(&mut child).await.1, SessionEnd::Detached);
     }
 
+    /// An observer that records the id of each session whose end it is told
+    /// of.
+    struct DetachRecorder(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl TargetObserver for DetachRecorder {
+        async fn on_target_attached(&self, _: PausedSession<'_>) -> Result<(), ObserverError> {
+            Ok(())
+        }
+
+        async fn on_target_detached(&self, session_id: &str) {
+            self.0.lock().unwrap().push(session_id.to_owned());
+        }
+
+        fn name(&self) -> &'static str {
+            "detach-recorder"
+        }
+    }
+
+    /// Through the actor: when a session detaches, a command that is pending
+    /// on a session attached through it fails at once too, and observers are
+    /// told of the end of both.
+    #[tokio::test]
+    async fn a_detach_fails_the_commands_and_tells_the_observers_of_child_sessions() {
+        let recorder = Arc::new(DetachRecorder(std::sync::Mutex::new(Vec::new())));
+        let (mut mock, conn) = MockConnection::pair_with_observers(vec![recorder.clone()]);
+        let attached = json!({
+            "sessionId": "C",
+            "targetInfo": { "targetId": "TC", "type": "iframe", "url": "" },
+            "waitingForDebugger": true,
+        });
+        mock.emit_event_for_session("Target.attachedToTarget", attached, "P")
+            .await;
+        let id = mock.expect_cmd("Runtime.runIfWaitingForDebugger").await;
+        mock.reply(id, json!({})).await;
+        let on_child = SessionHandle::new(conn.clone(), "C");
+        let pending =
+            tokio::spawn(async move { on_child.call("Runtime.evaluate", json!({})).await });
+        mock.expect_cmd("Runtime.evaluate").await;
+
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "P" }))
+            .await;
+        let failed = tokio::time::timeout(std::time::Duration::from_secs(2), pending)
+            .await
+            .expect("the child's command must fail at its parent's detach")
+            .unwrap();
+        assert!(
+            matches!(
+                failed,
+                Err(crate::CallError::Transport(
+                    crate::TransportError::SessionDetached
+                ))
+            ),
+            "{failed:?}"
+        );
+        // The observers are told in tasks of their own.
+        for _ in 0..200 {
+            if recorder.0.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let mut told = recorder.0.lock().unwrap().clone();
+        told.sort();
+        assert_eq!(told, ["C", "P"]);
+    }
+
+    /// An observer that sends its target one command.
+    struct EnablesPage;
+
+    #[async_trait::async_trait]
+    impl TargetObserver for EnablesPage {
+        async fn on_target_attached(
+            &self,
+            session: PausedSession<'_>,
+        ) -> Result<(), ObserverError> {
+            session.call("Page.enable", json!({})).await?;
+            Ok(())
+        }
+
+        fn name(&self) -> &'static str {
+            "enables-page"
+        }
+    }
+
+    /// Through the actor: a target that Chrome detaches during its setup (a
+    /// page removed its iframe) ends the observer chain without a
+    /// `Target.detachFromTarget` for the session that is gone, and without a
+    /// release.
+    #[tokio::test]
+    async fn a_target_that_goes_away_during_its_setup_is_not_detached_again() {
+        let (mut mock, _conn) = MockConnection::pair_with_observers(vec![Arc::new(EnablesPage)]);
+        let attached = json!({
+            "sessionId": "S9",
+            "targetInfo": { "targetId": "T9", "type": "iframe", "url": "" },
+            "waitingForDebugger": true,
+        });
+        mock.emit_event("Target.attachedToTarget", attached).await;
+        mock.expect_cmd("Page.enable").await;
+        mock.emit_event("Target.detachedFromTarget", json!({ "sessionId": "S9" }))
+            .await;
+        let next = mock
+            .recv_cmd_timeout(std::time::Duration::from_millis(300))
+            .await;
+        assert_eq!(next, None);
+    }
+
     /// Through the actor: when every handle to the connection is dropped,
     /// the actor stops, and the streams end.
     #[tokio::test]
