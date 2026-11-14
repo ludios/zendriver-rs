@@ -114,8 +114,9 @@ pub struct ClickPolicy {
     /// poll interval.
     pub retry_ticks: u32,
     /// Where to click horizontally inside the widget's box, as a fraction
-    /// of its width. Defaults to `0.15` — 15% from the left edge, which is
-    /// where the Turnstile checkbox sits.
+    /// of its width. Defaults to `0.07` — 7% from the left edge, the middle
+    /// of the Turnstile checkbox, which spans about 3% to 10% of the
+    /// 300-pixel-wide widget (measured on Chrome 157, November 2026).
     pub x_fraction: f64,
     /// Where to click vertically inside the widget's box, as a fraction of
     /// its height. Defaults to `0.50`.
@@ -127,7 +128,7 @@ impl Default for ClickPolicy {
         Self {
             max_attempts: 3,
             retry_ticks: 4,
-            x_fraction: 0.15,
+            x_fraction: 0.07,
             y_fraction: 0.50,
         }
     }
@@ -181,7 +182,7 @@ mod tests {
         let p = ClickPolicy::default();
         assert_eq!(p.max_attempts, 3);
         assert_eq!(p.retry_ticks, 4);
-        assert_eq!(p.x_fraction, 0.15);
+        assert_eq!(p.x_fraction, 0.07);
         assert_eq!(p.y_fraction, 0.50);
     }
 }

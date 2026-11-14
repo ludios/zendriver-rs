@@ -11,7 +11,7 @@
 //!      Turnstile iframe — through CDP, since Turnstile mounts it in a
 //!      closed shadow root. When the iframe is a click target, the driver
 //!      scrolls it into view, re-measures it, and dispatches a raw
-//!      left-click at the canonical (15% x, 50% y) offset (Turnstile
+//!      left-click at the canonical (7% x, 50% y) offset (Turnstile
 //!      checkbox), retrying up to three times in case the widget swallowed
 //!      the first one. Resolves the first tick a token is observed, or once
 //!      every marker is gone from a page that has settled.

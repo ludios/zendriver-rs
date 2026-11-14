@@ -120,7 +120,7 @@ pub struct ClickPolicyInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_ticks: Option<u32>,
     /// Horizontal click point inside the widget's box, as a fraction of its
-    /// width. Defaults to `0.15`.
+    /// width. Defaults to `0.07`, the middle of the Turnstile checkbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x_fraction: Option<f64>,
     /// Vertical click point inside the widget's box, as a fraction of its
@@ -289,7 +289,7 @@ mod tests {
     /// The fake page puts the widget's frame at the request's host, so the
     /// driver finds the widget only if the request's marker reached the
     /// frame lookup; and the click must land where the request's fractions
-    /// put it — 15% / 50% of the same box would be (112, 220), so neither
+    /// put it — 7% / 50% of the same box would be (105.6, 220), so neither
     /// coordinate can be produced by a driver that quietly kept its
     /// defaults.
     #[tokio::test]

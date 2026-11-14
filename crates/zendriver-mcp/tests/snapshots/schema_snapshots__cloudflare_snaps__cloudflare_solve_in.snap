@@ -51,7 +51,7 @@ $defs:
         format: uint32
         minimum: 0
       x_fraction:
-        description: "Horizontal click point inside the widget's box, as a fraction of its\nwidth. Defaults to `0.15`."
+        description: "Horizontal click point inside the widget's box, as a fraction of its\nwidth. Defaults to `0.07`, the middle of the Turnstile checkbox."
         type:
           - number
           - "null"

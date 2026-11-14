@@ -50,14 +50,14 @@ const CHALLENGE: &str = r#"<!doctype html>
   });
 </script>"#;
 
-/// The widget: a checkbox in a label, as wide as the iframe. Checking it
-/// tells the challenge page.
+/// The widget: a 23-pixel checkbox from 9 to 32 pixels in and centred
+/// vertically, where the live widget has it, beside text that does nothing
+/// when clicked. Checking the box tells the challenge page.
 const WIDGET: &str = r#"<!doctype html>
 <body style="margin: 0">
-<label style="display: flex; align-items: center; height: 65px; padding-left: 12px">
-  <input type="checkbox" id="box" style="width: 24px; height: 24px; margin: 0 8px 0 0">
-  Verify you are human
-</label>
+<input type="checkbox" id="box"
+  style="position: absolute; left: 9px; top: 21px; width: 23px; height: 23px; margin: 0">
+<span style="position: absolute; left: 44px; top: 22px">Verify you are human</span>
 <script>
   document.getElementById("box").addEventListener("change", () => parent.postMessage("passed", "*"));
 </script>"#;

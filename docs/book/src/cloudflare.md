@@ -94,8 +94,8 @@ it, shadow root or not. The tick then resolves in this order:
    re-measured before a click can land on it. The scroll is CDP's
    `DOM.scrollIntoViewIfNeeded`, which no script in the page sees. The
    click goes to
-   `(bbox.x + bbox.width * 0.15, bbox.y + bbox.height * 0.5)` — by
-   default the 15%-from-left, 50%-from-top position of the checkbox
+   `(bbox.x + bbox.width * 0.07, bbox.y + bbox.height * 0.5)` — by
+   default the 7%-from-left, 50%-from-top position of the checkbox
    inside the iframe. No Bezier-path motion; Cloudflare wants a real click on a
    real checkbox. A widget that is mounted but hidden or zero-sized is
    never clicked, since there is no meaningful point to click.
@@ -165,7 +165,7 @@ The defaults:
 | `TurnstileSelectors::token_inputs` | `["[name=\"cf-turnstile-response\"]", "[name=\"cf_challenge_response\"]"]` |
 | `ClickPolicy::max_attempts` | `3` (`0` watches without ever clicking) |
 | `ClickPolicy::retry_ticks` | `4` |
-| `ClickPolicy::x_fraction` | `0.15` |
+| `ClickPolicy::x_fraction` | `0.07` |
 | `ClickPolicy::y_fraction` | `0.5` |
 
 `token_inputs` is tried in order, so a page carrying both the modern and

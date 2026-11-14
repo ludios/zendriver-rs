@@ -17,7 +17,7 @@
 //! 3. If the widget is a click target (non-zero size and visible), scrolls
 //!    it into view, re-measures it, and clicks the point the
 //!    [`ClickPolicy`] chose inside it — by default
-//!    `bbox.x + bbox.width * 0.15, bbox.y + bbox.height * 0.50`. Up to
+//!    `bbox.x + bbox.width * 0.07, bbox.y + bbox.height * 0.50`. Up to
 //!    [`ClickPolicy::max_attempts`] clicks are spent, spaced
 //!    [`ClickPolicy::retry_ticks`] ticks apart, so a swallowed first click
 //!    is not the end of the run. A caller-supplied
@@ -470,6 +470,11 @@ mod tests {
         rect(100.0, 200.0, 80.0, 40.0)
     }
 
+    /// Where the default policy clicks [`widget_rect`] horizontally: 7% in.
+    /// A literal rather than a read of `ClickPolicy::default`, so that
+    /// changing the default fails these tests instead of moving them along.
+    const DEFAULT_X: f64 = 100.0 + 80.0 * 0.07;
+
     /// The stall hint must fire for the run it is most needed on: a widget
     /// that stays mounted and clickable where it is, but stops being a click
     /// target once scrolled into view, so no click ever lands.
@@ -560,12 +565,12 @@ mod tests {
     }
 
     /// Interactive happy path: the widget sits below the fold, gets scrolled
-    /// into view, and the click lands at (15% × width, 50% × height) of the
+    /// into view, and the click lands at (7% × width, 50% × height) of the
     /// **post-scroll** rect; the next poll sees the token.
     #[tokio::test]
     async fn scrolls_the_widget_into_view_then_clicks_its_post_scroll_rect() {
         // After scrolling it sits at (100, 300), 60×40 → the click belongs
-        // at (100 + 60 * 0.15, 300 + 40 * 0.5) = (109, 320). The pre-scroll
+        // at (100 + 60 * 0.07, 300 + 40 * 0.5) = (104.2, 320). The pre-scroll
         // rect would put it at y = 2020.
         let (outcome, calls) = run(
             |b| b,
@@ -580,7 +585,7 @@ mod tests {
         .await;
 
         assert_eq!(token_of(outcome), "TOKEN_XYZ");
-        assert_eq!(presses(&calls), vec![(0, (109.0, 320.0))]);
+        assert_eq!(presses(&calls), vec![(0, (100.0 + 60.0 * 0.07, 320.0))]);
         let scroll = calls.iter().position(|c| c.label == SCROLL);
         let first_mouse = calls.iter().position(|c| c.label.starts_with(MOUSE));
         assert!(
@@ -616,8 +621,8 @@ mod tests {
         .await;
 
         assert_eq!(token_of(outcome), END_TOKEN);
-        // (100 + 80 * 0.15, 200 + 40 * 0.5) — the post-scroll rect.
-        assert_eq!(presses(&calls), vec![(EMPTY_TICKS, (112.0, 220.0))]);
+        // (100 + 80 * 0.07, 200 + 40 * 0.5) — the post-scroll rect.
+        assert_eq!(presses(&calls), vec![(EMPTY_TICKS, (DEFAULT_X, 220.0))]);
     }
 
     /// With site isolation on, the cross-site widget is not in the page's
@@ -635,7 +640,7 @@ mod tests {
         .await;
 
         assert_eq!(token_of(outcome), END_TOKEN);
-        assert_eq!(presses(&calls), vec![(0, (112.0, 220.0))]);
+        assert_eq!(presses(&calls), vec![(0, (DEFAULT_X, 220.0))]);
     }
 
     /// Invisible-Turnstile path: no widget ever mounts, the token is
@@ -918,7 +923,7 @@ mod tests {
 
         assert_eq!(token_of(outcome), END_TOKEN);
         // 100 + 80 * 0.5 = 140, 200 + 40 * 0.25 = 210. The built-in policy
-        // would give (112, 220).
+        // would give (105.6, 220).
         assert_eq!(presses(&calls), vec![(0, (140.0, 210.0))]);
     }
 
@@ -953,7 +958,7 @@ mod tests {
         let targets = seen.lock().expect("poisoned").clone();
         assert_eq!(targets.len(), 1, "on_click runs once per attempt");
         assert_eq!(targets[0].bbox.y, 200.0);
-        assert_eq!((targets[0].x, targets[0].y), (112.0, 220.0));
+        assert_eq!((targets[0].x, targets[0].y), (DEFAULT_X, 220.0));
     }
 
     /// A failing caller click is a failing run — swallowing it would leave

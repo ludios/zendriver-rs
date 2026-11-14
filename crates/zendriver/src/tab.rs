@@ -3175,7 +3175,7 @@ impl Tab {
     /// to tune the polling cadence, then call
     /// [`wait_for_clearance`](zendriver_cloudflare::CloudflareBypass::wait_for_clearance)
     /// to find the Turnstile checkbox (closed shadow roots included), click
-    /// it at the default 15% offset, and poll until either a configured
+    /// it at the default 7% offset, and poll until either a configured
     /// token input picks up a value, every challenge marker is gone from a
     /// page that has settled — for Cloudflare's full-page challenge, the
     /// page it navigates to once passed (see
