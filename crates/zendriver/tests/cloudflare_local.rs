@@ -70,11 +70,12 @@ const WIDGET: &str = r#"<!doctype html>
 <span style="position: absolute; left: 44px; top: 22px">Verify you are human</span>
 <script>
   let moves = 0;
-  let downAt = 0;
+  let downAt = null;
   addEventListener("mousemove", () => moves++);
   addEventListener("mousedown", () => downAt = performance.now());
   document.getElementById("box").addEventListener("change", () => {
-    parent.postMessage({ passed: true, moves, heldMs: performance.now() - downAt }, "*");
+    const heldMs = downAt === null ? -1 : performance.now() - downAt;
+    parent.postMessage({ passed: true, moves, heldMs }, "*");
   });
 </script>"#;
 
@@ -157,13 +158,13 @@ async fn clears_the_challenge(builder: BrowserBuilder, own_process: bool) {
     let title: String = tab.evaluate("document.title").await.unwrap();
     assert_eq!(title, "Guarded page");
 
-    // The click was a person's, not a teleport: the built-in raw click
-    // brings one move and a press released at once. The jiggle alone
-    // brings two moves, and the end of the approach at least one more.
+    // The click came with an approach and a held press, not as a teleport:
+    // the built-in raw click brings one move and a press released at once.
+    // The end of the approach alone brings several moves over the widget.
     let report = server.requests_to("/report");
     assert_eq!(report.len(), 1, "the widget reports its one click");
     let query = report[0].uri.query().unwrap().to_string();
-    let field = |name: &str| -> u64 {
+    let field = |name: &str| -> i64 {
         let prefix = format!("{name}=");
         let value = query.split('&').find_map(|pair| pair.strip_prefix(&prefix));
         value.unwrap().parse().unwrap()

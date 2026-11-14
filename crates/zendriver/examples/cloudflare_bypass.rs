@@ -10,11 +10,12 @@
 //!      the clearance token, any challenge marker on the page, and the
 //!      Turnstile iframe — through CDP, since Turnstile mounts it in a
 //!      closed shadow root. When the iframe is a click target, the driver
-//!      scrolls it into view, re-measures it, and clicks the canonical
-//!      (7% x, 50% y) offset (Turnstile checkbox) the way a person would —
+//!      scrolls it into view, measures it, and clicks its default point
+//!      (7% across, 50% down: the Turnstile checkbox) in a human-like way —
 //!      a curved, eased approach, a little jiggle, a held press — retrying
-//!      up to three times in case the widget swallowed the first one. Resolves the first tick a token is observed, or once
-//!      every marker is gone from a page that has settled.
+//!      up to three times in case the widget swallowed the first one.
+//!      Resolves the first tick a token is observed, or when every marker
+//!      is gone from a page that has settled.
 //!   4. Print the [`ClearanceOutcome`] enum variant + the page title.
 //!
 //! Which markers to look for and how to click are caller data —

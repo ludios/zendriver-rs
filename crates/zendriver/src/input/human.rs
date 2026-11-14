@@ -1,29 +1,35 @@
-//! A click shaped like a person's, for a click that a bot check scores by
-//! how the pointer got there: a curved approach that speeds up and slows
-//! down, a slight tremor on the way, a little jiggle on arrival, and a press
-//! held for a moment.
+//! A human-like click, for a click that a bot check scores by how the
+//! pointer got there: a curved approach that speeds up and slows down, a
+//! slight tremor on the way, a little jiggle on arrival, and a press held
+//! for a moment.
 //!
-//! It ignores the tab's [`InputProfile`](zendriver_stealth::InputProfile).
-//! The default profile moves in a straight line at 10 px/ms, which suits
-//! automation that only needs the click to happen, and is the motion that
-//! such a check looks for.
+//! It ignores the tab's [`InputProfile`](zendriver_stealth::InputProfile),
+//! whose default moves in a straight line as fast as the moves can be sent:
+//! fine for automation that only needs the click to happen, and the motion
+//! that such a check looks for.
+//!
+//! This generator is small on purpose and serves only `Tab::cloudflare`.
+//! `TODO.mouse.md` plans a fuller model (corrections after an overshoot,
+//! among others) for every realistic move; when it lands, this click should
+//! move onto it.
 
 use std::ops::Range;
 use std::time::Duration;
 
 use rand::Rng;
 use serde_json::json;
+use tokio::time::Instant;
 use zendriver_transport::{CallError, SessionHandle};
 
 use crate::input::InputController;
 use crate::input::bezier::cubic_bezier;
 use crate::input::pointer_state::MouseButtonSet;
 
-/// One `mouseMoved`: how long to wait before sending it, and where it goes,
-/// in viewport CSS pixels.
+/// One `mouseMoved`: when to send it, as an offset from the gesture's
+/// start, and where it goes, in viewport CSS pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Step {
-    pub wait: Duration,
+    pub at: Duration,
     pub x: f64,
     pub y: f64,
 }
@@ -31,32 +37,65 @@ pub(crate) struct Step {
 /// One click, planned.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Gesture {
-    /// The approach, ending exactly on the target, and then the jiggle. The
+    /// The approach, ending on the target's pixel, then the jiggle. The
     /// press and the release happen where the last move went.
     pub moves: Vec<Step>,
+    /// How many of `moves` are the approach.
+    pub approach: usize,
     /// The pause between the last move and the press.
     pub settle: Duration,
     /// How long the button stays down.
     pub hold: Duration,
 }
 
-/// Milliseconds between two moves of the approach: a 60 Hz pointer, give or
-/// take scheduling.
+/// The size of the viewport, in CSS pixels. Every move stays inside it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Viewport {
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Milliseconds between two moves of the approach: about one frame at
+/// 60 Hz, give or take scheduling.
 const FRAME_MS: Range<u64> = 13..20;
 
-/// The farthest the arrival jiggle strays from the target, in CSS pixels.
-/// Small enough to stay inside a 24-pixel checkbox aimed at its middle.
+/// How far the jiggle strays from the target before rounding, at most, in
+/// CSS pixels along each axis. Small enough to stay inside a 24-pixel
+/// checkbox aimed at its middle.
 pub(crate) const JIGGLE_PX: f64 = 1.5;
 
-/// Plan a click at `to` for a pointer that is now at `from`, both in
-/// viewport CSS pixels. All randomness comes from `rng`, so a seeded `rng`
-/// gives the same plan every time.
-pub(crate) fn plan(from: (f64, f64), to: (f64, f64), rng: &mut impl Rng) -> Gesture {
+/// A pointer closer than this to the target, in CSS pixels, has nothing to
+/// approach: a second attempt starts where the first one's jiggle ended.
+const APPROACH_MIN_PX: f64 = 5.0;
+
+/// Append a move to `(x, y)` at `at` to `moves`, rounded to a whole pixel,
+/// as a mouse reports at a device-pixel ratio of 1, and kept inside
+/// `viewport`. A move to where the pointer already is is dropped: a mouse
+/// held still sends nothing.
+fn push(moves: &mut Vec<Step>, viewport: Viewport, at: Duration, x: f64, y: f64) {
+    let x = x.round().clamp(0.0, viewport.width - 1.0);
+    let y = y.round().clamp(0.0, viewport.height - 1.0);
+    if moves.last().is_some_and(|last| (last.x, last.y) == (x, y)) {
+        return;
+    }
+    moves.push(Step { at, x, y });
+}
+
+/// Plan a click at `to` for a pointer that is now at `from`, both in CSS
+/// pixels of a viewport of size `viewport`. All randomness comes from
+/// `rng`, so a seeded `rng` gives the same plan every time.
+pub(crate) fn plan(
+    from: (f64, f64),
+    to: (f64, f64),
+    viewport: Viewport,
+    rng: &mut impl Rng,
+) -> Gesture {
     let mut moves = Vec::new();
     let dx = to.0 - from.0;
     let dy = to.1 - from.1;
     let distance = dx.hypot(dy);
-    if distance >= 1.0 {
+    // A non-finite target has no path to it; the press then fails in Chrome.
+    if distance >= APPROACH_MIN_PX && distance.is_finite() {
         // Fitts's law: the time to reach a target grows with the logarithm
         // of its distance over its size. A Turnstile checkbox is about 24
         // pixels wide.
@@ -76,22 +115,25 @@ pub(crate) fn plan(from: (f64, f64), to: (f64, f64), rng: &mut impl Rng) -> Gest
             from.1 + dy * 0.75 + normal.1 * bow * 0.4,
         );
 
-        let mut elapsed_ms = 0.0;
+        let mut elapsed_ms = 0;
         loop {
-            let wait = rng.random_range(FRAME_MS);
-            elapsed_ms += wait as f64;
-            let t = (elapsed_ms / duration_ms).min(1.0);
+            elapsed_ms += rng.random_range(FRAME_MS);
+            let t = (elapsed_ms as f64 / duration_ms).min(1.0);
             // Minimum-jerk progress along the path: a slow start, a fast
             // middle and a slow arrival.
             let progress = t * t * t * (10.0 + t * (6.0 * t - 15.0));
             let (x, y) = cubic_bezier(from, c1, c2, to, progress);
-            // A tremor that fades out, so the approach ends exactly on `to`.
+            // A tremor that fades out, so the approach ends on `to`.
             let tremor = 0.8 * (1.0 - t);
-            moves.push(Step {
-                wait: Duration::from_millis(wait),
-                x: x + rng.random_range(-tremor..=tremor),
-                y: y + rng.random_range(-tremor..=tremor),
-            });
+            let x = x + rng.random_range(-tremor..=tremor);
+            let y = y + rng.random_range(-tremor..=tremor);
+            push(
+                &mut moves,
+                viewport,
+                Duration::from_millis(elapsed_ms),
+                x,
+                y,
+            );
             if t >= 1.0 {
                 break;
             }
@@ -99,85 +141,145 @@ pub(crate) fn plan(from: (f64, f64), to: (f64, f64), rng: &mut impl Rng) -> Gest
     }
 
     // The jiggle: a hand settling on the target before it presses.
+    let approach = moves.len();
+    let mut at = moves.last().map_or(Duration::ZERO, |step| step.at);
     for _ in 0..rng.random_range(2..=4) {
-        moves.push(Step {
-            wait: Duration::from_millis(rng.random_range(30..90)),
-            x: to.0 + rng.random_range(-JIGGLE_PX..=JIGGLE_PX),
-            y: to.1 + rng.random_range(-JIGGLE_PX..=JIGGLE_PX),
-        });
+        at += Duration::from_millis(rng.random_range(30..90));
+        let x = to.0 + rng.random_range(-JIGGLE_PX..=JIGGLE_PX);
+        let y = to.1 + rng.random_range(-JIGGLE_PX..=JIGGLE_PX);
+        push(&mut moves, viewport, at, x, y);
     }
 
     Gesture {
         moves,
+        approach,
         settle: Duration::from_millis(rng.random_range(40..120)),
         hold: Duration::from_millis(rng.random_range(60..140)),
     }
 }
 
+/// A random point on the edge of `viewport`, where a pointer that was
+/// outside the page enters it.
+fn edge_point(viewport: Viewport, rng: &mut impl Rng) -> (f64, f64) {
+    let x = rng.random_range(0.0..viewport.width).floor();
+    let y = rng.random_range(0.0..viewport.height).floor();
+    let right = viewport.width - 1.0;
+    let bottom = viewport.height - 1.0;
+    match rng.random_range(0..4) {
+        0 => (x, 0.0),
+        1 => (right, y),
+        2 => (x, bottom),
+        _ => (0.0, y),
+    }
+}
+
+/// The size of the main frame's viewport, in CSS pixels, at least 1 by 1.
+async fn viewport(session: &SessionHandle) -> Result<Viewport, CallError> {
+    let metrics = session.call("Page.getLayoutMetrics", json!({})).await?;
+    let size = &metrics["cssLayoutViewport"];
+    Ok(Viewport {
+        width: size["clientWidth"].as_f64().unwrap_or(1280.0).max(1.0),
+        height: size["clientHeight"].as_f64().unwrap_or(720.0).max(1.0),
+    })
+}
+
+/// Send one `Input.dispatchMouseEvent` of `kind` at `at` through `session`,
+/// with `modifiers` and the button set `buttons`; `button` names the button
+/// a press or a release is for.
+async fn dispatch(
+    session: &SessionHandle,
+    kind: &str,
+    at: (f64, f64),
+    button: Option<&str>,
+    modifiers: i32,
+    buttons: MouseButtonSet,
+) -> Result<(), CallError> {
+    let mut params = json!({
+        "type": kind, "x": at.0, "y": at.1,
+        "modifiers": modifiers, "buttons": buttons.bits(),
+    });
+    if let Some(button) = button {
+        params["button"] = json!(button);
+        params["clickCount"] = json!(1);
+    }
+    session.call("Input.dispatchMouseEvent", params).await?;
+    Ok(())
+}
+
 /// Left-click `(x, y)`, in viewport CSS pixels, with a gesture [`plan`]ned
-/// from where `input` records the pointer to be, sending it through
-/// `session`.
+/// from where `input` records this tab's pointer, sending it through
+/// `session`. A pointer that was never moved on this tab is still at the
+/// origin, where no hand rests; it enters at a random point on the
+/// viewport's edge instead.
 ///
-/// Holds `input`'s lock for the whole gesture, as the other pointer gestures
-/// do, so that no other input on the tab interleaves with it, and records
-/// the pointer's position after each move. It does not record the button as
-/// held: with the lock held, nothing can read that record mid-gesture, and a
-/// gesture cut short between the press and the release — by an error, or by
-/// its future being dropped — then leaves the record as it was, rather than
-/// a button held for the rest of the tab's life.
+/// Each move is sent at its planned offset from the gesture's start, so the
+/// wait for Chrome's reply to one move (Chrome answers at the next frame)
+/// does not delay the ones after it.
+///
+/// Holds `input`'s lock for the whole gesture, so no other gesture that
+/// takes the lock (the tab's other mouse moves and clicks) runs in the
+/// middle of it, and records the pointer's position after each move. It
+/// records the button as released after the release, and does not record
+/// it as held in between: a gesture cut short between the press and the
+/// release — by an error, or by its future being dropped — leaves Chrome
+/// with the button down, and the record without it.
 ///
 /// # Errors
-/// The error of the first `Input.dispatchMouseEvent` that failed.
+/// The error of the first CDP call that failed.
 pub(crate) async fn click(
     input: &InputController,
     session: &SessionHandle,
     x: f64,
     y: f64,
 ) -> Result<(), CallError> {
+    let viewport = viewport(session).await?;
     let mut state = input.state.lock().await;
-    let from = (state.pointer_x, state.pointer_y);
-    let gesture = plan(from, (x, y), &mut state.rng);
     let modifiers = state.modifiers_held.cdp_bits();
     let held = state.buttons_held;
+    let start = Instant::now();
+
+    let mut from = (state.pointer_x, state.pointer_y);
+    if from == (0.0, 0.0) {
+        from = edge_point(viewport, &mut state.rng);
+        dispatch(session, "mouseMoved", from, None, modifiers, held).await?;
+        state.pointer_x = from.0;
+        state.pointer_y = from.1;
+    }
+    let gesture = plan(from, (x, y), viewport, &mut state.rng);
 
     for step in &gesture.moves {
-        tokio::time::sleep(step.wait).await;
-        session
-            .call(
-                "Input.dispatchMouseEvent",
-                json!({
-                    "type": "mouseMoved", "x": step.x, "y": step.y,
-                    "modifiers": modifiers, "buttons": held.bits(),
-                }),
-            )
-            .await?;
+        tokio::time::sleep_until(start + step.at).await;
+        let at = (step.x, step.y);
+        dispatch(session, "mouseMoved", at, None, modifiers, held).await?;
         state.pointer_x = step.x;
         state.pointer_y = step.y;
     }
 
     let at = (state.pointer_x, state.pointer_y);
-    tokio::time::sleep(gesture.settle).await;
-    session
-        .call(
-            "Input.dispatchMouseEvent",
-            json!({
-                "type": "mousePressed", "x": at.0, "y": at.1,
-                "button": "left", "clickCount": 1,
-                "modifiers": modifiers, "buttons": (held | MouseButtonSet::LEFT).bits(),
-            }),
-        )
-        .await?;
+    let last = gesture.moves.last().map_or(Duration::ZERO, |step| step.at);
+    tokio::time::sleep_until(start + last + gesture.settle).await;
+    let pressed = held | MouseButtonSet::LEFT;
+    dispatch(
+        session,
+        "mousePressed",
+        at,
+        Some("left"),
+        modifiers,
+        pressed,
+    )
+    .await?;
     tokio::time::sleep(gesture.hold).await;
-    session
-        .call(
-            "Input.dispatchMouseEvent",
-            json!({
-                "type": "mouseReleased", "x": at.0, "y": at.1,
-                "button": "left", "clickCount": 1,
-                "modifiers": modifiers, "buttons": held.bits(),
-            }),
-        )
-        .await?;
+    let released = held.difference(MouseButtonSet::LEFT);
+    dispatch(
+        session,
+        "mouseReleased",
+        at,
+        Some("left"),
+        modifiers,
+        released,
+    )
+    .await?;
+    state.buttons_held = released;
     Ok(())
 }
 
@@ -191,37 +293,49 @@ mod tests {
     use zendriver_transport::testing::MockConnection;
 
     use super::*;
+    use crate::test_support::{drain_mouse_dispatches, expect};
 
+    const VIEWPORT: Viewport = Viewport {
+        width: 1000.0,
+        height: 800.0,
+    };
     const FROM: (f64, f64) = (700.0, 650.0);
-    const TO: (f64, f64) = (46.0, 336.0);
+    const TO: (f64, f64) = (46.0, 336.5);
+    /// The pixel `TO` rounds to, where the approach ends.
+    const TO_PIXEL: (f64, f64) = (46.0, 337.0);
 
     /// Distance of `point` from the straight line through `FROM` and `TO`.
     fn off_line(point: (f64, f64)) -> f64 {
-        let (dx, dy) = (TO.0 - FROM.0, TO.1 - FROM.1);
+        let dx = TO.0 - FROM.0;
+        let dy = TO.1 - FROM.1;
         ((point.0 - FROM.0) * dy - (point.1 - FROM.1) * dx).abs() / dx.hypot(dy)
     }
 
-    /// The approach: every move but the jiggle, which is the last 2 to 4.
-    /// The approach is the moves up to and including the one exactly on
-    /// `TO`.
+    /// The approach, which ends on the target's pixel.
     fn approach(gesture: &Gesture) -> &[Step] {
-        let end = gesture
-            .moves
-            .iter()
-            .rposition(|step| (step.x, step.y) == TO)
-            .expect("the approach ends exactly on the target");
-        &gesture.moves[..=end]
+        let approach = &gesture.moves[..gesture.approach];
+        let end = approach.last().unwrap();
+        assert_eq!(
+            (end.x, end.y),
+            TO_PIXEL,
+            "the approach ends on the target's pixel"
+        );
+        approach
     }
 
-    /// The shape of the approach, over many seeds: it ends exactly on the
-    /// target, bows away from the straight line without wandering off,
-    /// moves at a 60 Hz pointer's cadence, and takes about as long as a
-    /// person would.
+    fn plan_with(seed: u64) -> Gesture {
+        plan(FROM, TO, VIEWPORT, &mut SmallRng::seed_from_u64(seed))
+    }
+
+    /// The shape of the approach, over many seeds: it ends on the target's
+    /// pixel, bows away from the straight line without wandering off, moves
+    /// no faster than a 60 Hz pointer, and takes about as long as a person
+    /// would.
     #[test]
     fn the_approach_is_a_curved_eased_path_onto_the_target() {
         let distance = (TO.0 - FROM.0).hypot(TO.1 - FROM.1);
         for seed in 0..50 {
-            let gesture = plan(FROM, TO, &mut SmallRng::seed_from_u64(seed));
+            let gesture = plan_with(seed);
             let approach = approach(&gesture);
 
             let bow = approach
@@ -233,13 +347,15 @@ mod tests {
                 "seed {seed}: the path strays {bow:.1}px from the line over {distance:.0}px"
             );
 
-            assert!(
-                approach
-                    .iter()
-                    .all(|step| FRAME_MS.contains(&(step.wait.as_millis() as u64))),
-                "seed {seed}: a move off the 60 Hz cadence"
-            );
-            let took: Duration = approach.iter().map(|step| step.wait).sum();
+            let first_gap = approach[0].at;
+            assert!(first_gap >= Duration::from_millis(FRAME_MS.start));
+            for pair in approach.windows(2) {
+                assert!(
+                    pair[1].at - pair[0].at >= Duration::from_millis(FRAME_MS.start),
+                    "seed {seed}: two moves less than a frame apart"
+                );
+            }
+            let took = approach.last().unwrap().at;
             assert!(
                 took > Duration::from_millis(500) && took < Duration::from_millis(1200),
                 "seed {seed}: a {distance:.0}px approach took {took:?}"
@@ -250,7 +366,7 @@ mod tests {
                 .windows(2)
                 .map(|pair| {
                     let stride = (pair[1].x - pair[0].x).hypot(pair[1].y - pair[0].y);
-                    stride / pair[1].wait.as_secs_f64()
+                    stride / (pair[1].at - pair[0].at).as_secs_f64()
                 })
                 .collect();
             let (fastest, top) = speeds
@@ -274,46 +390,81 @@ mod tests {
         }
     }
 
-    /// The jiggle: 2 to 4 small moves around the target after the approach,
-    /// none farther than `JIGGLE_PX` from it.
+    /// Every move is a whole pixel, inside the viewport, and somewhere other
+    /// than the move before it — even for a path that bows out past the
+    /// viewport's left edge.
     #[test]
-    fn the_jiggle_stays_on_the_target() {
+    fn every_move_is_a_new_whole_pixel_inside_the_viewport() {
         for seed in 0..50 {
-            let gesture = plan(FROM, TO, &mut SmallRng::seed_from_u64(seed));
-            let jiggle = &gesture.moves[approach(&gesture).len()..];
-            assert!((2..=4).contains(&jiggle.len()), "seed {seed}: {jiggle:?}");
-            for step in jiggle {
-                assert!((step.x - TO.0).abs() <= JIGGLE_PX && (step.y - TO.1).abs() <= JIGGLE_PX);
+            let gesture = plan(
+                (3.0, 700.0),
+                (5.0, 40.0),
+                VIEWPORT,
+                &mut SmallRng::seed_from_u64(seed),
+            );
+            for step in &gesture.moves {
+                assert_eq!((step.x.fract(), step.y.fract()), (0.0, 0.0));
+                assert!((0.0..VIEWPORT.width).contains(&step.x));
+                assert!((0.0..VIEWPORT.height).contains(&step.y));
+            }
+            for pair in gesture.moves.windows(2) {
+                assert_ne!((pair[0].x, pair[0].y), (pair[1].x, pair[1].y));
             }
         }
     }
 
-    /// A pointer already on the target has nothing to approach, and still
-    /// jiggles before it presses.
+    /// The jiggle: at most 4 moves after the approach, each within the
+    /// jiggle's reach of the target once rounded.
     #[test]
-    fn a_pointer_on_the_target_only_jiggles() {
-        let gesture = plan(TO, TO, &mut SmallRng::seed_from_u64(7));
-        assert!((2..=4).contains(&gesture.moves.len()));
+    fn the_jiggle_stays_on_the_target() {
+        for seed in 0..50 {
+            let gesture = plan_with(seed);
+            let jiggle = &gesture.moves[gesture.approach..];
+            assert!(jiggle.len() <= 4, "seed {seed}: {jiggle:?}");
+            for step in jiggle {
+                assert!((step.x - TO.0).abs() <= JIGGLE_PX + 0.5);
+                assert!((step.y - TO.1).abs() <= JIGGLE_PX + 0.5);
+            }
+        }
+    }
+
+    /// A pointer a few pixels from the target — where a first attempt's
+    /// jiggle leaves it for the next — has nothing to approach, and only
+    /// jiggles.
+    #[test]
+    fn a_pointer_near_the_target_only_jiggles() {
+        for seed in 0..20 {
+            let near = (TO.0 + 2.0, TO.1 - 1.0);
+            let gesture = plan(near, TO, VIEWPORT, &mut SmallRng::seed_from_u64(seed));
+            assert!(gesture.moves.len() <= 4, "seed {seed}: {:?}", gesture.moves);
+        }
+    }
+
+    /// A target at no finite distance has no path to it; the plan must still
+    /// end rather than step towards it forever.
+    #[test]
+    fn a_non_finite_target_does_not_hang_the_plan() {
+        let gesture = plan(
+            FROM,
+            (f64::INFINITY, 1.0),
+            VIEWPORT,
+            &mut SmallRng::seed_from_u64(1),
+        );
+        assert!(gesture.moves.len() <= 4);
     }
 
     #[test]
     fn a_seeded_plan_is_the_same_every_time() {
-        let a = plan(FROM, TO, &mut SmallRng::seed_from_u64(3));
-        let b = plan(FROM, TO, &mut SmallRng::seed_from_u64(3));
-        assert_eq!(a, b);
+        assert_eq!(plan_with(3), plan_with(3));
     }
 
-    /// The dispatch: the planned moves in order, then a press and a release
-    /// where the last move went, and the tab's pointer left there.
+    /// The dispatch: a pointer never moved on this tab enters at the
+    /// viewport's edge, then follows the plan; the press and the release
+    /// come where the last move went, and the tab's pointer is left there
+    /// with no button held.
     #[tokio::test(start_paused = true)]
-    async fn click_sends_the_planned_moves_then_a_held_press() {
+    async fn click_enters_at_the_edge_then_sends_the_plan_and_a_held_press() {
         let input = InputController::new_with_seed(InputProfile::native(), 11);
-        let expected = {
-            let mut state = input.state.lock().await;
-            state.pointer_x = FROM.0;
-            state.pointer_y = FROM.1;
-            plan(FROM, TO, &mut state.rng.clone())
-        };
         let (mut mock, conn) = MockConnection::pair();
         let session = SessionHandle::new(conn.clone(), "S1");
 
@@ -321,51 +472,40 @@ mod tests {
             let input = input.clone();
             tokio::spawn(async move { click(&input, &session, TO.0, TO.1).await })
         };
-        // Where an event went. Read back through `serde_json`, which can
-        // parse a float one unit in the last place off what it wrote, so
-        // compared to the plan within a nanopixel.
-        let at = |event: &Value| (event["x"].as_f64().unwrap(), event["y"].as_f64().unwrap());
-        let near =
-            |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9;
-
-        let mut sent = Vec::new();
-        while let Some((method, id)) = mock.recv_cmd_timeout(Duration::from_secs(5)).await {
-            assert_eq!(method, "Input.dispatchMouseEvent");
-            sent.push(mock.last_sent()["params"].clone());
-            mock.reply(id, json!({})).await;
-        }
+        let id = expect(&mut mock, "Page.getLayoutMetrics").await;
+        let size = json!({ "clientWidth": VIEWPORT.width, "clientHeight": VIEWPORT.height });
+        mock.reply(id, json!({ "cssLayoutViewport": size })).await;
+        let sent = drain_mouse_dispatches(&mut mock).await;
         clicking.await.unwrap().unwrap();
 
-        let last = expected.moves.last().unwrap();
-        assert_eq!(sent.len(), expected.moves.len() + 2);
-        for (params, step) in sent.iter().zip(&expected.moves) {
-            assert_eq!(params["type"], "mouseMoved");
-            assert!(
-                near(at(params), (step.x, step.y)),
-                "{params} is not {step:?}"
-            );
-            assert_eq!(params["buttons"], 0);
-        }
-        let press = &sent[sent.len() - 2];
-        let release = &sent[sent.len() - 1];
+        let at = |event: &Value| (event["x"].as_f64().unwrap(), event["y"].as_f64().unwrap());
+        let kinds: Vec<&str> = sent.iter().map(|e| e["type"].as_str().unwrap()).collect();
+        let moved = kinds.len() - 2;
+        assert!(kinds[..moved].iter().all(|kind| *kind == "mouseMoved"));
+        assert_eq!(kinds[moved..], ["mousePressed", "mouseReleased"]);
+
+        let entry = at(&sent[0]);
+        let on_edge = entry.0 == 0.0
+            || entry.1 == 0.0
+            || entry.0 == VIEWPORT.width - 1.0
+            || entry.1 == VIEWPORT.height - 1.0;
+        assert!(on_edge, "the pointer entered at {entry:?}");
+
+        let last_move = at(&sent[moved - 1]);
+        let press = &sent[moved];
+        let release = &sent[moved + 1];
+        assert_eq!((at(press), press["buttons"].as_i64()), (last_move, Some(1)));
         assert_eq!(
-            (press["type"].as_str(), press["buttons"].as_i64()),
-            (Some("mousePressed"), Some(1))
+            (at(release), release["buttons"].as_i64()),
+            (last_move, Some(0))
         );
-        assert_eq!(
-            (release["type"].as_str(), release["buttons"].as_i64()),
-            (Some("mouseReleased"), Some(0))
+        assert!(
+            (last_move.0 - TO.0).abs() <= 2.0 && (last_move.1 - TO.1).abs() <= 2.0,
+            "pressed at {last_move:?}, aimed at {TO:?}"
         );
-        for event in [press, release] {
-            assert!(
-                near(at(event), (last.x, last.y)),
-                "{event} is not at {last:?}"
-            );
-            assert_eq!(event["button"], "left");
-        }
 
         let state = input.state.lock().await;
-        assert_eq!((state.pointer_x, state.pointer_y), (last.x, last.y));
+        assert_eq!((state.pointer_x, state.pointer_y), last_move);
         assert!(state.buttons_held.is_empty());
         conn.shutdown();
     }

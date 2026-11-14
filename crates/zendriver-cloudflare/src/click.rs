@@ -4,10 +4,11 @@
 //!
 //! The flow is a three-step CDP sequence: `mouseMoved` to position the
 //! pointer, then a `mousePressed` / `mouseReleased` pair with
-//! `button: "left"` and `clickCount: 1`. A person's click would be a curved
-//! approach and a held press, but this crate holds only a session, not
-//! where the tab's pointer is, so it cannot start one from the right place.
-//! `zendriver`'s `Tab::cloudflare` can, and installs one as the handler.
+//! `button: "left"` and `clickCount: 1`. A human-like click would be a
+//! curved approach and a held press, but this crate holds only a session,
+//! not where the tab's pointer is, so it cannot start one from the right
+//! place. `zendriver`'s `Tab::cloudflare` can, and installs one as the
+//! handler.
 
 use serde_json::json;
 use zendriver_transport::SessionHandle;
@@ -21,7 +22,7 @@ use crate::error::CloudflareError;
 /// 2. `mousePressed { x, y, button: "left", clickCount: 1 }` — press down.
 /// 3. `mouseReleased { x, y, button: "left", clickCount: 1 }` — release.
 ///
-/// No modifiers, no realistic Bezier path — see module docs for rationale.
+/// No modifiers, and no approach: see the module docs for why.
 pub(crate) async fn click_at(
     session: &SessionHandle,
     x: f64,

@@ -183,9 +183,9 @@ impl<'a> CloudflareBypass<'a> {
     ///
     /// The built-in click is three raw `Input.dispatchMouseEvent` calls at
     /// the point [`ClickPolicy`] chose; `zendriver`'s `Tab::cloudflare`
-    /// replaces it with a person's click, made with the tab's mouse. The
-    /// click is the volatile half of this
-    /// flow — the half that has to change when Cloudflare changes what a
+    /// replaces it with a human-like click, made with the tab's mouse. The
+    /// click is the volatile half of this flow — the half that has to
+    /// change when Cloudflare changes what a
     /// convincing click looks like — so it is handed over whole rather than
     /// grown a knob at a time. A handler might move the pointer along a
     /// human-ish path, drive a solver service, or click through a higher

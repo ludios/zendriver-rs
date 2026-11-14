@@ -3175,7 +3175,7 @@ impl Tab {
     /// to tune the polling cadence, then call
     /// [`wait_for_clearance`](zendriver_cloudflare::CloudflareBypass::wait_for_clearance)
     /// to find the Turnstile checkbox (closed shadow roots included), click
-    /// it at the default 7% offset, and poll until either a configured
+    /// it at the default point (7% across, 50% down), and poll until either a configured
     /// token input picks up a value, every challenge marker is gone from a
     /// page that has settled — for Cloudflare's full-page challenge, the
     /// page it navigates to once passed (see
@@ -3193,14 +3193,16 @@ impl Tab {
     /// [`on_click`](zendriver_cloudflare::CloudflareBypass::on_click)
     /// replaces the click outright.
     ///
-    /// The click is a person's, made with this tab's mouse: from wherever
-    /// the pointer last went, a curved approach that speeds up and slows
-    /// down, at a 60 Hz pointer's cadence and with a slight tremor; a
-    /// little jiggle on the checkbox; then a press held for about a tenth
-    /// of a second. It takes about a second, and ignores the tab's
-    /// [`InputProfile`](crate::stealth::InputProfile), whose default moves in a
-    /// straight line in a few milliseconds — the motion a bot check looks
-    /// for.
+    /// The click is human-like, made with this tab's mouse: from where this
+    /// tab last sent the pointer (or, on a tab that never moved it, from a
+    /// random point on the viewport's edge), a curved approach that speeds
+    /// up and slows down, a move about every frame, with a slight tremor;
+    /// a little jiggle on the checkbox; then a press held for about a tenth
+    /// of a second. Every move is a whole pixel inside the viewport. It
+    /// takes about a second, and ignores the tab's
+    /// [`InputProfile`](crate::stealth::InputProfile), whose default moves
+    /// in a straight line as fast as the moves can be sent — the motion a
+    /// bot check looks for.
     ///
     /// **Stealth recommended.** Cloudflare Turnstile is somewhat forgiving
     /// of non-stealth Chrome, but `BrowserBuilder::stealth` significantly

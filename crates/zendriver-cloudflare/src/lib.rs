@@ -16,7 +16,7 @@
 //! 2. Scroll it into view, re-measure it, and click at the 7% × 50% offset
 //!    inside its box (the default Turnstile checkbox location), retrying a
 //!    swallowed click a few times. This crate's own click is a raw one;
-//!    `zendriver`'s `Tab::cloudflare` installs a person's click instead,
+//!    `zendriver`'s `Tab::cloudflare` installs a human-like click instead,
 //!    made with the tab's mouse.
 //! 3. Poll for either the token input gaining a value, or every challenge
 //!    marker being gone from a page that has settled — for Cloudflare's
