@@ -77,9 +77,10 @@ pub struct SolveInput {
     /// token: until the page resets its widget, the page still holds the
     /// old token, which the call would otherwise return at once as
     /// `solved`. While every token input holds an old token, the widget is
-    /// not clicked. A page that asks for no new token then ends in
-    /// `timeout`, or in `challenge_gone` if it removes every marker; never
-    /// in `already_clear`. Defaults to false.
+    /// not clicked. An input that holds an old token is no challenge
+    /// marker, so a page with nothing else on it is `already_clear`: set
+    /// `wait_for_challenge_ms` too if the page may add its new widget after
+    /// the first look. Defaults to false.
     #[serde(default)]
     pub ignore_returned_tokens: bool,
     /// Override the page markers that identify the Turnstile widget. Omit to
@@ -391,7 +392,7 @@ mod tests {
                         tokens = json!(["OLD", "T"]);
                     }
                     json!({ "result": { "type": "object", "value": {
-                        "tokens": tokens, "markers": tick > 1, "loading": false,
+                        "tokens": tokens, "container": tick > 1, "loading": false,
                     } } })
                 }
                 "Page.getFrameTree" => json!({ "frameTree": {

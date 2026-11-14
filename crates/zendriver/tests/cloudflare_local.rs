@@ -117,8 +117,7 @@ const LATE: &str = r#"<!doctype html>
 </script>"#;
 
 /// [`LATE`] with the input of an earlier widget left in its form, still
-/// holding that widget's token, as on a page that adds a second widget
-/// beside the first one.
+/// holding that widget's token: the widget is gone, its input is not.
 fn again() -> String {
     let page = LATE.replace(
         r#"<form id="form">"#,
@@ -276,8 +275,9 @@ async fn wait_for_challenge_clicks_a_widget_that_a_script_adds_later() {
 }
 
 /// An earlier widget's input, left in the page with its token, ends a run
-/// at once. Given that token to ignore, the next run waits for the widget
-/// that the page adds after it, clicks it, and returns the new widget's
+/// at once. Given that token to ignore, the next run takes the old input
+/// for no challenge, so its `wait_for_challenge` window waits for the
+/// widget that the page adds later; it clicks that widget and returns its
 /// token, which sits in an input after the old one.
 #[tokio::test]
 async fn ignore_tokens_waits_past_an_earlier_widgets_token() {
@@ -308,6 +308,7 @@ async fn ignore_tokens_waits_past_an_earlier_widgets_token() {
         .cloudflare()
         .selectors(selectors)
         .ignore_tokens([&old])
+        .wait_for_challenge(Duration::from_secs(10))
         .wait_for_clearance(Duration::from_secs(20))
         .await
         .unwrap();

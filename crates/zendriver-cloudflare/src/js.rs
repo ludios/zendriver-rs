@@ -6,7 +6,7 @@
 //! page sees none of the calls they make:
 //!
 //! - [`poll_expr`], evaluated once per poll tick. It reads the light DOM
-//!   only: the token input and the container, which Turnstile leaves outside
+//!   only: the token inputs and the container, which Turnstile leaves outside
 //!   its shadow root. The widget's `<iframe>` is not looked for here: it
 //!   sits in a closed shadow root, which no path through the DOM leads
 //!   into, so the driver finds it through CDP instead (see `detection`).
@@ -41,8 +41,8 @@ fn js_string_array(values: &[String]) -> String {
 ///   included, in the order of the selectors and then of the document. A
 ///   value that is not a string (an element other than an input can match)
 ///   is reported as empty.
-/// - `markers` — true when the light DOM holds the
-///   [`container`](TurnstileSelectors::container) or a token input.
+/// - `container` — true when the light DOM holds the
+///   [`container`](TurnstileSelectors::container).
 /// - `loading` — true while the document is still being parsed
 ///   (`readyState == "loading"`).
 pub(crate) fn poll_expr(selectors: &TurnstileSelectors) -> String {
@@ -62,7 +62,7 @@ pub(crate) fn poll_expr(selectors: &TurnstileSelectors) -> String {
     }}
     var containerSelector = {container};
     var hasContainer = containerSelector ? !!document.querySelector(containerSelector) : false;
-    return {{ tokens: tokens, markers: hasContainer || tokens.length > 0, loading: document.readyState === "loading" }};
+    return {{ tokens: tokens, container: hasContainer, loading: document.readyState === "loading" }};
 }})()"#
     )
 }

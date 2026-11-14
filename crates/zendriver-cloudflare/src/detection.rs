@@ -157,7 +157,9 @@ pub(crate) struct Observation {
     /// of the ignored tokens.
     pub only_ignored_tokens: bool,
     /// The light DOM holds the
-    /// [`container`](TurnstileSelectors::container) or a token input.
+    /// [`container`](TurnstileSelectors::container), or a token input whose
+    /// value is not an ignored token. An input that holds an ignored token
+    /// is what a widget left behind, not a challenge.
     pub light_markers: bool,
     /// The widget's `<iframe>`, as a backend node id, when one is mounted.
     /// Not looked for once a token has shown.
@@ -174,7 +176,7 @@ pub(crate) struct Observation {
 
 impl Observation {
     /// Whether any marker at all is on the page: the container, a token
-    /// input, or the widget.
+    /// input that does not hold an ignored token, or the widget.
     pub fn has_markers(&self) -> bool {
         self.light_markers || self.widget.is_some()
     }
@@ -187,8 +189,9 @@ struct Poll {
     /// order.
     #[serde(default)]
     tokens: Vec<String>,
+    /// The light DOM holds the container.
     #[serde(default)]
-    markers: bool,
+    container: bool,
     #[serde(default)]
     loading: bool,
 }
@@ -389,6 +392,7 @@ pub(crate) async fn observe(
         .find(|value| !value.is_empty() && !is_ignored(value))
         .cloned();
     let only_ignored_tokens = !poll.tokens.is_empty() && poll.tokens.iter().all(is_ignored);
+    let light_markers = poll.container || !poll.tokens.iter().all(is_ignored);
 
     // A token ends the run, so a token in hand skips the lookup, which could
     // otherwise lose it to a server error.
@@ -399,7 +403,7 @@ pub(crate) async fn observe(
     Ok(Some(Observation {
         token,
         only_ignored_tokens,
-        light_markers: poll.markers,
+        light_markers,
         widget,
         document: document.to_string(),
         loading: poll.loading,

@@ -86,8 +86,8 @@ pub enum ClearanceOutcome {
     /// the page before treating what you scrape next as clean.
     ChallengeGone,
     /// No challenge marker was on the page when the run looked at it
-    /// parsed, nor on any tick before: no container, no token input, no
-    /// widget, and (with the default selectors) none of the scripts that
+    /// parsed, nor on any tick before: no container, no token input (other
+    /// than one that holds an ignored token), no widget, and (with the default selectors) none of the scripts that
     /// the pages of Cloudflare's full-page challenge load. By default, the
     /// run decides this on its first look at the parsed page, so calling
     /// `wait_for_clearance` after a navigation that met no challenge costs
@@ -249,26 +249,42 @@ impl<'a> CloudflareBypass<'a> {
         self
     }
 
-    /// Make [`wait_for_clearance`](Self::wait_for_clearance) treat each of
-    /// `tokens` as no token at all: as the token of a widget that the caller
-    /// is done with. Defaults to none. Each call replaces the list that an
-    /// earlier call set.
+    /// Make [`wait_for_clearance`](Self::wait_for_clearance) ignore each of
+    /// `tokens`: token values that the caller no longer accepts, such as
+    /// those that earlier runs on this page returned. Defaults to none. Each
+    /// call replaces the list that an earlier call set.
     ///
-    /// A page that asks for Turnstile again, e.g. because its server wants
-    /// a fresh token, can still hold the old token when the next run
-    /// starts: until the page resets the widget (`turnstile.reset()` empties
-    /// the widget's token input), or for good, in the input of a widget that
-    /// the page leaves beside the new one. Without this, that run returns
-    /// the old token at once. Given the old tokens, the run waits for a
-    /// token that is not one of them, and it does not click while every
-    /// token input holds one of them, as their widget is still solved. Pass
-    /// every token that an earlier run returned on this page.
+    /// A page that asks for Turnstile again, e.g. because its server refused
+    /// the token, can still hold the old token when the next run starts:
+    /// until the page resets the widget (`turnstile.reset()` empties the
+    /// widget's token input), or for good, in an old input that the page
+    /// leaves in place. Without this, that run returns the old token at
+    /// once. With it:
     ///
-    /// A token input is a challenge marker whatever it holds, so a run that
-    /// finds an old token in the page never returns
-    /// [`ClearanceOutcome::AlreadyClear`]. If the page asks for no new
-    /// token, the run ends in [`ClearanceOutcome::TimedOut`], or in
-    /// [`ClearanceOutcome::ChallengeGone`] if the page removes every marker.
+    /// - The run returns [`ClearanceOutcome::TokenAcquired`] only with a
+    ///   value that is not ignored. Values are compared exactly, so a widget
+    ///   that puts a new token into the same input ends the run, and an old
+    ///   token in one input does not hide a new one in another.
+    /// - An input that holds an ignored token is no challenge marker: it is
+    ///   what a widget left behind. A page with no other marker is
+    ///   [`ClearanceOutcome::AlreadyClear`], so a run that may start before
+    ///   the page adds its new widget needs a
+    ///   [`wait_for_challenge`](Self::wait_for_challenge) window. A page
+    ///   whose other markers go ends in [`ClearanceOutcome::ChallengeGone`]
+    ///   as it would without ignored tokens.
+    /// - While every token input holds an ignored token, the run does not
+    ///   click, nor count the tick as stalled: it takes the widget that it
+    ///   finds for the solved widget that produced the token, which asks for
+    ///   a click, if at all, only after the page resets it.
+    ///
+    /// The limits of this: the last rule looks at the page's token inputs as
+    /// a whole, so a new widget without a token input of its own
+    /// (Turnstile's `response-field: false`) is not clicked while an old
+    /// input holds an ignored token. The run clicks the first widget that
+    /// it finds, so a page that keeps the old widget mounted before a new
+    /// one gets its clicks on the old one. And Cloudflare's test sitekeys
+    /// always produce the same dummy token, which, once ignored, never ends
+    /// a run.
     ///
     /// ```no_run
     /// # async fn ex(tab: &zendriver_transport::SessionHandle, first: String)
@@ -961,6 +977,54 @@ mod tests {
             capture.events()
         );
         conn.shutdown();
+    }
+
+    /// An input that still holds an ignored token is what a widget left
+    /// behind, not a challenge: alone, it ends the run in `AlreadyClear` on
+    /// the first look. Beside the widget's container, the run waits on, for
+    /// the container's widget to produce a new token.
+    #[tokio::test]
+    async fn an_old_input_alone_is_no_challenge() {
+        let (outcome, calls) = run(
+            |b| b.ignore_tokens(["OLD"]),
+            |_| Page::challenge().token("OLD"),
+        )
+        .await;
+        assert!(matches!(outcome.unwrap(), ClearanceOutcome::AlreadyClear));
+        assert_eq!(polls(&calls), 1);
+
+        let (outcome, _) = run(
+            |b| b.ignore_tokens(["OLD"]),
+            |tick| match tick {
+                0..3 => Page::challenge().container().token("OLD"),
+                _ => Page::challenge().container().token(END_TOKEN),
+            },
+        )
+        .await;
+        assert_eq!(token_of(outcome), END_TOKEN);
+    }
+
+    /// A widget that clears in place, beside an old input that still holds
+    /// an ignored token, leaves no challenge behind: the run ends in
+    /// `ChallengeGone` once the page has settled, not at its timeout.
+    #[tokio::test(start_paused = true)]
+    async fn a_widget_cleared_in_place_beside_an_old_input_is_challenge_gone() {
+        let (outcome, calls, _) = run_for(
+            Duration::from_secs(60),
+            |b| {
+                b.poll_interval(Duration::from_millis(250))
+                    .ignore_tokens(["OLD"])
+            },
+            |tick| match tick {
+                0 => Page::challenge()
+                    .tokens(&["OLD", ""])
+                    .widget_at(widget_rect()),
+                _ => Page::challenge().token("OLD"),
+            },
+        )
+        .await;
+        assert!(matches!(outcome.unwrap(), ClearanceOutcome::ChallengeGone));
+        assert_eq!(presses(&calls), vec![(0, (DEFAULT_X, 220.0))]);
     }
 
     /// An old token in an earlier input must not hide a new token in a later

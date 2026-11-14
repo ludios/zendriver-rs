@@ -408,10 +408,10 @@ section.
 
 A page can ask for a second token, e.g. when its server refuses the
 first one. Until the page resets the widget (`turnstile.reset()` empties
-the widget's token input), the page still holds the old token, and so
-does a page that adds a new widget beside the old one, in the old
-widget's input. A run would return that old token at once. Give the run
-the tokens that earlier runs returned, and it waits for a new one:
+the widget's token input), the page still holds the old token, and an
+old input that the page leaves in place holds it for good. A run would
+return that old token at once. Give the run the tokens that earlier runs
+returned, and it waits for a new one:
 
 ```rust,ignore
 let ClearanceOutcome::TokenAcquired(first) = tab.cloudflare()
@@ -428,15 +428,29 @@ let outcome = tab.cloudflare()
     .await?;
 ```
 
-The ignored tokens are compared by value, so a widget that puts a new
-token into the same input ends the run, and an old token in one input
-does not hide a new one in another. While every token input holds an
-ignored token, the run does not click: their widget is still solved,
-and asks for a click, if at all, only after the page resets it. A
-token input is a challenge marker whatever it holds, so a run that finds
-an old token never returns `AlreadyClear`: if the page asks for no new
-token, the run ends in `TimedOut { saw_challenge: true }`, or in
-`ChallengeGone` if the page removes every marker.
+- **Only a value that is not ignored ends the run.** Values are compared
+  exactly, so a widget that puts a new token into the same input ends
+  the run, and an old token in one input does not hide a new one in
+  another.
+- **An old input is no marker.** An input that holds an ignored token is
+  what a widget left behind, not a challenge. A page with no other
+  marker is `AlreadyClear`, so if the page may add its new widget after
+  the run's first look, give the run a `wait_for_challenge` window (see
+  [Widgets that a script adds later](#widgets-that-a-script-adds-later)).
+  A page whose other markers go ends in `ChallengeGone` as it would
+  without ignored tokens.
+- **No clicks on a solved widget.** While every token input holds an
+  ignored token, the run does not click: it takes the widget that it
+  finds for the solved widget that produced the token, which asks for a
+  click, if at all, only after the page resets it.
+
+The limits of this: the last rule looks at the page's token inputs as a
+whole, so a new widget without a token input of its own (Turnstile's
+`response-field: false`) is not clicked while an old input holds an
+ignored token. The run clicks the first widget that it finds, so a page
+that keeps the old widget mounted before a new one gets its clicks on
+the old one. And Cloudflare's test sitekeys always produce the same
+dummy token, which, once ignored, never ends a run.
 
 ## Tuning
 

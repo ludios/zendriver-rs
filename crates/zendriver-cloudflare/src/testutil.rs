@@ -66,8 +66,8 @@ pub(crate) struct Page {
     /// The value of each token input, in preference order: `""` for an
     /// empty one.
     pub tokens: Vec<&'static str>,
-    /// The light DOM holds a container or a token input.
-    pub light_markers: bool,
+    /// The light DOM holds a container.
+    pub container: bool,
     pub widget: Widget,
     /// The widget's frame runs in a process of its own (site isolation on),
     /// so `Target.getTargets` lists it and the frame tree does not.
@@ -83,11 +83,11 @@ pub(crate) struct Page {
 
 impl Page {
     /// A challenge page on document `D1`: an empty token input in the light
-    /// DOM, no widget yet.
+    /// DOM, no container, no widget yet.
     pub fn challenge() -> Self {
         Self {
             tokens: vec![""],
-            light_markers: true,
+            container: false,
             widget: Widget::Absent,
             out_of_process: false,
             document: "D1",
@@ -103,9 +103,8 @@ impl Page {
     }
 
     /// The same page with `token` in its one token input.
-    pub fn token(mut self, token: &'static str) -> Self {
-        self.tokens = vec![token];
-        self
+    pub fn token(self, token: &'static str) -> Self {
+        self.tokens(&[token])
     }
 
     /// The same page with one token input per value in `tokens`.
@@ -116,8 +115,14 @@ impl Page {
 
     /// The same page without a container or a token input.
     pub fn no_light_markers(mut self) -> Self {
-        self.light_markers = false;
+        self.container = false;
         self.tokens = Vec::new();
+        self
+    }
+
+    /// The same page with a container in its light DOM.
+    pub fn container(mut self) -> Self {
+        self.container = true;
         self
     }
 
@@ -170,7 +175,7 @@ impl Page {
                 assert_eq!(params["contextId"], world, "the poll ran outside the world");
                 json!({ "result": { "type": "object", "value": {
                 "tokens": self.tokens,
-                "markers": self.light_markers,
+                "container": self.container,
                 "loading": self.loading,
             } } })
             }
