@@ -529,7 +529,7 @@ fn canned_routes() -> Router {
         .route("/slow-resource", get(slow_resource))
         .route("/form", get(form))
         .route("/form-result", get(form_result))
-        .route("/redirect/:remaining", get(redirect))
+        .route("/redirect/{remaining}", get(redirect))
         .route("/hop", get(hop))
         .route("/iframe-same-origin", get(iframe_same_origin))
         .route("/iframe-cross-site", get(iframe_cross_site))

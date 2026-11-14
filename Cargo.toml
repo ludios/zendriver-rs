@@ -47,7 +47,7 @@ zendriver-fingerprints  = { path = "crates/zendriver-fingerprints", version = "0
 rmcp        = { version = "=2.2.0", default-features = false }
 schemars    = "1.0"
 clap        = { version = "4", features = ["derive"] }
-axum        = { version = "0.7" }
+axum        = { version = "0.8" }
 
 # External — runtime
 tokio              = { version = "1.40",  features = ["full"] }

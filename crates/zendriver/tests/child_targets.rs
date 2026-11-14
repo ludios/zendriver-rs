@@ -23,8 +23,8 @@ use tracing::Level;
 use zendriver::stealth::StealthProfile;
 use zendriver::{Browser, BrowserBuilder, Persona, Tab};
 use zendriver_testkit::axum::Router;
-use zendriver_testkit::axum::extract::Host;
-use zendriver_testkit::axum::http::header::CONTENT_TYPE;
+use zendriver_testkit::axum::http::HeaderMap;
+use zendriver_testkit::axum::http::header::{CONTENT_TYPE, HOST};
 use zendriver_testkit::axum::response::Html;
 use zendriver_testkit::axum::routing::get;
 use zendriver_testkit::{
@@ -40,7 +40,8 @@ const WITHIN: Duration = Duration::from_secs(10);
 /// testkit's `zdIdentity()`.
 async fn server(frame_script: &'static str, frames: usize) -> FixtureServer {
     const IDENTITY: &str = "<script src='/probe/identity.js'></script>";
-    let page = move |Host(host): Host| async move {
+    let page = move |headers: HeaderMap| async move {
+        let host = headers[HOST].to_str().expect("the Host header is ASCII");
         let frame_url = format!("http://{}/frame", host.replace("127.0.0.1", "localhost"));
         let iframes = format!("<iframe src='{frame_url}'></iframe>").repeat(frames);
         Html(format!(
