@@ -24,7 +24,6 @@ serde.workspace             = true
 serde_json.workspace        = true
 thiserror.workspace         = true
 tracing.workspace           = true
-fastrand                    = "2"
 reqwest  = { workspace = true, optional = true }
 # Only to name the ring provider; tracks reqwest's optionality exactly.
 rustls   = { workspace = true, optional = true }

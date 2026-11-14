@@ -2971,7 +2971,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "tokio-test",
  "tokio-tungstenite",
  "tokio-util",
  "tracing",
@@ -2999,7 +2998,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
- "tokio-test",
  "tracing",
  "zendriver-transport",
 ]
@@ -3014,7 +3012,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
- "tokio-test",
  "tracing",
  "zendriver-transport",
 ]
@@ -3035,8 +3032,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "tokio-test",
- "tracing",
  "wiremock",
  "zip",
 ]
@@ -3046,7 +3041,6 @@ name = "zendriver-fingerprints"
 version = "0.3.22"
 dependencies = [
  "dirs",
- "fastrand",
  "reqwest",
  "rustls",
  "serde",
@@ -3069,7 +3063,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
- "tokio-test",
  "tracing",
  "zendriver-transport",
 ]
@@ -3078,7 +3071,6 @@ dependencies = [
 name = "zendriver-interception"
 version = "0.3.20"
 dependencies = [
- "async-trait",
  "base64 0.23.1",
  "futures",
  "glob",
@@ -3088,9 +3080,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
- "tokio-stream",
- "tokio-test",
- "tokio-util",
  "tracing",
  "zendriver-transport",
 ]
@@ -3099,7 +3088,6 @@ dependencies = [
 name = "zendriver-mcp"
 version = "0.16.37"
 dependencies = [
- "async-trait",
  "axum",
  "base64 0.23.1",
  "clap",
@@ -3115,7 +3103,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "tokio-test",
  "tokio-util",
  "toml",
  "tracing",
@@ -3137,7 +3124,6 @@ version = "0.12.7"
 dependencies = [
  "async-trait",
  "fastrand",
- "futures",
  "insta",
  "num_cpus",
  "serde",
@@ -3146,7 +3132,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "tokio-test",
  "tracing",
  "tracing-subscriber",
  "zendriver-transport",
@@ -3182,7 +3167,6 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

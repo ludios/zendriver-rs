@@ -42,13 +42,11 @@ dirs.workspace       = true
 serde.workspace      = true
 serde_json.workspace = true
 thiserror.workspace  = true
-tracing.workspace    = true
 futures.workspace    = true
 
 # CLI only.
 clap = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio-test.workspace = true
-wiremock.workspace   = true
-tempfile.workspace   = true
+wiremock.workspace = true
+tempfile.workspace = true

@@ -28,7 +28,6 @@ geo = []
 zendriver-transport.workspace = true
 tokio.workspace               = true
 async-trait.workspace         = true
-futures.workspace             = true
 serde.workspace               = true
 serde_json.workspace          = true
 thiserror.workspace           = true
@@ -38,7 +37,6 @@ num_cpus.workspace            = true
 fastrand                      = "2"
 
 [dev-dependencies]
-tokio-test.workspace          = true
 insta.workspace               = true
 # Capture `tracing::warn!` output so the coherence warnings can be asserted on
 # (a warning nobody can observe is indistinguishable from no warning).

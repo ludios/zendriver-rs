@@ -29,5 +29,4 @@ thiserror.workspace              = true
 tracing.workspace                = true
 
 [dev-dependencies]
-tokio-test.workspace = true
-zendriver-transport  = { workspace = true, features = ["testing"] }
+zendriver-transport = { workspace = true, features = ["testing"] }

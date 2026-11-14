@@ -101,7 +101,8 @@ libc = "0.2"
 win32job = "2.0"
 
 [dev-dependencies]
-tokio-test.workspace          = true
+# `test-util` for the unit tests that pause and advance tokio's clock.
+tokio = { workspace = true, features = ["test-util"] }
 # Fake DevTools page endpoint for the per-tab socket tests.
 tokio-tungstenite.workspace   = true
 insta.workspace               = true
