@@ -68,7 +68,7 @@ tempfile   = { workspace = true }
 wiremock   = { workspace = true }
 insta      = { workspace = true }
 # `toml` is used by the `public-api-check` test to parse `mcp-coverage-ledger.toml`.
-toml       = { version = "0.8", default-features = false, features = ["parse"] }
+toml       = { version = "1", default-features = false, features = ["parse", "serde"] }
 # rmcp client features for end-to-end smoke tests — child-process for stdio,
 # streamable-http-client-reqwest for HTTP.
 rmcp       = { workspace = true, features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }

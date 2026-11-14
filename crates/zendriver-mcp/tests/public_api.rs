@@ -136,7 +136,7 @@ fn load_ledger(ledger_path: &Path) -> HashSet<String> {
     let content = std::fs::read_to_string(ledger_path)
         .unwrap_or_else(|e| panic!("Could not read {}: {e}", ledger_path.display()));
 
-    let table: toml::Value = content
+    let table: toml::Table = content
         .parse()
         .unwrap_or_else(|e| panic!("Could not parse {}: {e}", ledger_path.display()));
 
