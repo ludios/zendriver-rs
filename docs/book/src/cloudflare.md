@@ -31,9 +31,17 @@ flow.
 {{#include ../../../crates/zendriver/examples/cloudflare_bypass.rs}}
 ```
 
-The driver returns a [`ClearanceOutcome`] on success. All three are
+The driver returns a [`ClearanceOutcome`] on success. All four are
 ordinary terminals, the last one included:
 
+- **`AlreadyClear`** — the page showed no challenge marker when the run
+  first saw it parsed: no Cloudflare gate, or a clearance cookie that
+  skipped it. The run returns on that first look, so calling
+  `wait_for_clearance` after every navigation is safe and costs one poll
+  tick on a page without a challenge. It is decided once, at call time:
+  a widget that a page's script mounts later is missed, and so is a
+  challenge whose navigation has not committed yet, so call it after the
+  navigation has loaded.
 - **`TokenAcquired(token)`** — the `cf-turnstile-response` input picked
   up a non-empty value. The page can now proceed; the token is also
   forwarded to Cloudflare server-side on the next request.
@@ -50,11 +58,10 @@ ordinary terminals, the last one included:
   server let you through — a replacement page whose every marker is
   added by script after it is parsed lands here too — so confirm the page
   before trusting what you scrape next.
-- **`TimedOut { saw_challenge }`** — the deadline elapsed.
-  `saw_challenge` separates the two cases worth telling apart: `true`
-  means a real challenge sat on the page and never resolved, `false`
-  means no Cloudflare marker ever appeared and the bypass was probably
-  called on a page with no gate on it.
+- **`TimedOut { saw_challenge }`** — the deadline elapsed. `true` means
+  a real challenge sat on the page and never resolved; `false` means the
+  run never got to look at the page parsed (it was still loading at the
+  deadline).
 
 [`ClearanceOutcome`]: https://docs.rs/zendriver/latest/zendriver/enum.ClearanceOutcome.html
 
@@ -66,10 +73,10 @@ genuine faults, of which there are two:
 - **`JsError`** — the in-page evaluator raised, or handed back a payload
   the driver could not decode.
 
-The enum is `#[non_exhaustive]`, so a `match` on it needs a wildcard
-arm. There is no `NoChallenge` or `ClearanceTimeout` variant — if you
-are looking for those, the first is `TimedOut { saw_challenge: false }`
-and the second is `TimedOut { saw_challenge: true }`.
+`CloudflareError` is `#[non_exhaustive]`, so a `match` on it needs a
+wildcard arm. There is no `NoChallenge` or `ClearanceTimeout` error — if
+you are looking for those, the first is `ClearanceOutcome::AlreadyClear`
+and the second is `ClearanceOutcome::TimedOut { saw_challenge: true }`.
 
 [`CloudflareError`]: https://docs.rs/zendriver/latest/zendriver/enum.CloudflareError.html
 
@@ -300,7 +307,8 @@ find.
 
 Call `wait_for_clearance` **after** the navigation completes but
 **before** any post-challenge code that depends on being past the gate.
-The typical sequence:
+It is safe to call after every navigation: a page without a challenge
+returns `AlreadyClear` at once. The typical sequence:
 
 ```rust,ignore
 tab.goto(url).await?;
@@ -310,13 +318,16 @@ match tab.cloudflare()
     .wait_for_clearance(Duration::from_secs(30))
     .await?
 {
+    ClearanceOutcome::AlreadyClear => {
+        // No challenge on this page.
+    }
     ClearanceOutcome::TokenAcquired(_) | ClearanceOutcome::ChallengeGone => {
         // Past the gate. After the full-page challenge, the tab now shows
         // the page it navigated to.
     }
     ClearanceOutcome::TimedOut { saw_challenge: false } => {
-        // No Cloudflare marker ever appeared — this page has no gate.
-        // Usually fine to continue.
+        // The page was still loading at the deadline.
+        return Err("the page did not load".into());
     }
     ClearanceOutcome::TimedOut { saw_challenge: true } => {
         // A real challenge that never resolved. Worth failing the job.
@@ -329,9 +340,9 @@ let data = tab.find().css(".product-grid").one().await?;
 ```
 
 The `?` propagates the two real faults, `Call` and `JsError`. Everything
-else is a terminal you decide about, and the `saw_challenge` split is
-the one that changes what you do: "no gate on this page" and "a gate we
-could not pass" want opposite handling.
+else is a terminal you decide about: "no gate on this page"
+(`AlreadyClear`) and "a gate we could not pass"
+(`TimedOut { saw_challenge: true }`) want opposite handling.
 
 ## Tuning
 
@@ -341,9 +352,7 @@ could not pass" want opposite handling.
 - `.selectors(..)` / `.click_policy(..)` / `.on_click(..)` — the markers
   and the click, covered in [Markers and clicks are
   yours](#markers-and-clicks-are-yours).
-- Pass a generous `wait_for_clearance` timeout (30-60 s) for the first
-  challenge. Later navigations with the same `user_data_dir` usually
-  carry Cloudflare's clearance cookie and get no challenge at all — and a
-  run on a page that never shows a marker lasts its whole timeout before
-  it returns `TimedOut { saw_challenge: false }`, so that is the cost of
-  calling it after every navigation.
+- Pass a generous `wait_for_clearance` timeout (30-60 s): only a page
+  with a challenge spends it. Later navigations with the same
+  `user_data_dir` usually carry Cloudflare's clearance cookie, get no
+  challenge at all, and return `AlreadyClear` on the first tick.

@@ -56,6 +56,7 @@
 //!     .wait_for_clearance(Duration::from_secs(30))
 //!     .await?;
 //! match outcome {
+//!     ClearanceOutcome::AlreadyClear => println!("no challenge on this page"),
 //!     ClearanceOutcome::TokenAcquired(token) => println!("got token: {token}"),
 //!     ClearanceOutcome::ChallengeGone => println!("challenge cleared"),
 //!     ClearanceOutcome::TimedOut { saw_challenge } => {

@@ -177,3 +177,33 @@ async fn clears_a_closed_shadow_root_widget_in_the_pages_process() {
 async fn clears_a_closed_shadow_root_widget_in_a_process_of_its_own() {
     clears_the_challenge(Browser::builder(), true).await;
 }
+
+/// A page without a challenge — here the guarded page, which loads
+/// Cloudflare's bot-management script but no challenge — ends the run on
+/// its first poll, so `wait_for_clearance` can follow every navigation
+/// without costing its timeout.
+#[tokio::test]
+async fn a_page_without_a_challenge_is_already_clear_at_once() {
+    let server = FixtureServer::start_with(routes()).await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    tab.goto(server.url(SITE_A, "/guarded")).await.unwrap();
+    tab.wait_for_load().await.unwrap();
+
+    let started = std::time::Instant::now();
+    let outcome = tab
+        .cloudflare()
+        .wait_for_clearance(Duration::from_secs(20))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, ClearanceOutcome::AlreadyClear),
+        "expected AlreadyClear, got {outcome:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "took {:?}",
+        started.elapsed()
+    );
+    browser.close().await;
+}

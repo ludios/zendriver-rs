@@ -14,6 +14,9 @@
 //! 2. Resolves to [`ClearanceOutcome::TokenAcquired`] the first tick a
 //!    non-empty token is observed — including the **invisible Turnstile**
 //!    path, where nothing is clicked and the token is populated directly.
+//!    Resolves to [`ClearanceOutcome::AlreadyClear`] when the first
+//!    observation of a parsed document shows no marker at all: a page with
+//!    no challenge costs one tick, not the timeout.
 //! 3. If a click is due and the widget is mounted, scrolls it into view
 //!    and measures it; if it is a click target (non-zero size and visible),
 //!    clicks the point the [`ClickPolicy`] chose inside it — by default
@@ -34,9 +37,9 @@
 //!    page of Cloudflare's.
 //! 5. Resolves to [`ClearanceOutcome::TimedOut`] on deadline, carrying
 //!    `saw_challenge` — `true` when challenge markers were seen but never
-//!    resolved, `false` when the entire timeout window elapsed without
-//!    observing any challenge markers (the caller likely invoked the bypass
-//!    on a page that has no Cloudflare gate at all).
+//!    resolved, `false` when the page was never seen parsed and without
+//!    markers before the deadline (it was still loading, or changing under
+//!    every observation).
 //!
 //! Every marker the evaluators look for is caller data — see
 //! [`TurnstileSelectors`] for why none of it is a literal in this crate.
@@ -74,10 +77,22 @@ pub enum ClearanceOutcome {
     /// marker is added by script after it is parsed lands here too. Confirm
     /// the page before treating what you scrape next as clean.
     ChallengeGone,
+    /// No challenge marker was on the page when the run first saw it
+    /// parsed: no container, no token input, no widget, and none of
+    /// Cloudflare's own page scripts. Fast path: the run ends on that first
+    /// look, so calling `wait_for_clearance` after every navigation costs
+    /// one poll tick on a page without a challenge.
+    ///
+    /// Decided once, at call time: a widget that a page's script mounts
+    /// later is missed, and so is a challenge whose navigation has not
+    /// committed yet. Call it after the navigation that may lead to a
+    /// challenge has loaded (`goto`, then `wait_for_load`).
+    AlreadyClear,
     /// Deadline elapsed without a terminal clearance state. `saw_challenge`
     /// is `true` if any challenge marker (container, hidden input, or live
-    /// iframe) was ever observed; `false` if none ever appeared — the caller
-    /// likely invoked the bypass on a page that has no Cloudflare gate at all.
+    /// iframe) was ever observed. `false` means the run never saw the page
+    /// parsed and without markers either: it was still loading, or changing
+    /// under every observation, until the deadline.
     /// Not a fault: a deadline in a bot-management flow is a normal "didn't
     /// finish, retry or give up" terminal.
     TimedOut { saw_challenge: bool },
@@ -245,12 +260,18 @@ impl<'a> CloudflareBypass<'a> {
     /// Poll the page until a Turnstile clearance terminal state is reached or
     /// `timeout` elapses.
     ///
+    /// Safe to call on any page: one without a challenge returns
+    /// [`ClearanceOutcome::AlreadyClear`] on the first look at it parsed,
+    /// with nothing clicked or scrolled.
+    ///
     /// Handles both the **interactive** flow (challenge iframe mounts → we
     /// click it → token appears) and the **invisible** flow (no iframe;
     /// token is populated directly by Cloudflare's loader script). Resolution
     /// rules per tick are documented at module level.
     ///
     /// # Returns
+    /// - `Ok(ClearanceOutcome::AlreadyClear)` — the first observation of the
+    ///   parsed page showed no challenge marker.
     /// - `Ok(ClearanceOutcome::TokenAcquired(token))` — a configured token
     ///   input picked up a non-empty value, either after we clicked the
     ///   interactive iframe or because the page uses invisible Turnstile.
@@ -263,9 +284,9 @@ impl<'a> CloudflareBypass<'a> {
     /// - `Ok(ClearanceOutcome::TimedOut { saw_challenge })` — `timeout`
     ///   elapsed without a terminal clearance state. `saw_challenge` is
     ///   `true` if challenge markers were observed (markers present but
-    ///   never resolved); `false` if none ever appeared (the caller likely
-    ///   invoked the bypass on a page that has no Cloudflare gate). Not a
-    ///   fault — a deadline here is a normal "retry or give up" signal.
+    ///   never resolved); `false` if the page was still loading, or changing
+    ///   under every observation, until the deadline. Not a fault — a
+    ///   deadline here is a normal "retry or give up" signal.
     ///
     /// # Errors
     /// - [`CloudflareError::Call`] / [`CloudflareError::JsError`] — CDP or
@@ -296,6 +317,9 @@ impl<'a> CloudflareBypass<'a> {
         let mut challenge_document: Option<String> = None;
         let mut markers_gone_since: Option<Instant> = None;
         let mut replacement_loading = false;
+        // Whether the run has looked at a parsed document yet: the first
+        // such look decides `AlreadyClear`.
+        let mut looked = false;
 
         let mut stall_ticks: u32 = 0;
         let mut warned_stall = false;
@@ -309,6 +333,12 @@ impl<'a> CloudflareBypass<'a> {
             if let Some(seen) = observe(self.session, &self.selectors).await? {
                 if let Some(token) = seen.token {
                     return Ok(ClearanceOutcome::TokenAcquired(token));
+                }
+                if !seen.loading && !looked {
+                    looked = true;
+                    if !seen.has_markers() && challenge_document.is_none() {
+                        return Ok(ClearanceOutcome::AlreadyClear);
+                    }
                 }
 
                 replacement_loading = false;
@@ -889,11 +919,35 @@ mod tests {
         assert_eq!(polls(&calls), 4);
     }
 
-    /// A page with no Cloudflare gate at all must never be reported as
-    /// ChallengeGone: with no markers ever observed, the run ends in
-    /// `TimedOut { saw_challenge: false }`.
+    /// A page with no challenge ends the run on the first look at it parsed,
+    /// so the call is cheap enough to make after every navigation. A tick
+    /// on a page still loading decides nothing (its markers may be further
+    /// down), and the decision is made once: markers that a script adds
+    /// after it are not looked for.
     #[tokio::test]
-    async fn times_out_when_no_markers_are_ever_seen() {
+    async fn a_page_without_markers_is_already_clear_on_the_first_parsed_look() {
+        let (outcome, calls) = run(
+            |b| b,
+            |tick| match tick {
+                0 => Page::challenge().no_light_markers().loading(),
+                1 => Page::challenge().no_light_markers(),
+                _ => Page::challenge().widget_at(widget_rect()),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(outcome.unwrap(), ClearanceOutcome::AlreadyClear),
+            "expected AlreadyClear"
+        );
+        assert_eq!(polls(&calls), 2, "decided on the first parsed look");
+        assert!(!saw(&calls, MOUSE) && !saw(&calls, SCROLL));
+    }
+
+    /// `TimedOut { saw_challenge: false }` is what is left for a page the run
+    /// never saw parsed: one still loading at the deadline.
+    #[tokio::test]
+    async fn times_out_when_the_page_never_finishes_parsing() {
         let (mut mock, conn) = MockConnection::pair();
         let sess = SessionHandle::new(conn.clone(), "S1");
         let fut = tokio::spawn(async move {
@@ -902,7 +956,8 @@ mod tests {
                 .wait_for_clearance(Duration::from_millis(40))
                 .await
         });
-        let calls = serve(&mut mock, |_| Page::challenge().no_light_markers()).await;
+        let page = |_| Page::challenge().no_light_markers().loading();
+        let calls = serve(&mut mock, page).await;
 
         match outcome_of(fut).await.unwrap() {
             ClearanceOutcome::TimedOut { saw_challenge } => assert!(!saw_challenge),

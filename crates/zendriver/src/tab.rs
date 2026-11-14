@@ -3180,9 +3180,13 @@ impl Tab {
     /// page that has settled — for Cloudflare's full-page challenge, the
     /// page it navigates to after it is passed (see
     /// [`ClearanceOutcome::ChallengeGone`](zendriver_cloudflare::ClearanceOutcome::ChallengeGone)
-    /// for what that proves) — or the supplied timeout elapses. Use
+    /// for what that proves) — or the supplied timeout elapses. Safe to
+    /// call after any navigation: a page with no challenge marker when the
+    /// run first sees it parsed returns
+    /// [`ClearanceOutcome::AlreadyClear`](zendriver_cloudflare::ClearanceOutcome::AlreadyClear)
+    /// at once, with nothing clicked. Use
     /// [`is_challenge_present`](zendriver_cloudflare::CloudflareBypass::is_challenge_present)
-    /// for a one-shot probe without driving a click.
+    /// for a one-shot probe of the widget alone.
     ///
     /// Cloudflare owns the markup and the click, and changes both without
     /// notice, so neither is baked in:

@@ -6,6 +6,8 @@
 //! The lib's [`CloudflareBypass::wait_for_clearance`] models its terminal
 //! state as a `Result<ClearanceOutcome, CloudflareError>` where:
 //!
+//! - `Ok(ClearanceOutcome::AlreadyClear)` — the page showed no challenge
+//!   marker when first seen parsed.
 //! - `Ok(ClearanceOutcome::TokenAcquired(t))` — a configured token input
 //!   (`cf-turnstile-response` by default) picked up a token.
 //! - `Ok(ClearanceOutcome::ChallengeGone)` — every challenge marker is gone
@@ -14,12 +16,12 @@
 //! - `Ok(ClearanceOutcome::TimedOut { saw_challenge })` — the per-call
 //!   deadline elapsed (whether or not a challenge was ever seen).
 //!
-//! Agents typically want all three lumped into a single discriminated
+//! Agents typically want all four lumped into a single discriminated
 //! union of *expected* outcomes — a timeout in turnstile flow is a normal
 //! "didn't finish, try again or give up" signal, not a server error. So
-//! the MCP layer collapses `TimedOut` into a third [`Outcome::Timeout`]
-//! variant, and keeps every `CloudflareError` (network failure, JS error)
-//! as a real MCP error.
+//! the MCP layer maps `TimedOut` onto [`Outcome::Timeout`] beside the
+//! other three, and keeps every `CloudflareError` (network failure, JS
+//! error) as a real MCP error.
 //!
 //! [`CloudflareBypass::wait_for_clearance`]: zendriver_cloudflare::CloudflareBypass::wait_for_clearance
 
@@ -174,14 +176,19 @@ fn configure<'a>(mut bypass: CloudflareBypass<'a>, input: SolveInput) -> Cloudfl
 
 /// Terminal outcome of a turnstile bypass attempt.
 ///
-/// `Solved` and `ChallengeGone` mirror the lib's `ClearanceOutcome`
-/// variants. `Timeout` mirrors the lib's `ClearanceOutcome::TimedOut` — a
+/// `AlreadyClear`, `Solved` and `ChallengeGone` mirror the lib's
+/// `ClearanceOutcome` variants. `Timeout` mirrors the lib's `ClearanceOutcome::TimedOut` — a
 /// deadline in a turnstile flow is a normal outcome, not an error —
 /// surfacing it on the success channel so agents can branch on `outcome`
 /// without try/catch around a timeout.
 #[derive(Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
+    /// The page showed no challenge marker when the solver first saw it
+    /// parsed, so there was nothing to solve; the call returns at once.
+    /// Decided on that first look: a widget a script mounts later is not
+    /// waited for. `token` will be `None`.
+    AlreadyClear,
     /// Turnstile produced a token — the first non-empty value of an element
     /// matching `selectors.token_inputs`, tried in order;
     /// `cf-turnstile-response` by default.
@@ -232,6 +239,10 @@ pub async fn solve_turnstile(
         .wait_for_clearance(timeout)
         .await
     {
+        Ok(ClearanceOutcome::AlreadyClear) => Ok(SolveOutput {
+            outcome: Outcome::AlreadyClear,
+            token: None,
+        }),
         Ok(ClearanceOutcome::TokenAcquired(t)) => Ok(SolveOutput {
             outcome: Outcome::Solved,
             token: Some(t),
@@ -241,9 +252,7 @@ pub async fn solve_turnstile(
             token: None,
         }),
         // TimedOut is a lib-side success terminal; collapse it into the
-        // success-channel `Outcome::Timeout` — see module docs. The old
-        // `NoChallenge` error used to fall into the `Err` arm below; it is
-        // now folded into this outcome (with `saw_challenge: false`).
+        // success-channel `Outcome::Timeout` — see module docs.
         Ok(ClearanceOutcome::TimedOut { .. }) => Ok(SolveOutput {
             outcome: Outcome::Timeout,
             token: None,

@@ -25,6 +25,9 @@
 //! example takes the defaults.
 //!
 //! Outcomes:
+//!   - `AlreadyClear` — the page showed no challenge marker when first
+//!     seen parsed: no Cloudflare gate (or a clearance cookie skipped it).
+//!     Returned at once, so the call is cheap on any page.
 //!   - `TokenAcquired(_)` — Turnstile yielded a `cf-turnstile-response`
 //!     token, either after clicking the checkbox or directly (invisible
 //!     Turnstile, where the iframe never mounts).
@@ -33,10 +36,8 @@
 //!     navigated to the page it guards and that page has been parsed, or
 //!     the markers stayed gone for three seconds on the same page. Not by
 //!     itself proof the gate was passed.
-//!   - `TimedOut { saw_challenge: false }` — the full timeout window
-//!     elapsed without any challenge markers ever being observed (no
-//!     container, no hidden input, no iframe). The page likely has no
-//!     Cloudflare gate; not a failure.
+//!   - `TimedOut { saw_challenge: false }` — the page was still loading
+//!     at the deadline, so the run never got to look at it.
 //!   - `TimedOut { saw_challenge: true }` — 30s elapsed with markers
 //!     present but neither success state observed.
 //!
@@ -63,10 +64,13 @@ async fn main() -> zendriver::Result<()> {
         .wait_for_clearance(Duration::from_secs(30))
         .await
     {
+        Ok(ClearanceOutcome::AlreadyClear) => {
+            println!("no challenge on this page");
+        }
         Ok(ClearanceOutcome::TimedOut {
             saw_challenge: false,
         }) => {
-            println!("no challenge detected (page already cleared or no CF gate present)");
+            println!("the page was still loading after 30s");
         }
         Ok(ClearanceOutcome::TimedOut {
             saw_challenge: true,

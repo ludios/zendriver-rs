@@ -19,8 +19,11 @@ required:
   - outcome
 $defs:
   Outcome:
-    description: "Terminal outcome of a turnstile bypass attempt.\n\n`Solved` and `ChallengeGone` mirror the lib's `ClearanceOutcome`\nvariants. `Timeout` mirrors the lib's `ClearanceOutcome::TimedOut` — a\ndeadline in a turnstile flow is a normal outcome, not an error —\nsurfacing it on the success channel so agents can branch on `outcome`\nwithout try/catch around a timeout."
+    description: "Terminal outcome of a turnstile bypass attempt.\n\n`AlreadyClear`, `Solved` and `ChallengeGone` mirror the lib's\n`ClearanceOutcome` variants. `Timeout` mirrors the lib's `ClearanceOutcome::TimedOut` — a\ndeadline in a turnstile flow is a normal outcome, not an error —\nsurfacing it on the success channel so agents can branch on `outcome`\nwithout try/catch around a timeout."
     oneOf:
+      - description: "The page showed no challenge marker when the solver first saw it\nparsed, so there was nothing to solve; the call returns at once.\nDecided on that first look: a widget a script mounts later is not\nwaited for. `token` will be `None`."
+        type: string
+        const: already_clear
       - description: "Turnstile produced a token — the first non-empty value of an element\nmatching `selectors.token_inputs`, tried in order;\n`cf-turnstile-response` by default.\nThe token is available in [`SolveOutput::token`]."
         type: string
         const: solved

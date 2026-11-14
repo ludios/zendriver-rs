@@ -114,9 +114,10 @@ Gated `cloudflare`. Sub-error returned wrapped in
 | `Call(CallError)` | A CDP call failed, or Chrome answered one with an error other than the server error a page changing under the call brings. | Inspect inner error. |
 | `JsError(String)` | The poll or measurement JS raised an exception, or Chrome sent a reply the driver could not decode. | Inspect the exception. (The page's CSP isn't the cause: zendriver runs this JS through DevTools, which CSP doesn't restrict.) |
 
-No page and no deadline is an error: a page without a challenge, or a
-challenge that never cleared, ends `wait_for_clearance` with
-`Ok(ClearanceOutcome::TimedOut { saw_challenge })` (see
+No page and no deadline is an error: a page without a challenge ends
+`wait_for_clearance` with `Ok(ClearanceOutcome::AlreadyClear)`, and a
+challenge that never cleared with
+`Ok(ClearanceOutcome::TimedOut { saw_challenge: true })` (see
 [Cloudflare](./cloudflare.md)).
 
 ## `FetcherError` variants

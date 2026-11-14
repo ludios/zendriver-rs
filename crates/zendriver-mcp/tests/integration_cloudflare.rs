@@ -12,17 +12,17 @@
 //!
 //! Smoke shape: open → goto a known Turnstile-protected page →
 //! `browser_solve_turnstile` (long timeout) → assert the outcome is one
-//! of the three expected variants → close.
+//! of the four expected variants → close.
 //!
 //! ## Why this test is "best effort"
 //!
 //! The target page is third-party infrastructure that can change shape at
 //! any time — Cloudflare can rotate Turnstile placements, the
 //! demonstration site can move, or the site can stop using Turnstile
-//! entirely. The test therefore accepts any of the three terminal
-//! outcomes (`solved`, `challenge_gone`, `timeout`) as a pass and only
-//! fails on a structural error (`no challenge detected` is mapped to a
-//! hard error, which surfaces here as a `call_tool` failure). Use it as
+//! entirely. The test therefore accepts any of the four terminal
+//! outcomes (`already_clear`, `solved`, `challenge_gone`, `timeout`) as a
+//! pass and only fails on a structural error, which surfaces here as a
+//! `call_tool` failure. Use it as
 //! a manual smoke when iterating on cloudflare integration, not as a CI
 //! gate.
 
@@ -92,7 +92,10 @@ async fn end_to_end_solve_turnstile() {
         .expect("outcome populated")
         .to_string();
     assert!(
-        matches!(outcome.as_str(), "solved" | "challenge_gone" | "timeout"),
+        matches!(
+            outcome.as_str(),
+            "already_clear" | "solved" | "challenge_gone" | "timeout"
+        ),
         "unexpected outcome `{outcome}`; body: {body}"
     );
     // When `solved`, `token` should be a non-empty string; otherwise it
