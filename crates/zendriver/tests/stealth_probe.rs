@@ -37,6 +37,16 @@ async fn check(profile: &str, builder: BrowserBuilder) {
     }
 }
 
+/// A persona's language is one that Chrome doesn't have by itself, so it
+/// shows where the language doesn't reach. The override gives it to pages
+/// only: the worker reads Chrome's own list, and its requests carry that
+/// list, so a launch has to give Chrome the persona's list too.
+#[tokio::test]
+async fn probe_agrees_with_a_personas_language() {
+    let german: Persona = r#"{"locale": "de-DE"}"#.parse().expect("persona JSON");
+    check("native", Browser::builder().persona_overlay(german)).await;
+}
+
 /// `profile` with the page's hardware pinned (see [`PINNED_HARDWARE`]).
 fn spoofed(profile: StealthProfile) -> BrowserBuilder {
     let pinned: Persona = PINNED_HARDWARE.parse().expect("persona JSON");

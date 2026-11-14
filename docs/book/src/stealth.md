@@ -92,6 +92,11 @@ in the page:
   macOS, a launch also starts Chrome with `TZ` set to that timezone, so
   every Chrome process is in it from the start (your own
   `BrowserBuilder::env("TZ", ..)` or `env_remove("TZ")` wins).
+- **Languages for workers** — the override above gives the language list
+  to pages and iframes only; a dedicated, shared or service worker reads
+  Chrome's own list. So a launch also passes `--accept-lang` with the same
+  list (your own `--accept-lang` wins), and `navigator.languages` and the
+  `Accept-Language` header agree everywhere.
 - **A screen for headless Chrome** — headless Chrome's own screen is
   800x600, with no taskbar. So when zendriver launches a headless
   Chrome, it passes `--screen-info` for a 1920x1080 screen with a

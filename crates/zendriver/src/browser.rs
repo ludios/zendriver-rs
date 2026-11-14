@@ -2073,6 +2073,22 @@ impl BrowserBuilder {
         Ok(ours)
     }
 
+    /// The `--accept-lang` switch that `observer` asks for (see
+    /// [`StealthObserver::accept_language_flag`]), unless the caller passes
+    /// that switch too, with [`arg`](Self::arg) or in `profile_flags` (the
+    /// stealth profile's own flags), so that the caller's value wins.
+    fn stealth_language_flag(
+        &self,
+        observer: &StealthObserver,
+        profile_flags: &[String],
+    ) -> Option<String> {
+        let mut callers = self.extra_args.iter().chain(profile_flags);
+        if callers.any(|flag| matches!(parse_switch(flag), Some(("accept-lang", _)))) {
+            return None;
+        }
+        observer.accept_language_flag()
+    }
+
     /// The argv that `launch` passes to Chrome (before its CI-only
     /// additions): [`build_flags`](Self::build_flags), then `profile_flags`
     /// (the stealth profile's own flags plus, for a headless launch, its
@@ -4277,6 +4293,7 @@ impl BrowserBuilder {
                     StealthObserver::with_persona(profile.clone(), fp, self.resolved_persona()?);
                 let mut flags = profile.build_flags();
                 flags.extend(self.headless_stealth_flags(&observer, &flags)?);
+                flags.extend(self.stealth_language_flag(&observer, &flags));
                 timezone = observer.timezone().map(str::to_owned);
                 (Some(Arc::new(observer)), flags)
             } else {
@@ -6880,6 +6897,40 @@ mod tests {
             flags[1..],
             ["--window-size=1920,1032", "--window-position=0,0"]
         );
+    }
+
+    /// The `--accept-lang` switch that `launch` adds to `builder`'s argv
+    /// under its stealth profile.
+    fn stealth_language_flag_of(builder: &BrowserBuilder) -> Option<String> {
+        let profile = builder.stealth.clone().expect("a stealth profile");
+        let fingerprint = profile
+            .resolve_fingerprint(Path::new(""), &[])
+            .expect("fingerprint");
+        let persona = builder.resolved_persona().expect("persona");
+        let observer = StealthObserver::with_persona(profile.clone(), fingerprint, persona);
+        builder.stealth_language_flag(&observer, &profile.build_flags())
+    }
+
+    /// Workers read Chrome's own language list, so a launch must give Chrome
+    /// the persona's; and a caller who passes the switch, with `arg` or in
+    /// the stealth profile, must keep their own.
+    #[test]
+    fn a_launch_gives_chrome_the_personas_languages_unless_the_caller_does() {
+        let german = || Persona::builder().locale("de-DE").build();
+        let builder = Browser::builder().persona_overlay(german());
+        assert_eq!(
+            stealth_language_flag_of(&builder).as_deref(),
+            Some("--accept-lang=de-DE,de")
+        );
+
+        let by_arg = Browser::builder()
+            .persona_overlay(german())
+            .arg("--accept-lang=fr");
+        assert_eq!(stealth_language_flag_of(&by_arg), None);
+        let by_profile = Browser::builder()
+            .persona_overlay(german())
+            .stealth(StealthProfile::native().arg("--accept-lang=fr"));
+        assert_eq!(stealth_language_flag_of(&by_profile), None);
     }
 
     #[test]

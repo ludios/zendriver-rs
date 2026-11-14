@@ -372,6 +372,36 @@ impl StealthObserver {
         headless_screen_switches(&self.screen())
     }
 
+    /// The language list that pages advertise, as Chrome takes it both in
+    /// `Emulation.setUserAgentOverride.acceptLanguage` and in its
+    /// `--accept-lang` switch: the tags joined with commas (e.g. `en-US,en`),
+    /// without `;q=` weights, which Chrome appends itself. (Given a weighted
+    /// list, Chrome would weight it again: `en-US,en;q=0.9;q=0.9`.)
+    ///
+    /// The fingerprint is already merged with the persona (see
+    /// `with_persona`), so this is the effective list: a caller's
+    /// `Persona::languages` / `Persona::locale` reaches Chrome from here.
+    fn accept_language(&self) -> String {
+        crate::lang::fingerprint_languages(&self.fingerprint).join(",")
+    }
+
+    /// The `--accept-lang` switch that makes Chrome's own language list the
+    /// one that this observer's `Emulation.setUserAgentOverride` gives each
+    /// page and out-of-process iframe; `None` for `Off`, which sends no
+    /// overrides.
+    ///
+    /// The override doesn't reach workers: a dedicated, shared or service
+    /// worker reads Chrome's own list in `navigator.languages`, and its
+    /// requests carry that list in `Accept-Language`. Launched with this
+    /// switch, Chrome has the same list in both places.
+    #[must_use]
+    pub fn accept_language_flag(&self) -> Option<String> {
+        if self.profile.kind() == ProfileKind::Off {
+            return None;
+        }
+        Some(format!("--accept-lang={}", self.accept_language()))
+    }
+
     /// The IANA timezone that this observer sets on each page and
     /// out-of-process iframe, with `Emulation.setTimezoneOverride`: the
     /// persona's, else the profile's pin. `None` when neither sets one, and
@@ -457,20 +487,7 @@ impl TargetObserver for StealthObserver {
         // UA override — Emulation.setUserAgentOverride carries the Client-Hints
         // metadata too, so we don't have to send Network.setUserAgentOverride
         // separately.
-        let accept_language = {
-            // The fingerprint is already merged with the persona (see
-            // `with_persona`), so its language list is the effective one — a
-            // caller's `Persona::languages` / `Persona::locale` reaches the
-            // header from here.
-            let langs = crate::lang::fingerprint_languages(&self.fingerprint);
-            // `Emulation.setUserAgentOverride.acceptLanguage` wants a PLAIN
-            // comma-separated locale list (e.g. `en-US,en`) — Chrome appends the
-            // `;q=` weights itself. Passing an already-weighted string (the
-            // `accept_language()` header form) makes Chrome double them, yielding
-            // a malformed `Accept-Language: en-US,en;q=0.9;q=0.9`. Send the bare
-            // list so the emitted header is a clean `en-US,en;q=0.9`.
-            langs.join(",")
-        };
+        let accept_language = self.accept_language();
         // Persona UA-CH wins when supplied — field-wise, falling back to the
         // fingerprint-derived value for any sub-field the persona left
         // unset. Absent persona UA-CH → today's behavior (fingerprint's
@@ -1879,6 +1896,35 @@ mod persona_reaches_cdp_tests {
             params(&frames, "Emulation.setTimezoneOverride")["timezoneId"].as_str(),
             Some("Asia/Tokyo"),
             "an explicitly set Persona::timezone must reach Emulation.setTimezoneOverride"
+        );
+    }
+
+    /// The launch switch must carry the list that the override sends (the
+    /// persona's, else `en-US,en`), and `off`, which sends no override, must
+    /// ask for no switch.
+    #[test]
+    fn accept_language_flag_carries_the_list_that_the_override_sends() {
+        let observer = |profile: StealthProfile, locale: Option<&str>| {
+            let persona = Persona {
+                locale: locale.map(str::to_owned),
+                ..Persona::default()
+            };
+            StealthObserver::with_persona(profile, bare_fingerprint(), persona)
+        };
+        let native = StealthProfile::native;
+        assert_eq!(
+            observer(native(), Some("de-DE"))
+                .accept_language_flag()
+                .as_deref(),
+            Some("--accept-lang=de-DE,de")
+        );
+        assert_eq!(
+            observer(native(), None).accept_language_flag().as_deref(),
+            Some("--accept-lang=en-US,en")
+        );
+        assert_eq!(
+            observer(StealthProfile::off(), Some("de-DE")).accept_language_flag(),
+            None
         );
     }
 
