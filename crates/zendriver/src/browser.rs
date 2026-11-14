@@ -4132,10 +4132,10 @@ async fn resolve_extension_dirs(
 /// Unzip a single `.crx` at `crx_path` into a fresh [`TempDir`], returning the
 /// extracted directory path alongside the owning tempdir handle.
 ///
-/// The blocking ZIP walk runs on [`tokio::task::spawn_blocking`]. Path safety
-/// mirrors the fetcher's extractor: entries with absolute / parent-traversal
-/// paths and (on Unix) symlink entries are rejected so a hostile `.crx` can't
-/// escape the tempdir.
+/// The blocking ZIP walk runs on [`tokio::task::spawn_blocking`]. A hostile
+/// `.crx` can't escape the tempdir: `zip`'s `enclosed_name` re-roots an
+/// absolute entry path and resolves `..` lexically (refusing a `..` that
+/// climbs above the archive root), and on Unix symlink entries are refused.
 async fn unzip_crx(crx_path: &Path) -> Result<(PathBuf, TempDir), ZendriverError> {
     let crx_path = crx_path.to_path_buf();
     let td = tempfile::Builder::new()
@@ -4189,7 +4189,9 @@ fn unzip_crx_blocking(crx_path: &Path, dest_dir: &Path) -> Result<(), ZendriverE
                 path: crx_path.to_path_buf(),
                 reason: format!("zip entry {i}: {e}"),
             })?;
-        // Reject unsafe paths (absolute / parent-traversal).
+        // `enclosed_name` re-roots an absolute path and resolves `..`
+        // lexically, and refuses what it cannot place inside `dest_dir` (a
+        // `..` that climbs above the archive root, for one).
         let Some(rel_path) = entry.enclosed_name() else {
             return Err(BrowserError::ExtensionLoad {
                 path: crx_path.to_path_buf(),

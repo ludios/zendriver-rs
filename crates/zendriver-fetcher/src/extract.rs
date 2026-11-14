@@ -20,10 +20,11 @@
 //! write outside `dest_dir`. The extractor defends against those classes
 //! of attack:
 //!
-//! 1. `zip::read::ZipFile::enclosed_name()` refuses an absolute entry path,
-//!    and any path whose running depth goes negative. Note what it does NOT
-//!    do: it returns what it accepts **unnormalized**, so `a/b/../../c`
-//!    survives with its `..` intact. Nothing here may assume otherwise.
+//! 1. An entry whose RAW name is absolute or has a `..` component is
+//!    refused ([`is_absolute_or_climbs`]). The raw name is what must be
+//!    checked: `zip::read::ZipFile::enclosed_name()` accepts both kinds,
+//!    dropping a leading root and resolving `..` lexically, so `/a/b` would
+//!    come out as `a/b`, and `a/../b` as `b`.
 //! 2. After joining with `dest_dir`, the resolved path is verified to still
 //!    sit under `dest_dir` — defense in depth against any future change
 //!    to `enclosed_name`'s semantics. The probe that finds an existing
@@ -110,6 +111,16 @@ pub(crate) async fn extract(
     .map_err(|e| FetcherError::Extraction(format!("join error: {e}")))?
 }
 
+/// Whether the raw zip entry `name` is absolute (a leading `/` or `\`, or a
+/// drive letter such as `C:`) or has a `..` component. Both separators count,
+/// as they do for `zip`'s `enclosed_name` on every platform.
+fn is_absolute_or_climbs(name: &str) -> bool {
+    let has_drive = matches!(name.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic());
+    name.starts_with(['/', '\\'])
+        || has_drive
+        || name.split(['/', '\\']).any(|component| component == "..")
+}
+
 /// Synchronous unzip body — runs on a blocking thread.
 fn extract_blocking(
     archive_path: &Path,
@@ -131,29 +142,24 @@ fn extract_blocking(
             .by_index(i)
             .map_err(|e| FetcherError::Extraction(e.to_string()))?;
 
-        // Reject entries with unsafe paths (absolute / parent-traversal).
+        // Refuse an absolute name, or one with a `..` component. Both pass
+        // `enclosed_name`, which re-roots the first and resolves the second
+        // (so `a/../b` would overwrite an entry `b`). No archive from any of
+        // the three indexes ships either.
+        if is_absolute_or_climbs(entry.name()) {
+            return Err(FetcherError::Extraction(format!(
+                "zip entry {:?} is absolute or has a parent-directory component; refusing",
+                entry.name()
+            )));
+        }
+        // What `enclosed_name` still refuses: a NUL byte, or a root or drive
+        // after the first component.
         let Some(rel_path) = entry.enclosed_name() else {
             return Err(FetcherError::Extraction(format!(
                 "zip entry has unsafe path: {}",
                 entry.name()
             )));
         };
-
-        // `enclosed_name` accepts `a/b/../c`: it only refuses a path whose
-        // running depth goes negative, and returns what it accepts
-        // unnormalized. A surviving `..` makes the top-level check below mean
-        // less than it reads — that check inspects only the FIRST component,
-        // so `chrome-linux64/../elsewhere/x` passes it — and it lets the
-        // `create_dir_all` calls further down run on a path that validation
-        // later refuses. No archive from any of the three indexes ships one.
-        if rel_path
-            .components()
-            .any(|c| c == std::path::Component::ParentDir)
-        {
-            return Err(FetcherError::Extraction(format!(
-                "zip entry {rel_path:?} contains a parent-directory component; refusing"
-            )));
-        }
 
         // Enforce CfT top-level directory when the caller supplies one.
         if let Some(prefix) = expected_top_prefix {
@@ -440,7 +446,6 @@ mod tests {
         buf.into_inner()
     }
 
-    #[cfg(unix)]
     async fn extract_bytes(
         zip_bytes: Vec<u8>,
     ) -> (tempfile::TempDir, PathBuf, Result<(), FetcherError>) {
@@ -546,8 +551,8 @@ mod tests {
     /// clear of the destination. A third entry writing to `top/hop` then
     /// follows it and lands outside.
     ///
-    /// `zip`'s `enclosed_name` is no help: it only refuses a path whose running
-    /// depth goes negative, and returns what it accepts unnormalized.
+    /// `zip`'s `enclosed_name` is no help: it looks only at the entry's own
+    /// name, lexically, and knows nothing of the links extracted before it.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_symlink_reached_through_an_earlier_symlink_cannot_escape() {
@@ -793,6 +798,55 @@ mod tests {
 
         let extracted = std::fs::read(dest_dir.join("test.txt")).unwrap();
         assert_eq!(extracted, b"hello world");
+    }
+
+    #[test]
+    fn absolute_and_climbing_names_are_recognized() {
+        for name in [
+            "/top/f",
+            "\\top\\f",
+            "C:/top/f",
+            "c:top",
+            "top/../f",
+            "top\\..\\f",
+            "..",
+        ] {
+            assert!(is_absolute_or_climbs(name), "{name:?} should be refused");
+        }
+        for name in [
+            "top/f",
+            "top/a..b/f",
+            "top/..f",
+            "top/f..",
+            "top/./f",
+            "top/",
+            "1:top",
+        ] {
+            assert!(!is_absolute_or_climbs(name), "{name:?} should be accepted");
+        }
+    }
+
+    /// zip's `enclosed_name` alone would extract both entries as `top/f`.
+    #[tokio::test]
+    async fn absolute_and_climbing_entry_names_are_refused() {
+        for name in ["/top/f", "top/a/../f"] {
+            let mut buf = std::io::Cursor::new(Vec::new());
+            {
+                let mut writer = zip::ZipWriter::new(&mut buf);
+                writer
+                    .start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                writer.write_all(b"x").unwrap();
+                writer.finish().unwrap();
+            }
+            let (_dir, dest, result) = extract_bytes(buf.into_inner()).await;
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("is absolute or has a parent-directory component"),
+                "{name:?}: unexpected error: {msg}"
+            );
+            assert!(!dest.join("top").exists(), "{name:?} was extracted");
+        }
     }
 
     /// `expected_top_prefix` enforces every entry lives under the named
