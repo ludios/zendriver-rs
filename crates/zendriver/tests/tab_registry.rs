@@ -137,13 +137,15 @@ async fn launch_fails_at_once_when_an_observer_fails_on_the_main_target() {
     );
 }
 
-/// A `target="_blank"` link opens its tab without an opener (Chrome's
-/// default for such links). Chrome answers no command on the session of such
-/// a tab until the tab is released with `Runtime.runIfWaitingForDebugger`,
-/// so an observer that awaits an answer before the release (the stealth
-/// observer does, of its `Page.enable`) times out; the target is then
-/// detached, never loads, and never becomes a tab. A tab that `window.open`
-/// opens answers at once, and isn't affected.
+/// A `target="_blank"` link opens a tab that can't reach its opener
+/// (Chrome's default for such links: `window.opener` is null there, and CDP
+/// reports `canAccessOpener: false`). Until such a tab is released with
+/// `Runtime.runIfWaitingForDebugger`, Chrome doesn't answer the commands
+/// that set up its page, `Page.enable` among them. So an observer that
+/// awaits such an answer before the release (the stealth observer does)
+/// times out; the target is then detached, never loads, and never gets a
+/// `Tab` in `Browser::tabs`. A tab that can reach its opener, as after a
+/// plain `window.open(url)`, answers at once, and isn't affected.
 #[tokio::test]
 #[ignore = "known bug, TODO P0 'A target=\"_blank\" link opens a dead tab': the stealth \
             observer awaits an answer that Chrome gives only after the tab is released"]
