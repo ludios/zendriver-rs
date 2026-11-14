@@ -19,9 +19,11 @@ use crate::detection::BoundingBox;
 
 /// The page markers that identify a Cloudflare Turnstile widget.
 ///
-/// The injected evaluator is templated from these, and the frame lookup
-/// reads them too, so overriding one here changes the presence probe and
-/// the poll loop together — there is no second copy to keep in sync.
+/// The poll evaluator is templated from `container` and `token_inputs`,
+/// and the frame lookup (the poll loop's and
+/// [`is_challenge_present`](crate::CloudflareBypass::is_challenge_present)'s)
+/// reads `iframe_src_contains` — there is no second copy of any of them
+/// to keep in sync.
 ///
 /// ```no_run
 /// # async fn ex(tab: &zendriver_transport::SessionHandle)

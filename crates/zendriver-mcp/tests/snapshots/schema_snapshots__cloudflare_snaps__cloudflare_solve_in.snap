@@ -13,7 +13,7 @@ properties:
       - $ref: "#/$defs/ClickPolicyInput"
       - type: "null"
   poll_interval_ms:
-    description: "Override the bypass driver's internal poll cadence, in milliseconds.\nDefaults to the lib's own default (500ms). Lowering speeds up\ndetection at the cost of more CDP `Runtime.evaluate` round-trips;\nraising is a safe knob for slow / sandboxed environments."
+    description: "Override the bypass driver's internal poll cadence, in milliseconds.\nDefaults to the lib's own default (500ms). Lowering speeds up\ndetection at the cost of more CDP round-trips (a handful per tick);\nraising is a safe knob for slow / sandboxed environments."
     type:
       - integer
       - "null"
@@ -73,7 +73,7 @@ $defs:
           - string
           - "null"
       iframe_src_contains:
-        description: "Substring an `<iframe>`'s `src` must contain for it to be the\nchallenge widget. Defaults to `\"challenges.cloudflare.com\"`. An empty\nstring disables the iframe signal rather than matching every iframe."
+        description: "Substring the URL of the frame an `<iframe>` holds (normally its\n`src`) must contain for that iframe to be the challenge widget. Only\niframes held directly by the main frame count, closed shadow roots\nincluded. Defaults to `\"challenges.cloudflare.com\"`. An empty string\ndisables the iframe signal rather than matching every iframe."
         type:
           - string
           - "null"

@@ -20,7 +20,7 @@
 //!    made with the tab's mouse.
 //! 3. Poll for either the token input gaining a value, or every challenge
 //!    marker being gone from a page that has settled — for Cloudflare's
-//!    full-page challenge, the page it navigates to once passed. See
+//!    full-page challenge, the page it navigates to after it is passed. See
 //!    [`ClearanceOutcome::ChallengeGone`] for what that does and does not
 //!    prove.
 //!
@@ -31,12 +31,15 @@
 //! their schedule; a caller should be able to follow without waiting on a
 //! release of this crate.
 //!
-//! Two things stay fixed. **What counts as clickable** is the crate's rule,
-//! not the caller's: a widget qualifies only if it has non-zero size and is
-//! not hidden by `visibility` / `display` / `opacity`, and everything below
-//! that bar — including a replacement [`on_click`](CloudflareBypass::on_click)
-//! — is never reached. **How the widget is brought into view** is likewise
-//! fixed, at a centred instant scroll.
+//! Some things stay fixed. **Where the widget is looked for**: a frame held
+//! directly by the main frame. **What counts as clickable** is the crate's
+//! rule, not the caller's: a widget qualifies only if it has non-zero size
+//! and is not hidden by `visibility` / `display` / `opacity`, and
+//! everything below that bar — including a replacement
+//! [`on_click`](CloudflareBypass::on_click) — is never reached. **How the
+//! widget is brought into view**: CDP's `DOM.scrollIntoViewIfNeeded`,
+//! instant. **When the page has settled**: a new document parsed, or three
+//! seconds without markers on the same one.
 //!
 //! Most users go through `zendriver`'s `Tab::cloudflare()` (feature-gated)
 //! rather than constructing the bypass directly. The

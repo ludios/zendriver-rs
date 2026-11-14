@@ -18,8 +18,9 @@
 //! `cf-turnstile-response` input with a dummy token without ever mounting
 //! an iframe. This still exercises the bypass driver's full poll loop +
 //! token-decode path against real `challenges.cloudflare.com` script
-//! traffic; only the click-at-bbox path is unit-tested in isolation (see
-//! `zendriver_cloudflare::bypass` tests).
+//! traffic. The click path runs against a local imitation of the
+//! full-page challenge in `cloudflare_local.rs`, and in the unit tests of
+//! `zendriver_cloudflare::bypass`.
 
 #![cfg(feature = "cloudflare-tests")]
 #![allow(clippy::panic, clippy::unwrap_used)]

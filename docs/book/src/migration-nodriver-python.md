@@ -77,21 +77,27 @@ via [`Tab::cloudflare`] → [`CloudflareBypass::wait_for_clearance`]:
 
 ```rust,ignore
 use std::time::Duration;
-use zendriver::CloudflareError;
+use zendriver::ClearanceOutcome;
 
 match tab.cloudflare()
     .wait_for_clearance(Duration::from_secs(30))
-    .await
+    .await?
 {
-    Ok(_) => { /* cleared (token acquired or challenge gone) */ }
-    Err(CloudflareError::NoChallenge) => { /* already clear */ }
-    Err(e) => return Err(e.into()),
+    ClearanceOutcome::TokenAcquired(_) | ClearanceOutcome::ChallengeGone => {
+        /* past the gate, as far as the markers tell */
+    }
+    ClearanceOutcome::TimedOut { saw_challenge: false } => { /* no gate */ }
+    ClearanceOutcome::TimedOut { saw_challenge: true } => {
+        return Err("cloudflare challenge did not clear".into());
+    }
 }
 ```
 
-The driver uses the same shadow-DOM walk approach as nodriver, runs a
-15%-from-left / 50%-from-top click at the iframe offset, and polls the
-`cf-turnstile-response` input for a non-empty value. Unlike nodriver,
+Unlike nodriver, the driver finds the widget through CDP rather than by
+walking the page's shadow roots, so it finds one in a closed shadow root
+too, as Cloudflare's full-page challenge has. It clicks 7% across and
+50% down the widget's iframe, with a human-like pointer approach, and
+polls the `cf-turnstile-response` input for a non-empty value. Unlike nodriver,
 none of those are baked in — the markers and the click are caller data,
 and the click itself can be replaced outright. Pair it with stealth (see
 [Stealth](./stealth.md#when-to-use-which) for which profile) and

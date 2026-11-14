@@ -3178,7 +3178,7 @@ impl Tab {
     /// it at the default point (7% across, 50% down), and poll until either a configured
     /// token input picks up a value, every challenge marker is gone from a
     /// page that has settled — for Cloudflare's full-page challenge, the
-    /// page it navigates to once passed (see
+    /// page it navigates to after it is passed (see
     /// [`ClearanceOutcome::ChallengeGone`](zendriver_cloudflare::ClearanceOutcome::ChallengeGone)
     /// for what that proves) — or the supplied timeout elapses. Use
     /// [`is_challenge_present`](zendriver_cloudflare::CloudflareBypass::is_challenge_present)

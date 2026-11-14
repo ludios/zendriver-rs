@@ -111,10 +111,13 @@ Gated `cloudflare`. Sub-error returned wrapped in
 
 | Variant | Common cause | Fix |
 |---------|-------------|-----|
-| `NoChallenge` | No Turnstile iframe was detected at call time. | Treat as success — the page was already cleared (cookie shortcut) or had no CF gate. |
-| `ClearanceTimeout` | Deadline elapsed without resolution. | The challenge may be silent / escalated; check the stealth profile (see [Stealth](./stealth.md#when-to-use-which)), or switch to a residential proxy. |
-| `Call(CallError)` | Underlying CDP call failed (typically the JS detection probe). | Inspect inner error. |
-| `JsError(String)` | The detection / clearance JS raised an exception. | Inspect the exception. (The page's CSP isn't the cause: zendriver runs this JS through DevTools, which CSP doesn't restrict.) |
+| `Call(CallError)` | A CDP call failed, or Chrome answered one with an error other than the server error a page changing under the call brings. | Inspect inner error. |
+| `JsError(String)` | The poll or measurement JS raised an exception, or Chrome sent a reply the driver could not decode. | Inspect the exception. (The page's CSP isn't the cause: zendriver runs this JS through DevTools, which CSP doesn't restrict.) |
+
+No page and no deadline is an error: a page without a challenge, or a
+challenge that never cleared, ends `wait_for_clearance` with
+`Ok(ClearanceOutcome::TimedOut { saw_challenge })` (see
+[Cloudflare](./cloudflare.md)).
 
 ## `FetcherError` variants
 

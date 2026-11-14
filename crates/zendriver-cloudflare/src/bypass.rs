@@ -162,9 +162,10 @@ impl<'a> CloudflareBypass<'a> {
     /// Override the page markers that identify the widget. Defaults to
     /// [`TurnstileSelectors::default`].
     ///
-    /// The same set feeds the presence probe and the poll loop, so
-    /// Cloudflare renaming something is one change here rather than a
-    /// release of this crate.
+    /// The poll loop reads all of them, and
+    /// [`is_challenge_present`](Self::is_challenge_present) the iframe
+    /// marker, so Cloudflare renaming something is one change here rather
+    /// than a release of this crate.
     #[must_use]
     pub fn selectors(mut self, selectors: TurnstileSelectors) -> Self {
         self.selectors = selectors;

@@ -270,10 +270,9 @@ async fn expect_dialog_resolves_on_alert() {
 #[tokio::test]
 #[serial]
 async fn cloudflare_is_challenge_present_returns_false_on_normal_page() {
-    // A vanilla page has no Cloudflare Turnstile iframe in any shadow
-    // root, so the detector script returns null → `is_challenge_present`
-    // returns `false`. Confirms the detector doesn't false-positive on
-    // ordinary pages.
+    // A vanilla page has no frame from `challenges.cloudflare.com`, so the
+    // CDP frame lookup finds no widget → `is_challenge_present` returns
+    // `false`. Confirms the probe doesn't false-positive on ordinary pages.
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/"))

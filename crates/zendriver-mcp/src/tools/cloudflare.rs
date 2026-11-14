@@ -10,7 +10,7 @@
 //!   (`cf-turnstile-response` by default) picked up a token.
 //! - `Ok(ClearanceOutcome::ChallengeGone)` — every challenge marker is gone
 //!   without a token, from a page that has settled (for Cloudflare's
-//!   full-page challenge, the page it navigates to once passed).
+//!   full-page challenge, the page it navigates to after it is passed).
 //! - `Ok(ClearanceOutcome::TimedOut { saw_challenge })` — the per-call
 //!   deadline elapsed (whether or not a challenge was ever seen).
 //!
@@ -52,7 +52,7 @@ pub struct SolveInput {
     pub timeout_ms: u64,
     /// Override the bypass driver's internal poll cadence, in milliseconds.
     /// Defaults to the lib's own default (500ms). Lowering speeds up
-    /// detection at the cost of more CDP `Runtime.evaluate` round-trips;
+    /// detection at the cost of more CDP round-trips (a handful per tick);
     /// raising is a safe knob for slow / sandboxed environments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_interval_ms: Option<u64>,
@@ -77,9 +77,11 @@ pub struct SolveInput {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SelectorsInput {
-    /// Substring an `<iframe>`'s `src` must contain for it to be the
-    /// challenge widget. Defaults to `"challenges.cloudflare.com"`. An empty
-    /// string disables the iframe signal rather than matching every iframe.
+    /// Substring the URL of the frame an `<iframe>` holds (normally its
+    /// `src`) must contain for that iframe to be the challenge widget. Only
+    /// iframes held directly by the main frame count, closed shadow roots
+    /// included. Defaults to `"challenges.cloudflare.com"`. An empty string
+    /// disables the iframe signal rather than matching every iframe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iframe_src_contains: Option<String>,
     /// CSS selector for elements that mark a challenge as on the page, used

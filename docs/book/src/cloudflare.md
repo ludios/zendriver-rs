@@ -2,9 +2,12 @@
 
 The `cloudflare` Cargo feature ships a driver that bypasses Cloudflare's
 **interactive Turnstile challenge** — the "verify you are human"
-checkbox page that gates many sites behind a CDN. It is not a generic
-anti-Cloudflare solution; it specifically automates clicking the visible
-Turnstile checkbox iframe and waiting for the resulting clearance token.
+checkbox — in both of the places it appears: embedded in a site's own
+page, where passing it fills in a clearance token, and as Cloudflare's
+full-page "Just a moment…" challenge, which navigates to the page it
+guards after it is passed. It is not a generic anti-Cloudflare solution;
+it specifically automates clicking the visible Turnstile checkbox, then
+waits for the token or for the page it guards.
 
 Enable it in `Cargo.toml`:
 
@@ -129,8 +132,9 @@ run configured never to click (`max_attempts: 0`, below) is exempt —
 nothing is stalled there, and stealth would be the wrong thing to go
 change.
 
-Every number and every selector in that description is a default, not a
-constant — the next section is how to change them.
+Every selector, the click point and the click cadence in that
+description are defaults, not constants — the next section is how to
+change them. The three-second settle period is fixed.
 
 ## Markers and clicks are yours
 
@@ -186,11 +190,14 @@ every iframe, which is what a bare substring test would otherwise do),
 and an empty `token_inputs` leaves only the marker-vanished and deadline
 terminals.
 
-Two things stay fixed, because they are the library's judgement rather
-than Cloudflare's markup. **What counts as clickable** — a widget needs
-non-zero size and must not be hidden by `visibility`, `display` or
-`opacity` — and **how it is brought into view**, a centred instant
-scroll.
+Some things stay fixed, because they are the library's judgement rather
+than Cloudflare's markup. **Where the widget is looked for**: a frame
+held directly by the main frame. **What counts as clickable**: a widget
+needs non-zero size and must not be hidden by `visibility`, `display` or
+`opacity`. **How it is brought into view**: CDP's
+`DOM.scrollIntoViewIfNeeded`, instant, and centred when the widget is
+out of view. **When the page has settled**: a new document parsed, or
+three seconds without markers on the same one.
 
 ### Replacing the click entirely
 
