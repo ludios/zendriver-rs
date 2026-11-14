@@ -52,12 +52,20 @@ pub struct TurnstileSelectors {
     /// every URL contains the empty string, and the click would go to
     /// whichever frame came first.
     pub iframe_src_contains: String,
-    /// CSS selector for the challenge *container* — the element a site
-    /// author drops into their own HTML for Turnstile to mount into. Used
-    /// only as a presence signal, which is what separates "a challenge was
-    /// on this page" from "this page has no gate at all". Defaults to
-    /// `".cf-turnstile, .turnstile, [data-sitekey]"`. An empty string
-    /// disables the container signal rather than raising in-page.
+    /// CSS selector for elements that mark a challenge as on the page: the
+    /// *container* a site author drops into their own HTML for Turnstile to
+    /// mount into, and the script that each page of Cloudflare's full-page
+    /// challenge loads from `/cdn-cgi/challenge-platform/…/orchestrate/…`.
+    /// Used only as a presence signal, which is what separates "a challenge
+    /// was on this page" from "this page has no gate at all", and what keeps
+    /// a run going while Cloudflare's own pages show nothing else: the
+    /// challenge page after its widget is gone, and the page that leads on
+    /// from it to the guarded one. A site's own page can load Cloudflare's
+    /// `/cdn-cgi/challenge-platform/scripts/jsd/main.js`, which does not
+    /// match. Defaults to the selector
+    /// `.cf-turnstile, .turnstile, [data-sitekey], script[src*="/cdn-cgi/challenge-platform/"][src*="/orchestrate/"]`.
+    /// An empty string disables the container signal rather than raising
+    /// in-page.
     pub container: String,
     /// CSS selectors for the hidden input that receives the clearance
     /// token, in **preference order**: the first one that matches an
@@ -69,11 +77,18 @@ pub struct TurnstileSelectors {
     pub token_inputs: Vec<String>,
 }
 
+/// The default [`TurnstileSelectors::container`]. The orchestrate script's
+/// path was seen on Cloudflare's challenge page (`…/orchestrate/chl_page/v1`)
+/// and on the page that leads on from it
+/// (`…/orchestrate/precursor_interstitial/v1`), in November 2026.
+const CONTAINER: &str = ".cf-turnstile, .turnstile, [data-sitekey], \
+    script[src*=\"/cdn-cgi/challenge-platform/\"][src*=\"/orchestrate/\"]";
+
 impl Default for TurnstileSelectors {
     fn default() -> Self {
         Self {
             iframe_src_contains: "challenges.cloudflare.com".to_string(),
-            container: ".cf-turnstile, .turnstile, [data-sitekey]".to_string(),
+            container: CONTAINER.to_string(),
             token_inputs: vec![
                 "[name=\"cf-turnstile-response\"]".to_string(),
                 "[name=\"cf_challenge_response\"]".to_string(),
@@ -169,7 +184,11 @@ mod tests {
     fn defaults_match_the_documented_prose() {
         let s = TurnstileSelectors::default();
         assert_eq!(s.iframe_src_contains, "challenges.cloudflare.com");
-        assert_eq!(s.container, ".cf-turnstile, .turnstile, [data-sitekey]");
+        assert_eq!(
+            s.container,
+            ".cf-turnstile, .turnstile, [data-sitekey], \
+             script[src*=\"/cdn-cgi/challenge-platform/\"][src*=\"/orchestrate/\"]"
+        );
         assert_eq!(
             s.token_inputs,
             vec![

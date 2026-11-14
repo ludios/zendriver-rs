@@ -9,7 +9,7 @@ oneOf:
   - description: "Turnstile produced a token — the value held by the first matching\n`selectors.token_inputs` entry, `cf-turnstile-response` by default.\nThe token is available in [`SolveOutput::token`]."
     type: string
     const: solved
-  - description: "Every challenge marker seen earlier is gone without a token, and the\npage has settled: a navigation replaced it with a parsed document\n(how Cloudflare's full-page challenge ends), or it stayed without\nmarkers for ten seconds. `token` will be `None`.\n\nNot proof the gate was passed: a replacement page that is a fresh\nchallenge, whose widget mounts late, lands here too, so verify the\npage before treating what you read next as post-challenge content."
+  - description: "Every challenge marker seen earlier is gone without a token, and the\npage has settled: a navigation replaced it with a parsed document\n(how Cloudflare's full-page challenge ends, on the page it guards),\nor it stayed without markers for three seconds. `token` will be\n`None`.\n\nNot proof the gate was passed: a replacement page whose every marker\nis added by script after it is parsed lands here too, so verify the\npage before treating what you read next as post-challenge content."
     type: string
     const: challenge_gone
   - description: "`timeout_ms` elapsed without reaching either success state. `token`\nwill be `None`. Not a hard error — agents can retry or give up."

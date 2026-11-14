@@ -36,15 +36,17 @@ ordinary terminals, the last one included:
   forwarded to Cloudflare server-side on the next request.
 - **`ChallengeGone`** — every challenge marker seen on an earlier tick
   is gone without a token having shown, and the page has settled. This
-  is how Cloudflare's full-page "Just a moment…" challenge ends: once
-  passed, it removes its widget and its token input, and a second or two
-  later navigates to the page it was guarding. So the driver waits for a
-  new document, and for that document to be parsed, before it returns. A
-  challenge that clears in place, with no navigation, returns once its
-  markers have stayed gone for ten seconds. It says no marker is left,
-  not that the server let you through — a replacement page that is a
-  fresh challenge, whose widget mounts late, lands here too — so confirm
-  the page before trusting what you scrape next.
+  is how Cloudflare's full-page "Just a moment…" challenge ends. After it
+  is passed, it removes its widget and its token input, and a second or
+  two later navigates, through a page of Cloudflare's with no widget, to
+  the page it was guarding. Each of Cloudflare's pages loads a script
+  that the default `container` selector matches, so the run waits through
+  them, until a new document without markers has been parsed. A challenge
+  that clears in place, with no navigation, returns when its markers have
+  stayed gone for three seconds. It says no marker is left, not that the
+  server let you through — a replacement page whose every marker is
+  added by script after it is parsed lands here too — so confirm the page
+  before trusting what you scrape next.
 - **`TimedOut { saw_challenge }`** — the deadline elapsed.
   `saw_challenge` separates the two cases worth telling apart: `true`
   means a real challenge sat on the page and never resolved, `false`
@@ -112,7 +114,7 @@ it, shadow root or not. The tick then resolves in this order:
    until the deadline.
 4. **Markers gone, page settled.** Once every marker seen earlier is
    gone, the driver waits for the page to settle — a new, parsed document,
-   or ten seconds without markers on the same one — and returns
+   or three seconds without markers on the same one — and returns
    `ChallengeGone`.
 5. **Otherwise keep polling** — every 500 ms by default, override via
    [`poll_interval`](https://docs.rs/zendriver/latest/zendriver/struct.CloudflareBypass.html#method.poll_interval)
@@ -167,7 +169,7 @@ The defaults:
 | Field | Default |
 |---|---|
 | `TurnstileSelectors::iframe_src_contains` | `"challenges.cloudflare.com"` |
-| `TurnstileSelectors::container` | `".cf-turnstile, .turnstile, [data-sitekey]"` |
+| `TurnstileSelectors::container` | `.cf-turnstile, .turnstile, [data-sitekey], script[src*="/cdn-cgi/challenge-platform/"][src*="/orchestrate/"]` |
 | `TurnstileSelectors::token_inputs` | `["[name=\"cf-turnstile-response\"]", "[name=\"cf_challenge_response\"]"]` |
 | `ClickPolicy::max_attempts` | `3` (`0` watches without ever clicking) |
 | `ClickPolicy::retry_ticks` | `4` |

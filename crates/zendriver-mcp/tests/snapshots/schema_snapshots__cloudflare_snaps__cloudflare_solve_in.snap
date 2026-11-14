@@ -68,7 +68,7 @@ $defs:
     type: object
     properties:
       container:
-        description: "CSS selector for the challenge container, used as a presence signal.\nDefaults to `\".cf-turnstile, .turnstile, [data-sitekey]\"`."
+        description: "CSS selector for elements that mark a challenge as on the page, used\nas a presence signal: the container a site author puts Turnstile in,\nand the script each page of Cloudflare's full-page challenge loads.\nDefaults to\n`.cf-turnstile, .turnstile, [data-sitekey], script[src*=\"/cdn-cgi/challenge-platform/\"][src*=\"/orchestrate/\"]`."
         type:
           - string
           - "null"

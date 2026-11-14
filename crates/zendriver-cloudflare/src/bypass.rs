@@ -23,14 +23,15 @@
 //!    is not the end of the run. A caller-supplied
 //!    [`on_click`](CloudflareBypass::on_click) handler replaces the built-in
 //!    raw mouse dispatch.
-//! 4. Resolves to [`ClearanceOutcome::ChallengeGone`] once every marker
+//! 4. Resolves to [`ClearanceOutcome::ChallengeGone`] when every marker
 //!    seen on an earlier tick is gone *and the page has settled*: either a
 //!    navigation replaced the document and the new one has been parsed, or
-//!    the markers stayed gone for ten seconds on the same document.
+//!    the markers stayed gone for three seconds on the same document.
 //!    Cloudflare's full-page challenge removes its widget and its token
-//!    input a second or two before it navigates to the page it guards, so
-//!    returning on the markers alone would hand the caller the challenge
-//!    page.
+//!    input a second or two before it navigates on, and its pages keep
+//!    another marker (a script) until the page it guards replaces them;
+//!    returning on the widget and the input alone would hand the caller a
+//!    page of Cloudflare's.
 //! 5. Resolves to [`ClearanceOutcome::TimedOut`] on deadline, carrying
 //!    `saw_challenge` — `true` when challenge markers were seen but never
 //!    resolved, `false` when the entire timeout window elapsed without
@@ -61,16 +62,16 @@ pub enum ClearanceOutcome {
     TokenAcquired(String),
     /// Every challenge marker seen earlier in the run is gone without a
     /// token having shown, and the page has settled. Either a navigation
-    /// replaced the document and the new one has been parsed — which is how
-    /// Cloudflare's full-page challenge ends, a second or two after its
-    /// widget goes — or the markers stayed gone for ten seconds on the same
-    /// document, as for a widget cleared in place.
+    /// replaced the document and the new one has been parsed, or the
+    /// markers stayed gone for three seconds on the same document, as for a
+    /// widget cleared in place. Cloudflare's full-page challenge ends the
+    /// first way, on the page it guards: each of its own pages carries a
+    /// marker with the default selectors.
     ///
     /// **Not proof the gate was passed.** It says no marker is left, not
-    /// that the server let you through: a replacement document that is a
-    /// fresh challenge, whose widget mounts only after its markers were
-    /// checked, lands here too. Confirm the page before treating what you
-    /// scrape next as clean.
+    /// that the server let you through: a replacement document whose every
+    /// marker is added by script after it is parsed lands here too. Confirm
+    /// the page before treating what you scrape next as clean.
     ChallengeGone,
     /// Deadline elapsed without a terminal clearance state. `saw_challenge`
     /// is `true` if any challenge marker (container, hidden input, or live
@@ -85,14 +86,15 @@ pub enum ClearanceOutcome {
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How long every marker must stay gone from the *same* document before the
-/// run calls the challenge gone.
+/// run calls the challenge gone: the time a page gets to navigate away after
+/// its widget goes, before the run takes it as a widget cleared in place.
 ///
-/// Cloudflare's full-page challenge removes its markers and then, once the
-/// guarded page answers, navigates to it; the run waits for that new
-/// document. This bound is for a challenge that clears in place and never
-/// navigates, and it has to outlast the slowest answer from the guarded
-/// page: returning sooner hands the caller the challenge page.
-const SETTLE: Duration = Duration::from_secs(10);
+/// Cloudflare's full-page challenge does not depend on it: every page of
+/// that challenge keeps a marker (the script in the default
+/// [`container`](TurnstileSelectors::container)) until a navigation
+/// replaces it, and the run waits for a replacement without one, however
+/// long that takes.
+const SETTLE: Duration = Duration::from_secs(3);
 
 /// A caller-supplied click implementation, as stored on the driver.
 ///
@@ -253,7 +255,7 @@ impl<'a> CloudflareBypass<'a> {
     /// - `Ok(ClearanceOutcome::ChallengeGone)` — every challenge marker
     ///   observed on an earlier tick is gone, and the page has settled: it
     ///   was replaced by a new, parsed document (how Cloudflare's full-page
-    ///   challenge ends), or it stayed without markers for ten seconds. Read
+    ///   challenge ends), or it stayed without markers for three seconds. Read
     ///   [`ClearanceOutcome::ChallengeGone`] before treating this as proof
     ///   the gate was passed.
     /// - `Ok(ClearanceOutcome::TimedOut { saw_challenge })` — `timeout`
@@ -286,9 +288,8 @@ impl<'a> CloudflareBypass<'a> {
         let deadline = Instant::now() + timeout;
         let mut clicks: u32 = 0;
         let mut ticks_since_click: u32 = 0;
-        let mut ever_seen_markers = false;
-        // The document the markers were last seen on, and the time they were
-        // first found missing since then.
+        // The document the markers were last seen on (`None` while no marker
+        // has been seen), and the time they were first found missing since.
         let mut challenge_document: Option<String> = None;
         let mut markers_gone_since: Option<Instant> = None;
         let mut world = None;
@@ -298,6 +299,7 @@ impl<'a> CloudflareBypass<'a> {
 
         loop {
             let mut clicked = false;
+            let mut stalled = false;
             // `None` is a tick on which the page changed under the
             // observation. It says nothing about the challenge, so it decides
             // nothing either.
@@ -307,18 +309,20 @@ impl<'a> CloudflareBypass<'a> {
                 }
 
                 if seen.has_markers() {
-                    ever_seen_markers = true;
                     challenge_document = Some(seen.document.clone());
                     markers_gone_since = None;
                 } else if let Some(challenge) = &challenge_document {
-                    // Every marker seen earlier is gone. Cloudflare's
-                    // full-page challenge gets here a second or two before it
-                    // navigates to the page it guards, so wait for that page:
-                    // a new document, parsed. A widget cleared in place gets
-                    // no new document; its page only has to stay this way.
+                    // Every marker seen earlier is gone. A new document must
+                    // be parsed before the run can say what is on it, however
+                    // long that takes; the same document only has to stay
+                    // this way for `SETTLE`, in case a navigation is coming.
                     let since = *markers_gone_since.get_or_insert_with(Instant::now);
-                    let replaced = seen.document != *challenge && !seen.loading;
-                    if replaced || since.elapsed() >= SETTLE {
+                    let gone = if seen.document == *challenge {
+                        since.elapsed() >= SETTLE
+                    } else {
+                        !seen.loading
+                    };
+                    if gone {
                         return Ok(ClearanceOutcome::ChallengeGone);
                     }
                 }
@@ -327,7 +331,8 @@ impl<'a> CloudflareBypass<'a> {
                 // away, every later attempt waits `ClickPolicy::retry_ticks`
                 // ticks after the click that landed, and a run spends at most
                 // `ClickPolicy::max_attempts` clicks. So at the defaults the
-                // second click lands on tick 5, not tick 4. `max_attempts: 0`
+                // second click lands on tick 4 (the click's own tick counts).
+                // `max_attempts: 0`
                 // never clicks at all, which also keeps the page from being
                 // scrolled.
                 let may_click = clicks < self.click_policy.max_attempts
@@ -359,22 +364,26 @@ impl<'a> CloudflareBypass<'a> {
                         clicked = true;
                     }
                 }
+                stalled = seen.has_markers() && !clicked;
             }
 
-            // Every tick that did not land a click is a tick with no progress,
-            // the scroll-returned-`None` path included. That path used to skip
-            // the counter, so a widget that stayed mounted but stopped being
-            // measurable — the run this hint exists to explain — was the one
-            // run that could never produce it.
+            // A tick that saw a marker and did not land a click is a tick with
+            // no progress, the scroll-returned-`None` path included. That path
+            // used to skip the counter, so a widget that stayed mounted but
+            // stopped being measurable — the run this hint exists to explain —
+            // was the one run that could never produce it. A tick without
+            // markers is the page settling (or no challenge at all), and a
+            // tick without an observation is the page changing: neither is
+            // clicks going nowhere.
             //
-            // Except when the caller set `max_attempts: 0`. The hint reads
+            // Nor is a run where the caller set `max_attempts: 0`. The hint reads
             // "clicks are going nowhere, check stealth", and a run configured
             // never to click has no clicks to go nowhere: `stall_ticks` only
             // resets on a landed click, so it would fire on every watch-only
             // run and blame stealth for behaviour the caller asked for.
             if clicked {
                 stall_ticks = 0;
-            } else if self.click_policy.max_attempts > 0 {
+            } else if stalled && self.click_policy.max_attempts > 0 {
                 stall_ticks += 1;
                 if stall_ticks == 10 && !warned_stall {
                     tracing::warn!(
@@ -397,7 +406,7 @@ impl<'a> CloudflareBypass<'a> {
 
             if Instant::now() >= deadline {
                 return Ok(ClearanceOutcome::TimedOut {
-                    saw_challenge: ever_seen_markers,
+                    saw_challenge: challenge_document.is_some(),
                 });
             }
 
@@ -745,6 +754,77 @@ mod tests {
         assert!(
             elapsed >= SETTLE && elapsed < SETTLE + Duration::from_secs(1),
             "ChallengeGone came {elapsed:?} into the run"
+        );
+        conn.shutdown();
+    }
+
+    /// A replacement document still being parsed is waited for, however long
+    /// it streams: `SETTLE` bounds only the wait on the *same* document,
+    /// and returning on a half-parsed page would hand the caller a page the
+    /// run has not read.
+    #[tokio::test(start_paused = true)]
+    async fn a_replacement_still_loading_is_waited_for_past_the_settle_period() {
+        /// Ticks of 250ms the replacement streams for: past `SETTLE`.
+        const LOADING_TICKS: usize = 20;
+
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let fut = tokio::spawn(async move {
+            CloudflareBypass::new(&sess)
+                .poll_interval(Duration::from_millis(250))
+                .wait_for_clearance(Duration::from_secs(60))
+                .await
+        });
+        let page = |tick| match tick {
+            0 => Page::challenge(),
+            t if t <= LOADING_TICKS => Page::challenge()
+                .no_light_markers()
+                .document("D2")
+                .loading(),
+            _ => Page::challenge().no_light_markers().document("D2"),
+        };
+        let calls = serve(&mut mock, page).await;
+
+        assert!(matches!(
+            fut.await.unwrap().unwrap(),
+            ClearanceOutcome::ChallengeGone
+        ));
+        assert_eq!(
+            polls(&calls),
+            LOADING_TICKS + 2,
+            "returned before the parse ended"
+        );
+        conn.shutdown();
+    }
+
+    /// Waiting for the page to settle is not a stalled click, so it must not
+    /// tell the caller to go check stealth.
+    #[tokio::test(start_paused = true)]
+    async fn settling_is_never_blamed_on_stealth() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let capture = LogCapture::new();
+        let driver = capture.capture(async {
+            CloudflareBypass::new(&sess)
+                .poll_interval(Duration::from_millis(100))
+                .wait_for_clearance(Duration::from_secs(60))
+                .await
+        });
+        let page = |tick| match tick {
+            0 => Page::challenge(),
+            _ => Page::challenge().no_light_markers(),
+        };
+        let (outcome, calls) = tokio::join!(driver, serve(&mut mock, page));
+
+        assert!(matches!(outcome.unwrap(), ClearanceOutcome::ChallengeGone));
+        assert!(
+            polls(&calls) > 20,
+            "the settle period spans more than ten ticks"
+        );
+        assert!(
+            !capture.contains("clearance stalled"),
+            "captured {:?}",
+            capture.events()
         );
         conn.shutdown();
     }

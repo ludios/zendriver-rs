@@ -30,7 +30,7 @@
 //!   - `ChallengeGone` — every marker seen earlier is gone without a
 //!     token, and the page has settled: Cloudflare's full-page challenge
 //!     navigated to the page it guards and that page has been parsed, or
-//!     the markers stayed gone for ten seconds on the same page. Not by
+//!     the markers stayed gone for three seconds on the same page. Not by
 //!     itself proof the gate was passed.
 //!   - `TimedOut { saw_challenge: false }` — the full timeout window
 //!     elapsed without any challenge markers ever being observed (no

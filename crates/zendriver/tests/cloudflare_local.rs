@@ -10,7 +10,12 @@
 //! - a hidden `cf-turnstile-response` input sits beside the shadow host, in
 //!   the light DOM;
 //! - once the checkbox is clicked, the page removes the widget, then the
-//!   input, and only later navigates to the page it guards.
+//!   input, and only later navigates on: to a page of Cloudflare's with no
+//!   widget (its "precursor"), which a second later navigates to the page
+//!   the challenge guards;
+//! - both of Cloudflare's pages load a script from
+//!   `/cdn-cgi/challenge-platform/…/orchestrate/…`, which is how the driver
+//!   tells them from the guarded page.
 //!
 //! Each test runs it in one of Chrome's two process layouts, and checks
 //! that it got that layout: under Chrome's default site isolation the
@@ -25,7 +30,8 @@ use std::time::Duration;
 use serde_json::json;
 use zendriver::{Browser, BrowserBuilder, ClearanceOutcome, Tab, TurnstileSelectors};
 use zendriver_testkit::axum::Router;
-use zendriver_testkit::axum::response::Html;
+use zendriver_testkit::axum::http::header::CONTENT_TYPE;
+use zendriver_testkit::axum::response::{Html, IntoResponse};
 use zendriver_testkit::axum::routing::get;
 use zendriver_testkit::{FixtureServer, SITE_A, assert_eventually, launch_for_test};
 
@@ -35,6 +41,7 @@ const WIDGET_PATH: &str = "/fake-turnstile";
 /// The challenge page, on `a.test`. Its widget is served from `b.test`.
 const CHALLENGE: &str = r#"<!doctype html>
 <title>Just a moment...</title>
+<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=1"></script>
 <div><div id="host"></div><input type="hidden" name="cf-turnstile-response"></div>
 <script>
   const root = document.getElementById("host").attachShadow({ mode: "closed" });
@@ -47,7 +54,7 @@ const CHALLENGE: &str = r#"<!doctype html>
     fetch("/report?moves=" + event.data.moves + "&held_ms=" + Math.round(event.data.heldMs));
     document.getElementById("host").remove();
     setTimeout(() => document.querySelector("[name=cf-turnstile-response]").remove(), 300);
-    setTimeout(() => location.replace("/guarded"), 1500);
+    setTimeout(() => location.replace("/precursor"), 1500);
   });
 </script>"#;
 
@@ -71,14 +78,33 @@ const WIDGET: &str = r#"<!doctype html>
   });
 </script>"#;
 
+/// Cloudflare's page between the challenge and the guarded page.
+const PRECURSOR: &str = r#"<!doctype html>
+<title>Just a moment...</title>
+<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/precursor_interstitial/v1?ray=1"></script>
+<script>setTimeout(() => location.replace("/guarded"), 1000);</script>"#;
+
 /// The page the challenge guards.
 const GUARDED: &str = "<!doctype html><title>Guarded page</title><p>guarded content</p>";
+
+/// Paths of the scripts Cloudflare's two pages load.
+const CHALLENGE_SCRIPT: &str = "/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1";
+const PRECURSOR_SCRIPT: &str =
+    "/cdn-cgi/challenge-platform/h/b/orchestrate/precursor_interstitial/v1";
+
+/// An empty script, for those paths.
+async fn empty_script() -> impl IntoResponse {
+    ([(CONTENT_TYPE, "text/javascript")], "")
+}
 
 fn routes() -> Router {
     Router::new()
         .route("/challenge", get(|| async { Html(CHALLENGE) }))
         .route(WIDGET_PATH, get(|| async { Html(WIDGET) }))
+        .route("/precursor", get(|| async { Html(PRECURSOR) }))
         .route("/guarded", get(|| async { Html(GUARDED) }))
+        .route(CHALLENGE_SCRIPT, get(empty_script))
+        .route(PRECURSOR_SCRIPT, get(empty_script))
 }
 
 /// Whether Chrome lists the widget's frame as a target of its own, which it
@@ -124,9 +150,12 @@ async fn clears_the_challenge(builder: BrowserBuilder, own_process: bool) {
         matches!(outcome, ClearanceOutcome::ChallengeGone),
         "expected ChallengeGone, got {outcome:?}"
     );
-    // No waiting here: the run is meant to end on the page the challenge
-    // navigates to, not on the challenge page after its markers are gone.
-    assert_eq!(tab.title().await.unwrap(), "Guarded page");
+    // No waiting here: the run is meant to end on the guarded page, not on
+    // the challenge page after its widget is gone, nor on the precursor.
+    // `document.title`, because `Tab::title` asks the browser, which learns
+    // a new title some time after the document has it.
+    let title: String = tab.evaluate("document.title").await.unwrap();
+    assert_eq!(title, "Guarded page");
 
     // The click was a person's, not a teleport: the built-in raw click
     // brings one move and a press released at once. The jiggle alone

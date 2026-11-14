@@ -82,8 +82,11 @@ pub struct SelectorsInput {
     /// string disables the iframe signal rather than matching every iframe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iframe_src_contains: Option<String>,
-    /// CSS selector for the challenge container, used as a presence signal.
-    /// Defaults to `".cf-turnstile, .turnstile, [data-sitekey]"`.
+    /// CSS selector for elements that mark a challenge as on the page, used
+    /// as a presence signal: the container a site author puts Turnstile in,
+    /// and the script each page of Cloudflare's full-page challenge loads.
+    /// Defaults to
+    /// `.cf-turnstile, .turnstile, [data-sitekey], script[src*="/cdn-cgi/challenge-platform/"][src*="/orchestrate/"]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
     /// CSS selectors for the hidden input carrying the clearance token, in
@@ -183,11 +186,12 @@ pub enum Outcome {
     Solved,
     /// Every challenge marker seen earlier is gone without a token, and the
     /// page has settled: a navigation replaced it with a parsed document
-    /// (how Cloudflare's full-page challenge ends), or it stayed without
-    /// markers for ten seconds. `token` will be `None`.
+    /// (how Cloudflare's full-page challenge ends, on the page it guards),
+    /// or it stayed without markers for three seconds. `token` will be
+    /// `None`.
     ///
-    /// Not proof the gate was passed: a replacement page that is a fresh
-    /// challenge, whose widget mounts late, lands here too, so verify the
+    /// Not proof the gate was passed: a replacement page whose every marker
+    /// is added by script after it is parsed lands here too, so verify the
     /// page before treating what you read next as post-challenge content.
     ChallengeGone,
     /// `timeout_ms` elapsed without reaching either success state. `token`
