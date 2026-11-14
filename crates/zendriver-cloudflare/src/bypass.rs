@@ -317,9 +317,6 @@ impl<'a> CloudflareBypass<'a> {
         let mut challenge_document: Option<String> = None;
         let mut markers_gone_since: Option<Instant> = None;
         let mut replacement_loading = false;
-        // Whether the run has looked at a parsed document yet: the first
-        // such look decides `AlreadyClear`.
-        let mut looked = false;
 
         let mut stall_ticks: u32 = 0;
         let mut warned_stall = false;
@@ -334,11 +331,12 @@ impl<'a> CloudflareBypass<'a> {
                 if let Some(token) = seen.token {
                     return Ok(ClearanceOutcome::TokenAcquired(token));
                 }
-                if !seen.loading && !looked {
-                    looked = true;
-                    if !seen.has_markers() && challenge_document.is_none() {
-                        return Ok(ClearanceOutcome::AlreadyClear);
-                    }
+                // The first look at a parsed document with no marker, before
+                // any tick saw one: `challenge_document` is never reset, so a
+                // marker on that look (or a loading one before it) rules this
+                // out for the rest of the run.
+                if !seen.loading && !seen.has_markers() && challenge_document.is_none() {
+                    return Ok(ClearanceOutcome::AlreadyClear);
                 }
 
                 replacement_loading = false;
@@ -942,6 +940,34 @@ mod tests {
         );
         assert_eq!(polls(&calls), 2, "decided on the first parsed look");
         assert!(!saw(&calls, MOUSE) && !saw(&calls, SCROLL));
+    }
+
+    /// Markers seen while the page was still loading rule `AlreadyClear`
+    /// out: a challenge that removes its markers by the time the page is
+    /// parsed is a challenge gone, to be settled as one, not a page that
+    /// never had one.
+    #[tokio::test(start_paused = true)]
+    async fn markers_seen_while_loading_rule_out_already_clear() {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let fut = tokio::spawn(async move {
+            CloudflareBypass::new(&sess)
+                .poll_interval(Duration::from_millis(250))
+                .wait_for_clearance(Duration::from_secs(60))
+                .await
+        });
+        let page = |tick| match tick {
+            0 => Page::challenge().loading(),
+            _ => Page::challenge().no_light_markers(),
+        };
+        let calls = serve(&mut mock, page).await;
+
+        assert!(matches!(
+            fut.await.unwrap().unwrap(),
+            ClearanceOutcome::ChallengeGone
+        ));
+        assert!(polls(&calls) > 2, "settled rather than returned at once");
+        conn.shutdown();
     }
 
     /// `TimedOut { saw_challenge: false }` is what is left for a page the run
