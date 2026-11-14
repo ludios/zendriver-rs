@@ -32,7 +32,9 @@ If you can't tell, re-`browser_html { trim: true }` and inspect; don't guess-fir
 
 These walls are an active arms race; solves are **best-effort**, not guaranteed:
 
-- Retry once (transient challenges happen).
+- Retry once (transient challenges happen). For Turnstile, if the site refused the token,
+  retry with `ignore_returned_tokens: true`: the page holds the refused token until it resets
+  its widget, and without the flag the retry returns that token again at once.
 - Try a fresh navigation (`browser_reload` or re-`browser_goto`).
 - If a wall keeps returning, **surface it to the user** — say plainly that the site is
   serving a challenge the automated solver can't clear, and let them decide (manual solve,

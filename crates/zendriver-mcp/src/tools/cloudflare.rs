@@ -10,7 +10,9 @@
 //!   marker when first seen parsed, or, with `wait_for_challenge_ms`, none
 //!   until that wait ended.
 //! - `Ok(ClearanceOutcome::TokenAcquired(t))` — a configured token input
-//!   (`cf-turnstile-response` by default) picked up a token.
+//!   (`cf-turnstile-response` by default) picked up a token that the driver
+//!   was not told to ignore. The tool records it in the session, for
+//!   `ignore_returned_tokens`.
 //! - `Ok(ClearanceOutcome::ChallengeGone)` — every challenge marker is gone
 //!   without a token, from a page that has settled (for Cloudflare's
 //!   full-page challenge, the page it navigates to after it is passed).
@@ -28,7 +30,7 @@
 
 #![cfg(feature = "cloudflare")]
 
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use rmcp::ErrorData;
@@ -77,10 +79,12 @@ pub struct SolveInput {
     /// token: until the page resets its widget, the page still holds the
     /// old token, which the call would otherwise return at once as
     /// `solved`. While every token input holds an old token, the widget is
-    /// not clicked. An input that holds an old token is no challenge
-    /// marker, so a page with nothing else on it is `already_clear`: set
+    /// not clicked, so a page that never resets its widget gives no new
+    /// token. An input that holds an old token is no challenge marker, so a
+    /// page with nothing else on it is `already_clear`: set
     /// `wait_for_challenge_ms` too if the page may add its new widget after
-    /// the first look. Defaults to false.
+    /// the first look. Cloudflare's test sitekeys always produce the same
+    /// dummy token, which this ignores once returned. Defaults to false.
     #[serde(default)]
     pub ignore_returned_tokens: bool,
     /// Override the page markers that identify the Turnstile widget. Omit to
@@ -178,6 +182,15 @@ fn default_timeout() -> u64 {
     30_000
 }
 
+/// Record `token` in `tokens`, the tokens that `browser_solve_turnstile`
+/// returned in this session, unless it is there already.
+fn record(tokens: &std::sync::Mutex<Vec<String>>, token: &str) {
+    let mut tokens = tokens.lock().unwrap_or_else(PoisonError::into_inner);
+    if !tokens.iter().any(|t| t == token) {
+        tokens.push(token.to_string());
+    }
+}
+
 /// Apply a request's overrides to a bypass driver, leaving anything the
 /// request omitted at the lib's own default. `returned_tokens` holds the
 /// tokens this tool returned earlier in the session, which the driver
@@ -265,7 +278,8 @@ pub struct SolveOutput {
 /// Drive the Turnstile clearance flow on the current tab, returning the
 /// terminal outcome (`AlreadyClear`, `Solved`, `ChallengeGone`, or
 /// `Timeout`) within
-/// `timeout_ms`.
+/// `timeout_ms`. A `Solved` token is recorded in the session, for later
+/// calls' `ignore_returned_tokens`.
 ///
 /// See module-level docs for outcome semantics.
 pub async fn solve_turnstile(
@@ -274,15 +288,22 @@ pub async fn solve_turnstile(
 ) -> Result<SolveOutput, ErrorData> {
     let s = state.lock().await;
     let tab = current_tab(&s).await?;
-    let returned_tokens = s.turnstile_tokens.clone();
+    let returned_tokens = Arc::clone(&s.turnstile_tokens);
     // Other tools go on while the solver waits, which with
     // `wait_for_challenge_ms` it does even on a page without a challenge.
     drop(s);
+    let mut ignored = Vec::new();
+    if input.ignore_returned_tokens {
+        ignored = returned_tokens
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+    }
     // Build the bypass driver. `tab.cloudflare()` borrows `tab` for the
     // bypass's `'_` lifetime, but `wait_for_clearance` consumes `self`, so
     // the bypass lives only for the single await we're about to do.
     let timeout = Duration::from_millis(input.timeout_ms);
-    match configure(tab.cloudflare(), input, &returned_tokens)
+    match configure(tab.cloudflare(), input, &ignored)
         .wait_for_clearance(timeout)
         .await
     {
@@ -291,7 +312,7 @@ pub async fn solve_turnstile(
             token: None,
         }),
         Ok(ClearanceOutcome::TokenAcquired(t)) => {
-            state.lock().await.turnstile_tokens.push(t.clone());
+            record(&returned_tokens, &t);
             Ok(SolveOutput {
                 outcome: Outcome::Solved,
                 token: Some(t),
@@ -458,8 +479,9 @@ mod tests {
         assert_eq!(
             point,
             Some((140.0, 210.0)),
-            "the run ended on its bare first look, or the click missed the widget at the \
-             request's host, or ignored the request's fractions"
+            "the run ended on its bare first look, or returned the ignored OLD unclicked, or \
+             the click missed the widget at the request's host, or ignored the request's \
+             fractions"
         );
         assert!(matches!(
             outcome.unwrap(),

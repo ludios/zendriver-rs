@@ -444,6 +444,9 @@ let outcome = tab.cloudflare()
   finds for the solved widget that produced the token, which asks for a
   click, if at all, only after the page resets it.
 
+Over MCP, `browser_solve_turnstile` keeps every token that it returned
+in the session; `ignore_returned_tokens: true` ignores them all.
+
 The limits of this: the last rule looks at the page's token inputs as a
 whole, so a new widget without a token input of its own (Turnstile's
 `response-field: false`) is not clicked while an old input holds an

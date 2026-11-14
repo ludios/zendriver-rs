@@ -172,11 +172,13 @@ pub struct SessionState {
     pub monitors: HashMap<MonitorId, std::sync::Arc<tokio::sync::Mutex<MonitorState>>>,
 
     /// Every token that `browser_solve_turnstile` returned in this session,
-    /// in every tab and every browser: the tokens its
-    /// `ignore_returned_tokens` ignores. Tokens are unique, so one list
-    /// serves every page.
+    /// in every tab and every browser, each once: the tokens that its
+    /// `ignore_returned_tokens` ignores. Tokens are unique (except the dummy
+    /// token of Cloudflare's test sitekeys), so one list serves every page.
+    /// It has a lock of its own, so that recording a token does not wait for
+    /// the session's lock, which other tools hold across navigations.
     #[cfg(feature = "cloudflare")]
-    pub turnstile_tokens: Vec<String>,
+    pub turnstile_tokens: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 /// Live handle to a pending `expect_*` expectation.
@@ -426,7 +428,7 @@ impl SessionState {
             #[cfg(feature = "monitor")]
             monitors: HashMap::new(),
             #[cfg(feature = "cloudflare")]
-            turnstile_tokens: Vec::new(),
+            turnstile_tokens: std::sync::Arc::default(),
         }
     }
 }
