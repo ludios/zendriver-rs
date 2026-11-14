@@ -461,9 +461,9 @@ async fn sha256_file(path: &std::path::Path) -> Result<String, FetcherError> {
     tokio::task::spawn_blocking(move || -> std::io::Result<String> {
         use sha2::Digest as _;
         let mut file = std::fs::File::open(&path)?;
-        let mut hasher = sha2::Sha256::new();
+        let mut hasher = digest_io::IoWrapper(sha2::Sha256::new());
         std::io::copy(&mut file, &mut hasher)?;
-        Ok(hex_encode(&hasher.finalize()))
+        Ok(hex_encode(&hasher.0.finalize()))
     })
     .await
     .map_err(|e| FetcherError::Extraction(format!("sha256 join error: {e}")))?
