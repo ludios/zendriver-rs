@@ -63,8 +63,9 @@ pub(crate) enum Widget {
 /// What the fake page shows during one poll tick.
 #[derive(Debug, Clone)]
 pub(crate) struct Page {
-    /// The value in the token input, if any.
-    pub token: Option<&'static str>,
+    /// The value of each token input, in preference order: `""` for an
+    /// empty one.
+    pub tokens: Vec<&'static str>,
     /// The light DOM holds a container or a token input.
     pub light_markers: bool,
     pub widget: Widget,
@@ -81,11 +82,11 @@ pub(crate) struct Page {
 }
 
 impl Page {
-    /// A challenge page on document `D1`: a token input in the light DOM,
-    /// no widget yet, no token.
+    /// A challenge page on document `D1`: an empty token input in the light
+    /// DOM, no widget yet.
     pub fn challenge() -> Self {
         Self {
-            token: None,
+            tokens: vec![""],
             light_markers: true,
             widget: Widget::Absent,
             out_of_process: false,
@@ -101,14 +102,22 @@ impl Page {
         self
     }
 
+    /// The same page with `token` in its one token input.
     pub fn token(mut self, token: &'static str) -> Self {
-        self.token = Some(token);
+        self.tokens = vec![token];
+        self
+    }
+
+    /// The same page with one token input per value in `tokens`.
+    pub fn tokens(mut self, tokens: &[&'static str]) -> Self {
+        self.tokens = tokens.to_vec();
         self
     }
 
     /// The same page without a container or a token input.
     pub fn no_light_markers(mut self) -> Self {
         self.light_markers = false;
+        self.tokens = Vec::new();
         self
     }
 
@@ -160,7 +169,7 @@ impl Page {
             "Runtime.evaluate" => {
                 assert_eq!(params["contextId"], world, "the poll ran outside the world");
                 json!({ "result": { "type": "object", "value": {
-                "token": self.token,
+                "tokens": self.tokens,
                 "markers": self.light_markers,
                 "loading": self.loading,
             } } })

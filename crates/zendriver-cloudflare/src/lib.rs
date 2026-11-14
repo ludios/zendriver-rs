@@ -23,7 +23,8 @@
 //!    swallowed click a few times. This crate's own click is a raw one;
 //!    `zendriver`'s `Tab::cloudflare` installs a human-like click instead,
 //!    made with the tab's mouse.
-//! 3. Poll for either the token input gaining a value, or every challenge
+//! 3. Poll for either a token input gaining a value (other than one of the
+//!    [`ignore_tokens`](CloudflareBypass::ignore_tokens)), or every challenge
 //!    marker being gone from a page that has settled — for Cloudflare's
 //!    full-page challenge, the page it navigates to after it is passed. See
 //!    [`ClearanceOutcome::ChallengeGone`] for what that does and does not

@@ -12,8 +12,10 @@
 //!    root that no path through the DOM leads into. See
 //!    [`detection`](crate::detection) for how.
 //! 2. Resolves to [`ClearanceOutcome::TokenAcquired`] the first tick a
-//!    non-empty token is observed — including the **invisible Turnstile**
-//!    path, where nothing is clicked and the token is populated directly.
+//!    non-empty token is observed, other than one of the
+//!    [`ignore_tokens`](CloudflareBypass::ignore_tokens) — including the
+//!    **invisible Turnstile** path, where nothing is clicked and the token
+//!    is populated directly.
 //!    Resolves to [`ClearanceOutcome::AlreadyClear`] when the first
 //!    observation of a parsed document shows no marker, and no earlier tick
 //!    saw one: a page with no challenge costs the ticks it takes to parse,
@@ -22,7 +24,8 @@
 //!    the run keeps looking until the window has ended; the window starts
 //!    on the first look at each parsed document.
 //! 3. If a click is due and the widget is mounted, scrolls it into view
-//!    and measures it; if it is a click target (non-zero size and visible),
+//!    and measures it (no click is due while every token input holds one
+//!    of the ignored tokens: their widget is still solved); if it is a click target (non-zero size and visible),
 //!    clicks the point the [`ClickPolicy`] chose inside it — by default
 //!    `bbox.x + bbox.width * 0.07, bbox.y + bbox.height * 0.50`. Up to
 //!    [`ClickPolicy::max_attempts`] clicks are spent, spaced
@@ -65,16 +68,17 @@ use crate::options::{ClickPolicy, ClickTarget, TurnstileSelectors};
 pub enum ClearanceOutcome {
     /// Turnstile produced a token — the first non-empty value of an
     /// element matching the configured
-    /// [`token_inputs`](TurnstileSelectors::token_inputs), tried in order;
-    /// `[name="cf-turnstile-response"]` by default.
+    /// [`token_inputs`](TurnstileSelectors::token_inputs), tried in order
+    /// (`[name="cf-turnstile-response"]` by default), that is not one of the
+    /// [`ignore_tokens`](CloudflareBypass::ignore_tokens).
     TokenAcquired(String),
     /// Every challenge marker seen earlier in the run is gone without a
-    /// token having shown, and the page has settled. Either a navigation
-    /// replaced the document and the new one has been parsed, or the
-    /// markers stayed gone for three seconds on the same document, as for a
-    /// widget cleared in place. Cloudflare's full-page challenge ends the
-    /// first way, on the page it guards: each of its own pages carries a
-    /// marker with the default selectors.
+    /// token (other than an ignored one) having shown, and the page has
+    /// settled. Either a navigation replaced the document and the new one
+    /// has been parsed, or the markers stayed gone for three seconds on the
+    /// same document, as for a widget cleared in place. Cloudflare's
+    /// full-page challenge ends the first way, on the page it guards: each
+    /// of its own pages carries a marker with the default selectors.
     ///
     /// **Not proof the gate was passed.** It says no marker is left, not
     /// that the server let you through: a replacement document whose every
@@ -157,6 +161,9 @@ pub struct CloudflareBypass<'a> {
     /// markers is not yet taken as [`ClearanceOutcome::AlreadyClear`] (see
     /// [`wait_for_challenge`](Self::wait_for_challenge)).
     pub(crate) challenge_wait: Duration,
+    /// Token values that do not count as a token (see
+    /// [`ignore_tokens`](Self::ignore_tokens)).
+    pub(crate) ignored_tokens: Vec<String>,
     pub(crate) selectors: TurnstileSelectors,
     pub(crate) click_policy: ClickPolicy,
     pub(crate) on_click: Option<ClickHandler>,
@@ -171,6 +178,7 @@ impl std::fmt::Debug for CloudflareBypass<'_> {
             .field("session", &self.session)
             .field("poll_interval", &self.poll_interval)
             .field("challenge_wait", &self.challenge_wait)
+            .field("ignored_tokens", &self.ignored_tokens)
             .field("selectors", &self.selectors)
             .field("click_policy", &self.click_policy)
             .field("on_click", &self.on_click.is_some())
@@ -181,13 +189,14 @@ impl std::fmt::Debug for CloudflareBypass<'_> {
 impl<'a> CloudflareBypass<'a> {
     /// Create a new bypass driver bound to `session` with a default 500ms
     /// poll interval, no [`wait_for_challenge`](Self::wait_for_challenge)
-    /// window, the default [`TurnstileSelectors`] and the default
-    /// [`ClickPolicy`].
+    /// window, no [`ignore_tokens`](Self::ignore_tokens), the default
+    /// [`TurnstileSelectors`] and the default [`ClickPolicy`].
     pub fn new(session: &'a SessionHandle) -> Self {
         Self {
             session,
             poll_interval: DEFAULT_POLL_INTERVAL,
             challenge_wait: Duration::ZERO,
+            ignored_tokens: Vec::new(),
             selectors: TurnstileSelectors::default(),
             click_policy: ClickPolicy::default(),
             on_click: None,
@@ -237,6 +246,48 @@ impl<'a> CloudflareBypass<'a> {
     #[must_use]
     pub fn wait_for_challenge(mut self, dur: Duration) -> Self {
         self.challenge_wait = dur;
+        self
+    }
+
+    /// Make [`wait_for_clearance`](Self::wait_for_clearance) treat each of
+    /// `tokens` as no token at all: as the token of a widget that the caller
+    /// is done with. Defaults to none. Each call replaces the list that an
+    /// earlier call set.
+    ///
+    /// A page that asks for Turnstile again, e.g. because its server wants
+    /// a fresh token, can still hold the old token when the next run
+    /// starts: until the page resets the widget (`turnstile.reset()` empties
+    /// the widget's token input), or for good, in the input of a widget that
+    /// the page leaves beside the new one. Without this, that run returns
+    /// the old token at once. Given the old tokens, the run waits for a
+    /// token that is not one of them, and it does not click while every
+    /// token input holds one of them, as their widget is still solved. Pass
+    /// every token that an earlier run returned on this page.
+    ///
+    /// A token input is a challenge marker whatever it holds, so a run that
+    /// finds an old token in the page never returns
+    /// [`ClearanceOutcome::AlreadyClear`]. If the page asks for no new
+    /// token, the run ends in [`ClearanceOutcome::TimedOut`], or in
+    /// [`ClearanceOutcome::ChallengeGone`] if the page removes every marker.
+    ///
+    /// ```no_run
+    /// # async fn ex(tab: &zendriver_transport::SessionHandle, first: String)
+    /// #   -> Result<(), zendriver_cloudflare::CloudflareError> {
+    /// use std::time::Duration;
+    /// use zendriver_cloudflare::CloudflareBypass;
+    ///
+    /// // `first` is the token that an earlier run returned, which the page's
+    /// // server has since refused.
+    /// let outcome = CloudflareBypass::new(tab)
+    ///     .ignore_tokens([&first])
+    ///     .wait_for_clearance(Duration::from_secs(30))
+    ///     .await?;
+    /// # let _ = outcome;
+    /// # Ok(()) }
+    /// ```
+    #[must_use]
+    pub fn ignore_tokens(mut self, tokens: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.ignored_tokens = tokens.into_iter().map(Into::into).collect();
         self
     }
 
@@ -343,7 +394,8 @@ impl<'a> CloudflareBypass<'a> {
     ///   observation of the parsed page decides; with a `wait_for_challenge`
     ///   window, the window's end does.
     /// - `Ok(ClearanceOutcome::TokenAcquired(token))` — a configured token
-    ///   input picked up a non-empty value, either after we clicked the
+    ///   input picked up a non-empty value that is not one of the
+    ///   [`ignore_tokens`](Self::ignore_tokens), either after we clicked the
     ///   interactive iframe or because the page uses invisible Turnstile.
     /// - `Ok(ClearanceOutcome::ChallengeGone)` — every challenge marker
     ///   observed on an earlier tick is gone, and the page has settled: it
@@ -414,7 +466,8 @@ impl<'a> CloudflareBypass<'a> {
             // `None` is a tick on which the page changed under the
             // observation. It says nothing about the challenge, so it decides
             // nothing either.
-            if let Some(seen) = observe(self.session, &self.selectors).await? {
+            if let Some(seen) = observe(self.session, &self.selectors, &self.ignored_tokens).await?
+            {
                 if let Some(token) = seen.token {
                     return Ok(ClearanceOutcome::TokenAcquired(token));
                 }
@@ -465,8 +518,11 @@ impl<'a> CloudflareBypass<'a> {
                 // `ClickPolicy::max_attempts` clicks. So at the defaults the
                 // second click lands on tick 4 (the click's own tick counts).
                 // `max_attempts: 0` never clicks at all, which also keeps the
-                // page from being scrolled.
-                let may_click = clicks < self.click_policy.max_attempts
+                // page from being scrolled. While every token input holds an
+                // ignored token, their widget is still solved and asks for no
+                // click, until the page resets it, which empties its input.
+                let may_click = !seen.only_ignored_tokens
+                    && clicks < self.click_policy.max_attempts
                     && (clicks == 0 || ticks_since_click >= self.click_policy.retry_ticks);
 
                 // Raw `Input.dispatchMouseEvent` coordinates are viewport
@@ -501,7 +557,7 @@ impl<'a> CloudflareBypass<'a> {
                         clicked = true;
                     }
                 }
-                stalled = seen.widget.is_some();
+                stalled = seen.widget.is_some() && !seen.only_ignored_tokens;
             }
 
             // A tick with a widget mounted and no click landed is a tick with
@@ -509,7 +565,9 @@ impl<'a> CloudflareBypass<'a> {
             // stays mounted but never measurable is the run this hint exists
             // to explain. A tick without a widget is not: the page settling, a
             // page of Cloudflare's leading on to the guarded one, or a page
-            // changing under the observation.
+            // changing under the observation. Nor is a tick on which every
+            // token input holds an ignored token: that widget is solved, and
+            // waits for the page to reset it.
             //
             // Nor is a run where the caller set `max_attempts: 0`. The hint reads
             // "clicks are going nowhere, check stealth", and a run configured
@@ -857,6 +915,72 @@ mod tests {
 
         assert_eq!(token_of(outcome), "LATE");
         assert_eq!(polls(&calls), 3);
+    }
+
+    /// A page that asks for Turnstile again still holds the old token until
+    /// it resets the widget. A run given that token waits past it, without
+    /// clicking the widget that is still solved, and without calling the
+    /// wait a stall; once the reset empties the input, the run clicks and
+    /// returns the new token.
+    #[tokio::test]
+    async fn an_ignored_token_is_waited_past_without_a_click() {
+        /// Ticks on which the input still holds the old token: past the
+        /// tenth, where the stall hint would fire.
+        const OLD_TICKS: usize = 12;
+
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let capture = LogCapture::new();
+
+        let driver = capture.capture(async {
+            CloudflareBypass::new(&sess)
+                .poll_interval(Duration::from_millis(1))
+                .ignore_tokens(["OLD"])
+                .wait_for_clearance(Duration::from_secs(30))
+                .await
+        });
+        let page = |tick| match tick {
+            t if t < OLD_TICKS => Page::challenge().token("OLD").widget_at(widget_rect()),
+            OLD_TICKS => Page::challenge().widget_at(widget_rect()),
+            _ => Page::challenge().token(END_TOKEN),
+        };
+        let (outcome, calls) = tokio::join!(driver, serve(&mut mock, page));
+
+        assert_eq!(token_of(outcome), END_TOKEN);
+        assert_eq!(presses(&calls), vec![(OLD_TICKS, (DEFAULT_X, 220.0))]);
+        assert!(
+            !saw(
+                &calls[..calls.iter().position(|c| c.tick == OLD_TICKS).unwrap()],
+                SCROLL
+            ),
+            "the solved widget was scrolled to; observed {calls:?}"
+        );
+        assert!(
+            !capture.contains("clearance stalled"),
+            "a solved widget waiting for its reset is not a stalled run; captured {:?}",
+            capture.events()
+        );
+        conn.shutdown();
+    }
+
+    /// An old token in an earlier input must not hide a new token in a later
+    /// one, and the empty input beside the old token is a widget asking for
+    /// a click.
+    #[tokio::test]
+    async fn an_ignored_token_in_an_earlier_input_hides_no_new_token() {
+        let (outcome, calls) = run(
+            |b| b.ignore_tokens(["OLD"]),
+            |tick| match tick {
+                0 => Page::challenge()
+                    .tokens(&["OLD", ""])
+                    .widget_at(widget_rect()),
+                _ => Page::challenge().tokens(&["OLD", "NEW"]),
+            },
+        )
+        .await;
+
+        assert_eq!(token_of(outcome), "NEW");
+        assert_eq!(presses(&calls), vec![(0, (DEFAULT_X, 220.0))]);
     }
 
     /// Cloudflare's full-page challenge, as watched live: after the click

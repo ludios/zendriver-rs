@@ -116,10 +116,23 @@ const LATE: &str = r#"<!doctype html>
   }, 1000));
 </script>"#;
 
+/// [`LATE`] with the input of an earlier widget left in its form, still
+/// holding that widget's token, as on a page that adds a second widget
+/// beside the first one.
+fn again() -> String {
+    let page = LATE.replace(
+        r#"<form id="form">"#,
+        r#"<form id="form"><input type="hidden" name="cf-turnstile-response" value="old-token">"#,
+    );
+    assert_ne!(page, LATE, "the form of LATE moved");
+    page
+}
+
 fn routes() -> Router {
     Router::new()
         .route("/challenge", get(|| async { Html(CHALLENGE) }))
         .route("/late", get(|| async { Html(LATE) }))
+        .route("/again", get(|| async { Html(again()) }))
         .route(WIDGET_PATH, get(|| async { Html(WIDGET) }))
         .route("/precursor", get(|| async { Html(PRECURSOR) }))
         .route("/guarded", get(|| async { Html(GUARDED) }))
@@ -252,6 +265,49 @@ async fn wait_for_challenge_clicks_a_widget_that_a_script_adds_later() {
             ..TurnstileSelectors::default()
         })
         .wait_for_challenge(Duration::from_secs(10))
+        .wait_for_clearance(Duration::from_secs(20))
+        .await
+        .unwrap();
+    match outcome {
+        ClearanceOutcome::TokenAcquired(token) => assert_eq!(token, "late-token"),
+        other => panic!("expected TokenAcquired, got {other:?}"),
+    }
+    browser.close().await;
+}
+
+/// An earlier widget's input, left in the page with its token, ends a run
+/// at once. Given that token to ignore, the next run waits for the widget
+/// that the page adds after it, clicks it, and returns the new widget's
+/// token, which sits in an input after the old one.
+#[tokio::test]
+async fn ignore_tokens_waits_past_an_earlier_widgets_token() {
+    let server = FixtureServer::start_with(routes()).await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    tab.goto(server.url(SITE_A, "/again")).await.unwrap();
+    tab.wait_for_load().await.unwrap();
+    let selectors = TurnstileSelectors {
+        iframe_src_contains: WIDGET_PATH.into(),
+        ..TurnstileSelectors::default()
+    };
+
+    let first = tab
+        .cloudflare()
+        .selectors(selectors.clone())
+        .wait_for_clearance(Duration::from_secs(20))
+        .await
+        .unwrap();
+    let ClearanceOutcome::TokenAcquired(old) = first else {
+        panic!("expected the old token, got {first:?}");
+    };
+    assert_eq!(old, "old-token");
+
+    let submit = tab.find().css("#submit").one().await.unwrap();
+    submit.click().await.unwrap();
+    let outcome = tab
+        .cloudflare()
+        .selectors(selectors)
+        .ignore_tokens([&old])
         .wait_for_clearance(Duration::from_secs(20))
         .await
         .unwrap();

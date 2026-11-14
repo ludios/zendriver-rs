@@ -355,9 +355,9 @@ mod tests {
             }
             match method {
                 "Runtime.evaluate" => {
-                    let token = if tick > 2 { json!("T") } else { Value::Null };
+                    let tokens = if tick > 2 { json!(["T"]) } else { json!([]) };
                     json!({ "result": { "type": "object", "value": {
-                        "token": token, "markers": tick > 1, "loading": false,
+                        "tokens": tokens, "markers": tick > 1, "loading": false,
                     } } })
                 }
                 "Page.getFrameTree" => json!({ "frameTree": {

@@ -58,10 +58,13 @@ ordinary terminals, the last one included:
   `[data-sitekey]` reads as a challenge, and the run goes on to its
   timeout.
 - **`TokenAcquired(token)`** — the `cf-turnstile-response` input picked
-  up a non-empty value. The page can now proceed; the token is also
+  up a non-empty value, other than one of the old tokens that the run
+  was told to ignore (see [A page that asks for Turnstile
+  again](#a-page-that-asks-for-turnstile-again)). The page can now proceed; the token is also
   forwarded to Cloudflare server-side on the next request.
 - **`ChallengeGone`** — every challenge marker seen on an earlier tick
-  is gone without a token having shown, and the page has settled. This
+  is gone without a token (other than an ignored one) having shown, and
+  the page has settled. This
   is how Cloudflare's full-page "Just a moment…" challenge ends. After it
   is passed, it removes its widget and its token input, and a second or
   two later navigates, through a page of Cloudflare's with no widget, to
@@ -98,7 +101,7 @@ and the second is `ClearanceOutcome::TimedOut { saw_challenge: true }`.
 ## How it works
 
 The driver runs a single poll loop. Each tick, one evaluator reads the
-light DOM: the `cf-turnstile-response` token if one is present, and
+light DOM: the value of every `cf-turnstile-response` token input, and
 whether a marker (the container, the token input, or one of Cloudflare's
 own page scripts) is there. It runs in an isolated world, where
 Cloudflare's script in the page's main world cannot see the calls it
@@ -115,10 +118,10 @@ widget is the main frame's child frame whose URL contains the iframe
 marker, and `DOM.getFrameOwner` names the `<iframe>` element that holds
 it, shadow root or not. The tick then resolves in this order:
 
-1. **A token wins outright.** A non-empty token returns `TokenAcquired`
-   immediately. This is also the invisible-Turnstile path, where no
-   iframe mounts and Cloudflare's loader script fills the field in
-   without anything to click.
+1. **A token wins outright.** A non-empty token that is not one of the
+   ignored tokens returns `TokenAcquired` immediately. This is also the
+   invisible-Turnstile path, where no iframe mounts and Cloudflare's
+   loader script fills the field in without anything to click.
    **No marker at the first look returns `AlreadyClear`.** The first tick
    that sees the page parsed, with no marker on it or on any tick before,
    ends the run. With a `wait_for_challenge` window, the tick that ends
@@ -146,7 +149,8 @@ it, shadow root or not. The tick then resolves in this order:
    `wait_for_clearance` while the button is down (e.g. because the page
    has already had its answer) does not stop the release. A widget that
    is mounted but hidden or zero-sized is never clicked, since there is
-   no meaningful point to click.
+   no meaningful point to click. Nor is a widget clicked while every
+   token input holds an ignored token: their widget is still solved.
 3. **Retry, up to a cap.** Cloudflare drops clicks that land while the
    widget is still booting, so one run spends up to three of them, each
    at least four poll ticks after the last (about two seconds at the
@@ -166,7 +170,8 @@ asking whether `BrowserBuilder::stealth` is on, which is the answer most
 of the time. See [Pairing with stealth](#pairing-with-stealth) below. A
 run configured never to click (`max_attempts: 0`, below) is exempt —
 nothing is stalled there, and stealth would be the wrong thing to go
-change.
+change. So is a tick on which every token input holds an ignored token,
+as that widget is solved and waits for the page to reset it.
 
 Every selector, the click point and the click cadence in that
 description are defaults, not constants — the next section is how to
@@ -219,7 +224,8 @@ The defaults:
 | `ClickPolicy::y_fraction` | `0.5` |
 
 The token is the first non-empty value of an element matching
-`token_inputs`, trying the selectors in order, so a page whose modern
+`token_inputs`, trying the selectors in order and skipping the ignored
+tokens, so a page whose modern
 and legacy inputs both hold one is read the modern way. An empty value turns a marker
 off rather than widening it: an empty `container` drops the container
 signal, an empty `iframe_src_contains` matches no iframe (rather than
@@ -395,11 +401,42 @@ when the window has ended, or at the clearance timeout if the window
 would end after it.
 
 One run handles one challenge: it ends at the first token. A page that
-can show its widget again later, e.g. when its server asks for a fresh
-token, needs another run then. That run returns at once with any token
-already in a token input, the old one included, so start it after the
-page has emptied or removed the old token input, or point
-`TurnstileSelectors::token_inputs` at the new widget's input.
+can show its widget again later needs another run then; see the next
+section.
+
+### A page that asks for Turnstile again
+
+A page can ask for a second token, e.g. when its server refuses the
+first one. Until the page resets the widget (`turnstile.reset()` empties
+the widget's token input), the page still holds the old token, and so
+does a page that adds a new widget beside the old one, in the old
+widget's input. A run would return that old token at once. Give the run
+the tokens that earlier runs returned, and it waits for a new one:
+
+```rust,ignore
+let ClearanceOutcome::TokenAcquired(first) = tab.cloudflare()
+    .wait_for_clearance(Duration::from_secs(30))
+    .await?
+else {
+    return Err("no token".into());
+};
+// ... submit the form with `first`; the server refuses it ...
+
+let outcome = tab.cloudflare()
+    .ignore_tokens([&first])
+    .wait_for_clearance(Duration::from_secs(30))
+    .await?;
+```
+
+The ignored tokens are compared by value, so a widget that puts a new
+token into the same input ends the run, and an old token in one input
+does not hide a new one in another. While every token input holds an
+ignored token, the run does not click: their widget is still solved,
+and asks for a click, if at all, only after the page resets it. A
+token input is a challenge marker whatever it holds, so a run that finds
+an old token never returns `AlreadyClear`: if the page asks for no new
+token, the run ends in `TimedOut { saw_challenge: true }`, or in
+`ChallengeGone` if the page removes every marker.
 
 ## Tuning
 
@@ -411,6 +448,9 @@ page has emptied or removed the old token input, or point
   `AlreadyClear`, for a page whose script adds the widget later.
   Defaults to zero. See [Widgets that a script adds
   later](#widgets-that-a-script-adds-later).
+- `.ignore_tokens([&old])` — treat the tokens that earlier runs returned
+  as no token at all. Defaults to none. See [A page that asks for
+  Turnstile again](#a-page-that-asks-for-turnstile-again).
 - `.selectors(..)` / `.click_policy(..)` / `.on_click(..)` — the markers
   and the click, covered in [Markers and clicks are
   yours](#markers-and-clicks-are-yours).

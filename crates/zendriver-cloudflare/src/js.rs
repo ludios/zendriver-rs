@@ -36,9 +36,11 @@ fn js_string_array(values: &[String]) -> String {
 }
 
 /// The poll evaluator. Returns, in one round-trip:
-/// - `token` — the first non-empty value of an element matching one of the
-///   [`token_inputs`](TurnstileSelectors::token_inputs), trying the
-///   selectors in order, else null.
+/// - `tokens` — the value of every element matching one of the
+///   [`token_inputs`](TurnstileSelectors::token_inputs), empty ones
+///   included, in the order of the selectors and then of the document. A
+///   value that is not a string (an element other than an input can match)
+///   is reported as empty.
 /// - `markers` — true when the light DOM holds the
 ///   [`container`](TurnstileSelectors::container) or a token input.
 /// - `loading` — true while the document is still being parsed
@@ -49,19 +51,18 @@ pub(crate) fn poll_expr(selectors: &TurnstileSelectors) -> String {
     format!(
         r#"(function(){{
     var tokenSelectors = {token_selectors};
-    var token = null;
-    var hasInput = false;
-    for (var k = 0; k < tokenSelectors.length && !token; k++) {{
+    var tokens = [];
+    for (var k = 0; k < tokenSelectors.length; k++) {{
         if (!tokenSelectors[k]) continue;
         var inputs = document.querySelectorAll(tokenSelectors[k]);
-        for (var i = 0; i < inputs.length && !token; i++) {{
-            hasInput = true;
-            if (inputs[i].value) token = inputs[i].value;
+        for (var i = 0; i < inputs.length; i++) {{
+            var value = inputs[i].value;
+            tokens.push(typeof value === "string" ? value : "");
         }}
     }}
     var containerSelector = {container};
     var hasContainer = containerSelector ? !!document.querySelector(containerSelector) : false;
-    return {{ token: token, markers: hasContainer || hasInput, loading: document.readyState === "loading" }};
+    return {{ tokens: tokens, markers: hasContainer || tokens.length > 0, loading: document.readyState === "loading" }};
 }})()"#
     )
 }

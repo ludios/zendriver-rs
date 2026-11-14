@@ -3187,7 +3187,10 @@ impl Tab {
     /// at once, with nothing clicked. For a page whose script adds the
     /// widget later, chain
     /// [`wait_for_challenge`](zendriver_cloudflare::CloudflareBypass::wait_for_challenge),
-    /// which delays that decision. Use
+    /// which delays that decision. For a page that asks for Turnstile
+    /// again while it still holds the old token, chain
+    /// [`ignore_tokens`](zendriver_cloudflare::CloudflareBypass::ignore_tokens)
+    /// with the tokens that earlier runs returned. Use
     /// [`is_challenge_present`](zendriver_cloudflare::CloudflareBypass::is_challenge_present)
     /// for a one-shot probe of the widget alone.
     ///

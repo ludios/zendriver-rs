@@ -149,9 +149,13 @@ async fn isolated_world(
 /// What one poll tick saw.
 #[derive(Debug)]
 pub(crate) struct Observation {
-    /// The non-empty value held by the first of the
-    /// [`token_inputs`](TurnstileSelectors::token_inputs) to have one.
+    /// The value held by the first of the
+    /// [`token_inputs`](TurnstileSelectors::token_inputs) whose value is
+    /// non-empty and not one of the ignored tokens.
     pub token: Option<String>,
+    /// There is at least one token input, and every token input holds one
+    /// of the ignored tokens.
+    pub only_ignored_tokens: bool,
     /// The light DOM holds the
     /// [`container`](TurnstileSelectors::container) or a token input.
     pub light_markers: bool,
@@ -179,8 +183,10 @@ impl Observation {
 /// The poll evaluator's reply.
 #[derive(Debug, Deserialize)]
 struct Poll {
+    /// The value of every token input, empty ones included, in preference
+    /// order.
     #[serde(default)]
-    token: Option<String>,
+    tokens: Vec<String>,
     #[serde(default)]
     markers: bool,
     #[serde(default)]
@@ -338,8 +344,9 @@ pub(crate) async fn measure_widget(
 
 /// Observe the page once: the token, the markers, the widget and the
 /// document, running the poll evaluator in this crate's isolated world.
-/// `Ok(None)` when the page changed under the observation, which says
-/// nothing about the challenge either way.
+/// `ignored` holds the token values that do not count as a token: those of
+/// widgets the caller is done with. `Ok(None)` when the page changed under
+/// the observation, which says nothing about the challenge either way.
 ///
 /// # Errors
 /// [`CloudflareError::JsError`] when the poll evaluator threw or a reply
@@ -348,6 +355,7 @@ pub(crate) async fn measure_widget(
 pub(crate) async fn observe(
     session: &SessionHandle,
     selectors: &TurnstileSelectors,
+    ignored: &[String],
 ) -> Result<Option<Observation>, CloudflareError> {
     let Some(tree) = answered(session.call("Page.getFrameTree", json!({})).await)? else {
         return Ok(None);
@@ -374,14 +382,23 @@ pub(crate) async fn observe(
     let poll: Poll = serde_json::from_value(completion_value(&reply)?)
         .map_err(|e| CloudflareError::JsError(format!("invalid poll payload: {e}")))?;
 
+    let is_ignored = |value: &String| !value.is_empty() && ignored.contains(value);
+    let token = poll
+        .tokens
+        .iter()
+        .find(|value| !value.is_empty() && !is_ignored(value))
+        .cloned();
+    let only_ignored_tokens = !poll.tokens.is_empty() && poll.tokens.iter().all(is_ignored);
+
     // A token ends the run, so a token in hand skips the lookup, which could
     // otherwise lose it to a server error.
     let mut widget = None;
-    if poll.token.is_none() {
+    if token.is_none() {
         widget = find_widget(session, &tree, main, &selectors.iframe_src_contains).await?;
     }
     Ok(Some(Observation {
-        token: poll.token,
+        token,
+        only_ignored_tokens,
         light_markers: poll.markers,
         widget,
         document: document.to_string(),
