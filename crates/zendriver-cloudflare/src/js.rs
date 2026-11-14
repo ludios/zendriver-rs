@@ -1,34 +1,19 @@
 //! The JavaScript this crate runs in the page, templated from
 //! [`TurnstileSelectors`].
 //!
-//! Two sources, both in the page's main world:
+//! Both sources run in an isolated world of the main frame (see
+//! `detection::World`), whose built-ins no page script can reach, so the
+//! page sees none of the calls they make:
 //!
 //! - [`poll_expr`], evaluated once per poll tick. It reads the light DOM
 //!   only: the token input and the container, which Turnstile leaves outside
-//!   its shadow root. The widget's `<iframe>` is *not* looked for here — it
-//!   sits in a closed shadow root that no page script can enter, so the
-//!   driver finds it through CDP instead (see `detection`).
-//! - [`MEASURE_FN`], called on that `<iframe>` element once CDP has named
-//!   it.
+//!   its shadow root. The widget's `<iframe>` is not looked for here: it
+//!   sits in a closed shadow root, which no path through the DOM leads
+//!   into, so the driver finds it through CDP instead (see `detection`).
+//! - [`MEASURE_FN`], called on that `<iframe>` element right before a click.
 //!
-//! [`poll_expr`] is composed as *one IIFE*. That is a stealth requirement,
-//! not formatting. `Runtime.evaluate` with no `contextId` runs a classic
-//! script in the page's main world, where a top-level `var foo` becomes a
-//! property of the global object — so an unwrapped evaluator would publish
-//! its locals to the page, names belonging to an automation library sitting
-//! in the same realm as the challenge script. Inside the IIFE they are
-//! ordinary locals. [`MEASURE_FN`] is a function body by construction
-//! (`Runtime.callFunctionOn` takes a function declaration), so it binds
-//! nothing either.
-//!
-//! # JavaScript style
-//! Injected scripts declare with `var` and iterate with indexed loops, never
-//! `for...of`, which enters through the page-redefinable
-//! `Array.prototype[Symbol.iterator]`. This removes one signal and no more:
-//! `document.querySelector`, `getBoundingClientRect` and `getComputedStyle`
-//! are ordinary writable methods, and a page that wraps them sees every call
-//! this crate makes, the selectors it passes included. The convention is
-//! about declarations and iteration only; it is not cover.
+//! [`poll_expr`] is one IIFE, so that its `var`s stay locals rather than
+//! piling up on the world's global object, tick after tick.
 
 use crate::options::TurnstileSelectors;
 
@@ -50,8 +35,9 @@ fn js_string_array(values: &[String]) -> String {
 }
 
 /// The poll evaluator. Returns, in one round-trip:
-/// - `token` — the first non-empty value among
-///   [`token_inputs`](TurnstileSelectors::token_inputs), else null.
+/// - `token` — the first non-empty value of an element matching one of the
+///   [`token_inputs`](TurnstileSelectors::token_inputs), trying the
+///   selectors in order, else null.
 /// - `markers` — true when the light DOM holds the
 ///   [`container`](TurnstileSelectors::container) or a token input.
 /// - `loading` — true while the document is still being parsed
@@ -62,14 +48,19 @@ pub(crate) fn poll_expr(selectors: &TurnstileSelectors) -> String {
     format!(
         r#"(function(){{
     var tokenSelectors = {token_selectors};
-    var input = null;
-    for (var k = 0; k < tokenSelectors.length && !input; k++) {{
-        if (tokenSelectors[k]) input = document.querySelector(tokenSelectors[k]);
+    var token = null;
+    var hasInput = false;
+    for (var k = 0; k < tokenSelectors.length && !token; k++) {{
+        if (!tokenSelectors[k]) continue;
+        var inputs = document.querySelectorAll(tokenSelectors[k]);
+        for (var i = 0; i < inputs.length && !token; i++) {{
+            hasInput = true;
+            if (inputs[i].value) token = inputs[i].value;
+        }}
     }}
-    var token = (input && input.value) ? input.value : null;
     var containerSelector = {container};
     var hasContainer = containerSelector ? !!document.querySelector(containerSelector) : false;
-    return {{ token: token, markers: hasContainer || !!input, loading: document.readyState === "loading" }};
+    return {{ token: token, markers: hasContainer || hasInput, loading: document.readyState === "loading" }};
 }})()"#
     )
 }
@@ -190,119 +181,13 @@ mod tests {
         );
     }
 
-    /// Names every declaration in `src` at `{}` depth 0 that a classic
-    /// script publishes on the page's global object: `var` and *named*
-    /// `function`. Both become enumerable `window` properties (verified on
-    /// Chrome 151); `let` / `const` / `class` are script-scoped and never
-    /// do, so they are not leaks and are not counted. An anonymous
-    /// `function (` — the IIFE wrapper itself — is an expression and binds
-    /// nothing.
-    ///
-    /// Brace counting is only sound because no injected source puts a brace
-    /// inside a string literal. Keep it that way; the alternative is a JS
-    /// parser for a cookie-name-sized job. That includes caller-supplied
-    /// selectors, which is why the fixtures here use quotes and backslashes
-    /// rather than braces. Comment text is scanned like any other, which can
-    /// only ever produce a loud false positive, never a silent pass.
-    fn top_level_page_globals(src: &str) -> Vec<String> {
-        let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
-        let mut found = Vec::new();
-        let mut depth = 0i32;
-        for (i, ch) in src.char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => depth -= 1,
-                _ => {}
-            }
-            if depth != 0 {
-                continue;
-            }
-            // A keyword that is really the tail of a longer identifier
-            // declares nothing: `myvar`, `refunction`.
-            if src[..i].chars().next_back().is_some_and(is_ident) {
-                continue;
-            }
-            for keyword in ["function", "var"] {
-                let Some(rest) = src[i..].strip_prefix(keyword) else {
-                    continue;
-                };
-                // `var` needs a separator to be a declaration. `function`
-                // does not: `function(` is an expression, and the empty-name
-                // check below is what rejects it.
-                if keyword == "var" && !rest.starts_with(char::is_whitespace) {
-                    break;
-                }
-                let name: String = rest
-                    .trim_start()
-                    .chars()
-                    .take_while(|c| is_ident(*c))
-                    .collect();
-                if !name.is_empty() {
-                    found.push(name);
-                }
-                break;
-            }
-        }
-        found
-    }
-
-    /// The leak guard has to be able to fail. Fed the shape it guards
-    /// against — a helper evaluated beside the IIFE rather than inside it —
-    /// it must name the declaration; fed the shipped shape it must stay
-    /// quiet. The `var` case is here because the scan is named for page
-    /// globals, and a top-level `var` is one just as much as a `function`
-    /// is.
+    /// The poll evaluator is one IIFE: nothing it declares outlives the
+    /// tick. `MEASURE_FN` is a bare function declaration, which is what
+    /// `Runtime.callFunctionOn` takes.
     #[test]
-    fn top_level_scan_catches_every_leaked_page_global() {
-        assert_eq!(
-            top_level_page_globals(
-                "function clickableRect(el) { return null; }\n(function(){ return 1; })()"
-            ),
-            vec!["clickableRect".to_string()],
-        );
-        assert_eq!(
-            top_level_page_globals("var input = document.querySelector('input');"),
-            vec!["input".to_string()],
-            "a top-level `var` is a `window` property too"
-        );
-        assert!(
-            top_level_page_globals("(function(){ function nested(){} var local = 1; })()")
-                .is_empty(),
-            "a declaration inside the wrapper is a local, not a global"
-        );
-        // Script-scoped forms never reach `window`, so flagging them would
-        // be a false positive, and a keyword inside a longer identifier is
-        // not a keyword at all.
-        assert!(
-            top_level_page_globals("let a = 1; const b = 2; class C {}\nvarnish.myvar = 3;")
-                .is_empty(),
-        );
-    }
-
-    /// `Runtime.evaluate` with no `contextId` runs a classic script in the
-    /// page's main world, where a top-level `var bar` becomes `window.bar`.
-    /// Every source this crate injects keeps its locals inside a function
-    /// scope.
-    #[test]
-    fn injected_sources_declare_no_page_globals() {
+    fn the_sources_have_the_shapes_their_cdp_calls_take() {
         let poll = poll_expr(&TurnstileSelectors::default());
-        for (name, src) in [
-            ("poll evaluator", poll.as_str()),
-            ("measure function", MEASURE_FN),
-        ] {
-            let leaked = top_level_page_globals(src);
-            assert!(
-                leaked.is_empty(),
-                "{name} publishes {leaked:?} onto the page's global object"
-            );
-        }
-        assert!(
-            poll.starts_with("(function(){") && poll.ends_with("})()"),
-            "the poll evaluator must be exactly one IIFE"
-        );
-        assert!(
-            MEASURE_FN.starts_with("function() {"),
-            "callFunctionOn takes an anonymous function declaration"
-        );
+        assert!(poll.starts_with("(function(){") && poll.ends_with("})()"));
+        assert!(MEASURE_FN.starts_with("function() {"));
     }
 }

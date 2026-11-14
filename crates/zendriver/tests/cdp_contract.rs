@@ -57,6 +57,7 @@ const COMMANDS: &[(&str, Scope)] = &[
     ("DOM.describeNode", P),
     ("DOM.getBoxModel", P),
     ("DOM.getDocument", P),
+    ("DOM.getFrameOwner", P),
     ("DOM.getNodeForLocation", P),
     ("DOM.getOuterHTML", P),
     ("DOM.resolveNode", P),
@@ -137,6 +138,7 @@ const COMMANDS: &[(&str, Scope)] = &[
     ("Target.getBrowserContexts", B),
     ("Target.getTargetInfo", P),
     ("Target.getTargets", B),
+    ("Target.getTargets", P),
     ("Target.setAutoAttach", B),
     ("Target.setAutoAttach", P),
 ];

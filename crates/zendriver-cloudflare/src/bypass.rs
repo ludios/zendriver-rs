@@ -4,19 +4,19 @@
 //! `Tab::cloudflare()` (zendriver crate, feature-gated). The driver runs a
 //! single CDP poll loop that, per tick:
 //!
-//! 1. Observes the page. One main-world evaluator reads the light DOM for
-//!    the clearance token (one of the
-//!    [`token_inputs`](TurnstileSelectors::token_inputs) holding a value)
-//!    and for the container and token-input markers. CDP then finds the
-//!    widget's `<iframe>`, which Turnstile mounts in a *closed* shadow root
-//!    that no page script can enter, and measures it. See
+//! 1. Observes the page. One evaluator, run in an isolated world where the
+//!    page cannot see it, reads the light DOM for the clearance token (one
+//!    of the [`token_inputs`](TurnstileSelectors::token_inputs) holding a
+//!    value) and for the container and token-input markers. CDP then finds
+//!    the widget's `<iframe>`, which Turnstile mounts in a *closed* shadow
+//!    root that no path through the DOM leads into. See
 //!    [`detection`](crate::detection) for how.
 //! 2. Resolves to [`ClearanceOutcome::TokenAcquired`] the first tick a
 //!    non-empty token is observed — including the **invisible Turnstile**
 //!    path, where nothing is clicked and the token is populated directly.
-//! 3. If the widget is a click target (non-zero size and visible), scrolls
-//!    it into view, re-measures it, and clicks the point the
-//!    [`ClickPolicy`] chose inside it — by default
+//! 3. If a click is due and the widget is mounted, scrolls it into view
+//!    and measures it; if it is a click target (non-zero size and visible),
+//!    clicks the point the [`ClickPolicy`] chose inside it — by default
 //!    `bbox.x + bbox.width * 0.07, bbox.y + bbox.height * 0.50`. Up to
 //!    [`ClickPolicy::max_attempts`] clicks are spent, spaced
 //!    [`ClickPolicy::retry_ticks`] ticks apart, so a swallowed first click
@@ -196,9 +196,9 @@ impl<'a> CloudflareBypass<'a> {
     ///
     /// It replaces the click, not the decision to click. The driver still
     /// owns what counts as clickable, and only invokes the handler for a
-    /// widget that cleared that bar twice — once when the poll tick
-    /// measured it, once after the scroll — where the bar is non-zero size
-    /// and not hidden by `visibility` / `display` / `opacity`. A handler
+    /// widget that cleared that bar when measured after the scroll, where
+    /// the bar is non-zero size and not hidden by `visibility` / `display` /
+    /// `opacity`. A handler
     /// installed specifically to reach a hidden or zero-size widget never
     /// runs; that widget needs a different approach entirely.
     ///
@@ -291,6 +291,7 @@ impl<'a> CloudflareBypass<'a> {
         // first found missing since then.
         let mut challenge_document: Option<String> = None;
         let mut markers_gone_since: Option<Instant> = None;
+        let mut world = None;
 
         let mut stall_ticks: u32 = 0;
         let mut warned_stall = false;
@@ -300,7 +301,7 @@ impl<'a> CloudflareBypass<'a> {
             // `None` is a tick on which the page changed under the
             // observation. It says nothing about the challenge, so it decides
             // nothing either.
-            if let Some(seen) = observe(self.session, &self.selectors).await? {
+            if let Some(seen) = observe(self.session, &self.selectors, &mut world).await? {
                 if let Some(token) = seen.token {
                     return Ok(ClearanceOutcome::TokenAcquired(token));
                 }
@@ -332,28 +333,31 @@ impl<'a> CloudflareBypass<'a> {
                 let may_click = clicks < self.click_policy.max_attempts
                     && (clicks == 0 || ticks_since_click >= self.click_policy.retry_ticks);
 
-                match (seen.widget, seen.clickable) {
-                    (Some(node), Some(_)) if may_click => {
-                        // Raw `Input.dispatchMouseEvent` coordinates are
-                        // viewport relative, so a below-the-fold widget must
-                        // be scrolled in and re-measured before the click can
-                        // land on it.
-                        if let Some(bbox) = scroll_widget_into_view(self.session, node).await? {
-                            let target = ClickTarget {
-                                bbox,
-                                x: bbox.x + bbox.width * self.click_policy.x_fraction,
-                                y: bbox.y + bbox.height * self.click_policy.y_fraction,
-                            };
-                            match &self.on_click {
-                                Some(handler) => handler(self.session.clone(), target).await?,
-                                None => click_at(self.session, target.x, target.y).await?,
-                            }
-                            clicks += 1;
-                            ticks_since_click = 0;
-                            clicked = true;
+                // Raw `Input.dispatchMouseEvent` coordinates are viewport
+                // relative, so a below-the-fold widget must be scrolled in and
+                // measured before the click can land on it. Measuring only
+                // here keeps a tick that will not click from touching the
+                // widget at all.
+                let mut widget = None;
+                if may_click {
+                    widget = seen.widget;
+                }
+                if let Some(node) = widget {
+                    let scrolled = scroll_widget_into_view(self.session, node, seen.context);
+                    if let Some(bbox) = scrolled.await? {
+                        let target = ClickTarget {
+                            bbox,
+                            x: bbox.x + bbox.width * self.click_policy.x_fraction,
+                            y: bbox.y + bbox.height * self.click_policy.y_fraction,
+                        };
+                        match &self.on_click {
+                            Some(handler) => handler(self.session.clone(), target).await?,
+                            None => click_at(self.session, target.x, target.y).await?,
                         }
+                        clicks += 1;
+                        ticks_since_click = 0;
+                        clicked = true;
                     }
-                    _ => {}
                 }
             }
 
@@ -414,6 +418,7 @@ mod tests {
 
     use super::*;
     use crate::testutil::{CMD_BUDGET, MOUSE, Page, SCROLL, polls, presses, rect, saw, serve};
+    use zendriver_transport::CallError;
     use zendriver_transport::testing::{LogCapture, MockConnection};
 
     /// The token a fake page ends a run with.
@@ -478,8 +483,8 @@ mod tests {
     const DEFAULT_X: f64 = 100.0 + 80.0 * 0.07;
 
     /// The stall hint must fire for the run it is most needed on: a widget
-    /// that stays mounted and clickable where it is, but stops being a click
-    /// target once scrolled into view, so no click ever lands.
+    /// that stays mounted but never measures as a click target, so no click
+    /// ever lands.
     #[tokio::test]
     async fn stalled_unmeasurable_widget_emits_the_stealth_hint() {
         /// Stalled ticks to serve before ending the run. The hint fires on
@@ -502,7 +507,7 @@ mod tests {
             if tick >= STALLED_TICKS {
                 Page::challenge().token(END_TOKEN)
             } else {
-                Page::challenge().widget(widget_rect(), Value::Null)
+                Page::challenge().widget_at(Value::Null)
             }
         };
         let (outcome, calls) = tokio::join!(driver, serve(&mut mock, page));
@@ -566,27 +571,22 @@ mod tests {
         conn.shutdown();
     }
 
-    /// Interactive happy path: the widget sits below the fold, gets scrolled
-    /// into view, and the click lands at (7% × width, 50% × height) of the
-    /// **post-scroll** rect; the next poll sees the token.
+    /// Interactive happy path: the widget is scrolled into view, measured
+    /// there, and clicked at (7% × width, 50% × height) of that rect; the
+    /// next poll sees the token.
     #[tokio::test]
     async fn scrolls_the_widget_into_view_then_clicks_its_post_scroll_rect() {
-        // After scrolling it sits at (100, 300), 60×40 → the click belongs
-        // at (100 + 60 * 0.07, 300 + 40 * 0.5) = (104.2, 320). The pre-scroll
-        // rect would put it at y = 2020.
         let (outcome, calls) = run(
             |b| b,
             |tick| match tick {
-                0 => Page::challenge().widget(
-                    rect(100.0, 2000.0, 60.0, 40.0),
-                    rect(100.0, 300.0, 60.0, 40.0),
-                ),
+                0 => Page::challenge().widget_at(rect(100.0, 300.0, 60.0, 40.0)),
                 _ => Page::challenge().token("TOKEN_XYZ"),
             },
         )
         .await;
 
         assert_eq!(token_of(outcome), "TOKEN_XYZ");
+        // (100 + 60 * 0.07, 300 + 40 * 0.5)
         assert_eq!(presses(&calls), vec![(0, (100.0 + 60.0 * 0.07, 320.0))]);
         let scroll = calls.iter().position(|c| c.label == SCROLL);
         let first_mouse = calls.iter().position(|c| c.label.starts_with(MOUSE));
@@ -594,9 +594,15 @@ mod tests {
             scroll.is_some() && scroll < first_mouse,
             "a click must be preceded by a scroll-into-view; observed {calls:?}"
         );
-        let poll = &calls[0].params["expression"];
+        let poll = calls
+            .iter()
+            .find(|c| c.label == "Runtime.evaluate")
+            .unwrap();
         assert!(
-            poll.as_str().unwrap().contains("cf-turnstile-response"),
+            poll.params["expression"]
+                .as_str()
+                .unwrap()
+                .contains("cf-turnstile-response"),
             "the poll evaluator should read the cf-turnstile-response input"
         );
     }
@@ -614,9 +620,7 @@ mod tests {
             |b| b,
             |tick| match tick {
                 t if t < EMPTY_TICKS => Page::challenge(),
-                EMPTY_TICKS => {
-                    Page::challenge().widget(rect(100.0, 3000.0, 80.0, 40.0), widget_rect())
-                }
+                EMPTY_TICKS => Page::challenge().widget_at(widget_rect()),
                 _ => Page::challenge().token(END_TOKEN),
             },
         )
@@ -654,6 +658,10 @@ mod tests {
 
         assert_eq!(token_of(outcome), "INVISIBLE");
         assert!(!saw(&calls, MOUSE), "the invisible path never clicks");
+        assert!(
+            !saw(&calls, "Target.getTargets"),
+            "a token in hand ends the tick before the widget lookup"
+        );
     }
 
     /// Markers present but no widget yet (invisible Turnstile still
@@ -865,6 +873,7 @@ mod tests {
 
         assert!(!saw(&calls, MOUSE), "max_attempts: 0 must not click");
         assert!(!saw(&calls, SCROLL), "nor scroll the page");
+        assert!(!saw(&calls, "DOM.resolveNode"), "nor touch the widget");
         match outcome_of(fut).await.unwrap() {
             ClearanceOutcome::TimedOut { saw_challenge } => assert!(saw_challenge),
             other => panic!("expected TimedOut, got {other:?}"),
@@ -947,7 +956,7 @@ mod tests {
                 })
             },
             |tick| match tick {
-                0 => Page::challenge().widget(rect(100.0, 900.0, 80.0, 40.0), widget_rect()),
+                0 => Page::challenge().widget_at(widget_rect()),
                 _ => Page::challenge().token(END_TOKEN),
             },
         )
@@ -1003,7 +1012,11 @@ mod tests {
         .await;
 
         assert_eq!(token_of(outcome), END_TOKEN);
-        let poll = calls[0].params["expression"].as_str().unwrap();
+        let poll = calls
+            .iter()
+            .find(|c| c.label == "Runtime.evaluate")
+            .unwrap();
+        let poll = poll.params["expression"].as_str().unwrap();
         assert!(poll.contains(".alien-widget") && poll.contains("alien-token"));
         assert!(
             !poll.contains("cf-turnstile"),
@@ -1012,6 +1025,46 @@ mod tests {
         assert!(
             !saw(&calls, "DOM.getFrameOwner"),
             "a frame at the default host matched a custom marker"
+        );
+    }
+
+    /// The poll and the measurement run in an isolated world, out of the
+    /// page's sight (the fake page asserts which world each call names), and
+    /// a world is made once per document: again after a navigation, not on
+    /// every tick.
+    #[tokio::test]
+    async fn one_isolated_world_serves_each_document() {
+        let (outcome, calls) = run(
+            |b| b,
+            |tick| match tick {
+                0 => Page::challenge(),
+                1 => Page::challenge().widget_at(widget_rect()),
+                2 | 3 => Page::challenge().document("D2"),
+                _ => Page::challenge().document("D2").token(END_TOKEN),
+            },
+        )
+        .await;
+
+        assert_eq!(token_of(outcome), END_TOKEN);
+        let worlds = calls
+            .iter()
+            .filter(|c| c.label == "Page.createIsolatedWorld")
+            .count();
+        assert_eq!(worlds, 2, "one world for D1, one for D2");
+        assert_eq!(presses(&calls).len(), 1);
+    }
+
+    /// Only a server error reads as the page changing under the call. Any
+    /// other error answer — here, a Chrome without the method — fails the
+    /// run, rather than leaving it to time out as if the page had no gate.
+    #[tokio::test]
+    async fn an_error_answer_no_navigation_explains_fails_the_run() {
+        let (outcome, _) = run(|b| b, |_| Page::challenge().refusing_the_poll()).await;
+
+        let err = outcome.expect_err("the refusal must surface");
+        assert!(
+            matches!(err, CloudflareError::Call(CallError::Rpc(-32601, ..))),
+            "got {err}"
         );
     }
 }

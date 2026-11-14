@@ -1,11 +1,12 @@
 //! Finding and measuring the Turnstile widget.
 //!
 //! Turnstile mounts its `<iframe>` inside a *closed* shadow root —
-//! Cloudflare's own full-page challenge does — and no script in the page
-//! can enter one. So the widget is found through CDP, which sees frames
-//! rather than elements. The widget is a frame whose URL contains
-//! [`iframe_src_contains`](TurnstileSelectors::iframe_src_contains), held
-//! directly by the main frame, and it is listed in one of two places:
+//! Cloudflare's own full-page challenge does — which a script can reach
+//! only through the reference `attachShadow` handed to the script that made
+//! it, never by walking the DOM. So the widget is found through CDP, which
+//! sees frames rather than elements. The widget is a frame whose URL
+//! contains [`iframe_src_contains`](TurnstileSelectors::iframe_src_contains),
+//! held directly by the main frame, and it is listed in one of two places:
 //!
 //! - `Target.getTargets`, which lists a frame running in a process of its
 //!   own as an `"iframe"` target, along with its parent frame's id. The
@@ -20,12 +21,16 @@
 //! viewport, and that is the viewport a direct child's `<iframe>` is
 //! measured in.
 //!
+//! Everything this crate runs in the page runs in an isolated world (see
+//! `World`) rather than in the page's main world, where Cloudflare's
+//! challenge script runs and can watch what is called.
+//!
 //! While the challenge is watched, the page can change under any one of
-//! these calls: Cloudflare's full-page challenge navigates away once it is
+//! these calls: Cloudflare's full-page challenge navigates away when it is
 //! passed, and a widget can be removed between two calls. Chrome then
-//! answers a call with an error rather than failing it, and [`observe`]
-//! reports that tick as `None`, to be polled again, instead of failing the
-//! run.
+//! answers the call with a server error rather than a result, and an
+//! observation that gets one reports nothing, to be made again on the next
+//! tick, instead of failing the run.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -55,48 +60,21 @@ pub struct BoundingBox {
     pub height: f64,
 }
 
-/// The object group of the remote objects that measuring creates, so that
-/// one `Runtime.releaseObjectGroup` frees them all.
-const OBJECT_GROUP: &str = "zendriver-cloudflare";
+/// The JSON-RPC code of Chrome's server errors, which is what it answers
+/// with when the context, node, object or frame a call names went away
+/// under it.
+const SERVER_ERROR: i32 = -32000;
 
-/// What one poll tick saw.
-#[derive(Debug)]
-pub(crate) struct Observation {
-    /// The non-empty value held by the first of the
-    /// [`token_inputs`](TurnstileSelectors::token_inputs) to match.
-    pub token: Option<String>,
-    /// The light DOM holds the
-    /// [`container`](TurnstileSelectors::container) or a token input.
-    pub light_markers: bool,
-    /// The widget's `<iframe>`, as a backend node id, when one is mounted.
-    pub widget: Option<i64>,
-    /// The widget's viewport rect, when the widget is a click target.
-    pub clickable: Option<BoundingBox>,
-    /// The `loaderId` of the main frame's document. It changes when a
-    /// navigation replaces the document.
-    pub document: String,
-    /// The document is still being parsed.
-    pub loading: bool,
-}
-
-impl Observation {
-    /// Whether any marker at all is on the page: the container, a token
-    /// input, or the widget.
-    pub fn has_markers(&self) -> bool {
-        self.light_markers || self.widget.is_some()
-    }
-}
-
-/// `result`, with a CDP error answer turned into `Ok(None)`.
+/// `result`, with a server-error answer turned into `Ok(None)`.
 ///
-/// Chrome answering with an error means the page changed under the call
-/// (see the module docs), which is a tick with nothing to report. Every
-/// other failure — a closed connection, a detached session, a call that ran
-/// out of time — still fails.
+/// A server error here means the page changed under the call (see the
+/// module docs), which is a tick with nothing to report. Every other
+/// failure still fails: an unknown method or invalid parameters, a closed
+/// connection, a detached session, a call that ran out of time.
 fn answered<T>(result: Result<T, CallError>) -> Result<Option<T>, CallError> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(CallError::Rpc(..)) => Ok(None),
+        Err(CallError::Rpc(SERVER_ERROR, ..)) => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -112,6 +90,94 @@ fn completion_value(reply: &Value) -> Result<Value, CloudflareError> {
         return Err(CloudflareError::JsError(message));
     }
     Ok(reply["result"]["value"].clone())
+}
+
+/// An isolated world in the main frame's current document: where this
+/// crate's scripts run.
+///
+/// Cloudflare's challenge script runs in the page's main world, where it
+/// can wrap any built-in — `querySelector`, `getBoundingClientRect` — and
+/// see who calls it. Observed live on Chrome 157 (November 2026): while
+/// the poll queried the token input from the main world, Cloudflare took
+/// every click and then served its challenge again; with the poll in an
+/// isolated world, the first click passed. A script in an isolated world
+/// has built-ins of its own, which no page script can reach.
+///
+/// A world belongs to one document, so a new one is made when a navigation
+/// replaces the document.
+#[derive(Debug)]
+pub(crate) struct World {
+    /// The `loaderId` of the document the world is in.
+    document: String,
+    /// The world's execution context id.
+    context: i64,
+}
+
+/// The name of the isolated worlds this crate makes.
+const WORLD_NAME: &str = "zendriver-cloudflare";
+
+/// The execution context id of an isolated world in `document` (a
+/// `loaderId`) of the main frame `main`: the one in `cached` if it was made
+/// for `document`, else a new one, which replaces it. `Ok(None)` when the
+/// page changed under the call.
+async fn world(
+    session: &SessionHandle,
+    main: &str,
+    document: &str,
+    cached: &mut Option<World>,
+) -> Result<Option<i64>, CloudflareError> {
+    if let Some(world) = cached.as_ref().filter(|w| w.document == document) {
+        return Ok(Some(world.context));
+    }
+    let made = session
+        .call(
+            "Page.createIsolatedWorld",
+            json!({ "frameId": main, "worldName": WORLD_NAME }),
+        )
+        .await;
+    let Some(made) = answered(made)? else {
+        return Ok(None);
+    };
+    let Some(context) = made["executionContextId"].as_i64() else {
+        return Err(CloudflareError::JsError(format!(
+            "Page.createIsolatedWorld named no context: {made}"
+        )));
+    };
+    *cached = Some(World {
+        document: document.to_string(),
+        context,
+    });
+    Ok(Some(context))
+}
+
+/// What one poll tick saw.
+#[derive(Debug)]
+pub(crate) struct Observation {
+    /// The non-empty value held by the first of the
+    /// [`token_inputs`](TurnstileSelectors::token_inputs) to have one.
+    pub token: Option<String>,
+    /// The light DOM holds the
+    /// [`container`](TurnstileSelectors::container) or a token input.
+    pub light_markers: bool,
+    /// The widget's `<iframe>`, as a backend node id, when one is mounted.
+    /// Not looked for once a token has shown.
+    pub widget: Option<i64>,
+    /// The `loaderId` of the main frame's document. It changes when a
+    /// navigation replaces the document.
+    pub document: String,
+    /// The document is still being parsed.
+    pub loading: bool,
+    /// The isolated world the observation ran its script in, for the
+    /// measurement before a click to run in too.
+    pub context: i64,
+}
+
+impl Observation {
+    /// Whether any marker at all is on the page: the container, a token
+    /// input, or the widget.
+    pub fn has_markers(&self) -> bool {
+        self.light_markers || self.widget.is_some()
+    }
 }
 
 /// The poll evaluator's reply.
@@ -142,6 +208,10 @@ fn main_frame(tree: &Value) -> Result<(&str, &str), CloudflareError> {
 /// (in-process frames) and a `Target.getTargets` reply (frames in a process
 /// of their own). An empty `marker` matches no frame, since every URL
 /// contains the empty string.
+///
+/// Chrome before 141 gives a target no `parentFrameId`. Such a target is a
+/// candidate too, and `DOM.getFrameOwner` then turns away one that is not
+/// in this page.
 fn widget_frames(tree: &Value, targets: &Value, main: &str, marker: &str) -> Vec<String> {
     if marker.is_empty() {
         return Vec::new();
@@ -163,8 +233,9 @@ fn widget_frames(tree: &Value, targets: &Value, main: &str, marker: &str) -> Vec
         }
     }
     for target in targets["targetInfos"].as_array().into_iter().flatten() {
+        let parent = &target["parentFrameId"];
         if target["type"] == "iframe"
-            && target["parentFrameId"] == main
+            && (parent.is_null() || parent == main)
             && target["url"]
                 .as_str()
                 .is_some_and(|url| url.contains(marker))
@@ -177,43 +248,61 @@ fn widget_frames(tree: &Value, targets: &Value, main: &str, marker: &str) -> Vec
     frames
 }
 
-/// The `loaderId` of the main frame's document, and the widget's `<iframe>`
-/// as a backend node id when one is mounted (see the module docs for where
-/// it is looked for). `Ok(None)` when the page changed under the lookup.
+/// The widget's `<iframe>`, as a backend node id, when one is mounted in
+/// the page whose `Page.getFrameTree` reply is `tree` and whose main frame
+/// is `main` (see the module docs for where it is looked for).
 async fn find_widget(
     session: &SessionHandle,
+    tree: &Value,
+    main: &str,
     marker: &str,
-) -> Result<Option<(String, Option<i64>)>, CloudflareError> {
-    let Some(tree) = answered(session.call("Page.getFrameTree", json!({})).await)? else {
-        return Ok(None);
-    };
-    let Some(targets) = answered(session.call("Target.getTargets", json!({})).await)? else {
-        return Ok(None);
-    };
-    let (main, document) = main_frame(&tree)?;
-    for frame in widget_frames(&tree, &targets, main, marker) {
+) -> Result<Option<i64>, CloudflareError> {
+    // An explicit filter, or Chrome applies whatever discovery filter the
+    // session was given, which can leave the iframes out.
+    let filter = json!({ "filter": [{ "type": "iframe" }] });
+    let targets = session.call("Target.getTargets", filter).await?;
+    for frame in widget_frames(tree, &targets, main, marker) {
         let owner = session
             .call("DOM.getFrameOwner", json!({ "frameId": frame }))
             .await;
-        // An error answer here is that frame having gone since the lists were
-        // taken; another candidate may still be there.
+        // A server error here is that frame having gone since the lists were
+        // taken, or belonging to another page; another candidate may still
+        // be there.
         if let Some(node) = answered(owner)?.and_then(|o| o["backendNodeId"].as_i64()) {
-            return Ok(Some((document.to_string(), Some(node))));
+            return Ok(Some(node));
         }
     }
-    Ok(Some((document.to_string(), None)))
+    Ok(None)
 }
 
-/// `node`'s viewport rect when it is a click target (see
-/// [`js::MEASURE_FN`]); `Ok(None)` when it is not one, or is gone.
-pub(crate) async fn measure_widget(
+/// Scroll the widget `node` into view, unless it is already fully in view,
+/// then return its viewport rect when it is a click target (see
+/// [`js::MEASURE_FN`], run in the isolated world `context`); `Ok(None)`
+/// when it is not one, or is gone.
+///
+/// The scroll is CDP's `DOM.scrollIntoViewIfNeeded`, which is instant
+/// whatever `scroll-behavior` the page sets, so the measurement reads where
+/// the widget ended up. It calls no page-overridable method, although the
+/// page still sees a `scroll` event and its new scroll position.
+pub(crate) async fn scroll_widget_into_view(
     session: &SessionHandle,
     node: i64,
+    context: i64,
 ) -> Result<Option<BoundingBox>, CloudflareError> {
+    let scrolled = session
+        .call(
+            "DOM.scrollIntoViewIfNeeded",
+            json!({ "backendNodeId": node }),
+        )
+        .await;
+    // A server error is a widget gone or without a layout box, which the
+    // measurement reports as `None` in its own right.
+    answered(scrolled)?;
+
     let resolved = session
         .call(
             "DOM.resolveNode",
-            json!({ "backendNodeId": node, "objectGroup": OBJECT_GROUP }),
+            json!({ "backendNodeId": node, "executionContextId": context }),
         )
         .await;
     let Some(object) = answered(resolved)? else {
@@ -232,12 +321,10 @@ pub(crate) async fn measure_widget(
             }),
         )
         .await;
-    session
-        .call(
-            "Runtime.releaseObjectGroup",
-            json!({ "objectGroup": OBJECT_GROUP }),
-        )
-        .await?;
+    let released = session
+        .call("Runtime.releaseObject", json!({ "objectId": object_id }))
+        .await;
+    answered(released)?;
     let Some(reply) = answered(measured)? else {
         return Ok(None);
     };
@@ -250,45 +337,38 @@ pub(crate) async fn measure_widget(
         .map_err(|e| CloudflareError::JsError(format!("invalid widget rect: {e}")))
 }
 
-/// Scroll `node` into view, centred and instantly, unless it is already
-/// fully in view; then measure it as [`measure_widget`] does.
-///
-/// The scroll is CDP's (`DOM.scrollIntoViewIfNeeded`), so no script in the
-/// page sees a `scrollIntoView` call, and no `scroll-behavior: smooth` on
-/// the page turns it into an animation that the measurement would read
-/// halfway through.
-pub(crate) async fn scroll_widget_into_view(
-    session: &SessionHandle,
-    node: i64,
-) -> Result<Option<BoundingBox>, CloudflareError> {
-    let scrolled = session
-        .call(
-            "DOM.scrollIntoViewIfNeeded",
-            json!({ "backendNodeId": node }),
-        )
-        .await;
-    // An error answer is a widget gone or without a layout box, which the
-    // measurement reports as `None` in its own right.
-    answered(scrolled)?;
-    measure_widget(session, node).await
-}
-
 /// Observe the page once: the token, the markers, the widget and the
-/// document. `Ok(None)` when the page changed under the observation, which
-/// says nothing about the challenge either way.
+/// document, running the poll evaluator in the isolated world in `world`
+/// (made, or made again for a new document, as needed). `Ok(None)` when the
+/// page changed under the observation, which says nothing about the
+/// challenge either way.
 ///
 /// # Errors
-/// [`CloudflareError::JsError`] when the poll evaluator threw, and
-/// [`CloudflareError::Call`] when a CDP call failed rather than being
-/// answered.
+/// [`CloudflareError::JsError`] when the poll evaluator threw or a reply
+/// could not be decoded, and [`CloudflareError::Call`] when a CDP call
+/// failed rather than being answered.
 pub(crate) async fn observe(
     session: &SessionHandle,
     selectors: &TurnstileSelectors,
+    world: &mut Option<World>,
 ) -> Result<Option<Observation>, CloudflareError> {
+    let Some(tree) = answered(session.call("Page.getFrameTree", json!({})).await)? else {
+        return Ok(None);
+    };
+    let (main, document) = main_frame(&tree)?;
+    // The world was made in `document`, so the evaluator reads `document`, or
+    // answers with a server error if a navigation replaced it meanwhile.
+    let Some(context) = self::world(session, main, document, world).await? else {
+        return Ok(None);
+    };
     let evaluated = session
         .call(
             "Runtime.evaluate",
-            json!({ "expression": js::poll_expr(selectors), "returnByValue": true }),
+            json!({
+                "expression": js::poll_expr(selectors),
+                "contextId": context,
+                "returnByValue": true,
+            }),
         )
         .await;
     let Some(reply) = answered(evaluated)? else {
@@ -297,21 +377,19 @@ pub(crate) async fn observe(
     let poll: Poll = serde_json::from_value(completion_value(&reply)?)
         .map_err(|e| CloudflareError::JsError(format!("invalid poll payload: {e}")))?;
 
-    let Some((document, widget)) = find_widget(session, &selectors.iframe_src_contains).await?
-    else {
-        return Ok(None);
-    };
-    let mut clickable = None;
-    if let Some(node) = widget {
-        clickable = measure_widget(session, node).await?;
+    // A token ends the run, so a token in hand skips the lookup, which could
+    // otherwise lose it to a server error.
+    let mut widget = None;
+    if poll.token.is_none() {
+        widget = find_widget(session, &tree, main, &selectors.iframe_src_contains).await?;
     }
     Ok(Some(Observation {
         token: poll.token,
         light_markers: poll.markers,
         widget,
-        clickable,
-        document,
+        document: document.to_string(),
         loading: poll.loading,
+        context,
     }))
 }
 
@@ -320,13 +398,22 @@ impl CloudflareBypass<'_> {
     /// a frame whose URL contains this driver's
     /// [`iframe_src_contains`](TurnstileSelectors::iframe_src_contains),
     /// held directly by the main frame, in a shadow root (closed ones
-    /// included) or not.
+    /// included) or not. `false` too when the page was between documents.
     ///
     /// # Errors
-    /// [`CloudflareError::Call`] when a CDP call failed.
+    /// [`CloudflareError::Call`] when a CDP call failed, and
+    /// [`CloudflareError::JsError`] when Chrome's frame tree named no main
+    /// frame.
     pub async fn is_challenge_present(&self) -> Result<bool, CloudflareError> {
-        let found = find_widget(self.session, &self.selectors.iframe_src_contains).await?;
-        Ok(found.is_some_and(|(_, widget)| widget.is_some()))
+        let tree = self.session.call("Page.getFrameTree", json!({})).await;
+        let Some(tree) = answered(tree)? else {
+            return Ok(false);
+        };
+        let (main, _) = main_frame(&tree)?;
+        let marker = &self.selectors.iframe_src_contains;
+        Ok(find_widget(self.session, &tree, main, marker)
+            .await?
+            .is_some())
     }
 }
 
@@ -337,6 +424,8 @@ mod tests {
 
     const MARKER: &str = "challenges.cloudflare.com";
 
+    /// A `Page.getFrameTree` reply: main frame `MAIN` on document `DOC1`,
+    /// with in-process child frames given as `(frame id, URL)` pairs.
     fn tree(children: &[(&str, &str)]) -> Value {
         let children: Vec<Value> = children
             .iter()
@@ -350,6 +439,7 @@ mod tests {
         })
     }
 
+    /// A `Target.getTargets` reply listing `infos`.
     fn targets(infos: &[Value]) -> Value {
         json!({ "targetInfos": infos })
     }
@@ -381,10 +471,12 @@ mod tests {
             json!({ "type": "iframe", "targetId": "OTHER_TAB", "parentFrameId": "ELSEWHERE", "url": format!("https://{MARKER}/b") }),
             json!({ "type": "page", "targetId": "PAGE", "url": format!("https://{MARKER}/c") }),
             json!({ "type": "iframe", "targetId": "ADS", "parentFrameId": "MAIN", "url": "https://ads.example/" }),
+            // Chrome before 141 names no parent: `DOM.getFrameOwner` decides.
+            json!({ "type": "iframe", "targetId": "OLD_CHROME", "url": format!("https://{MARKER}/d") }),
         ];
         assert_eq!(
             widget_frames(&tree(&[]), &targets(&infos), "MAIN", MARKER),
-            vec!["MINE".to_string()]
+            vec!["MINE".to_string(), "OLD_CHROME".to_string()]
         );
     }
 

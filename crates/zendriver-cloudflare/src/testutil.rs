@@ -55,10 +55,9 @@ pub(crate) const WIDGET_NODE: i64 = 42;
 pub(crate) enum Widget {
     /// No widget is mounted.
     Absent,
-    /// A widget is mounted. It measures as `before` until it is scrolled
-    /// into view, and as `after` from then on in the same tick. Either is
-    /// `Value::Null` for a widget that is not a click target.
-    Mounted { before: Value, after: Value },
+    /// A widget is mounted, and measures as this rect once scrolled into
+    /// view: `Value::Null` for a widget that is not a click target.
+    Mounted(Value),
 }
 
 /// What the fake page shows during one poll tick.
@@ -76,9 +75,9 @@ pub(crate) struct Page {
     pub document: &'static str,
     /// The document is still being parsed.
     pub loading: bool,
-    /// The page is between documents, so Chrome answers the poll evaluator
-    /// with an error.
-    pub between_documents: bool,
+    /// The error Chrome answers the poll evaluator with, as a JSON-RPC code
+    /// and message, instead of a result.
+    pub poll_error: Option<(i32, &'static str)>,
 }
 
 impl Page {
@@ -92,20 +91,15 @@ impl Page {
             out_of_process: false,
             document: "D1",
             loading: false,
-            between_documents: false,
+            poll_error: None,
         }
     }
 
-    /// The same page with a widget that measures `before`, and `after` once
-    /// scrolled into view.
-    pub fn widget(mut self, before: Value, after: Value) -> Self {
-        self.widget = Widget::Mounted { before, after };
+    /// The same page with a widget that measures `at` once scrolled into
+    /// view.
+    pub fn widget_at(mut self, at: Value) -> Self {
+        self.widget = Widget::Mounted(at);
         self
-    }
-
-    /// The same page with a widget at `at` that scrolling does not move.
-    pub fn widget_at(self, at: Value) -> Self {
-        self.widget(at.clone(), at)
     }
 
     pub fn token(mut self, token: &'static str) -> Self {
@@ -134,19 +128,40 @@ impl Page {
         self
     }
 
+    /// The same page while a navigation replaces it: Chrome answers the poll
+    /// evaluator with a server error.
     pub fn between_documents(mut self) -> Self {
-        self.between_documents = true;
+        self.poll_error = Some((-32000, "Cannot find context with specified id"));
         self
     }
 
-    fn reply(&self, method: &str, params: &Value, scrolled: bool) -> Value {
-        let mounted = matches!(self.widget, Widget::Mounted { .. });
+    /// The same page in a Chrome that answers the poll evaluator with a
+    /// non-server error, which no navigation explains.
+    pub fn refusing_the_poll(mut self) -> Self {
+        self.poll_error = Some((-32601, "'Runtime.evaluate' wasn't found"));
+        self
+    }
+
+    /// Chrome's reply to `method` with `params`, on this page, when the
+    /// isolated world made last has context id `world` and the widget was
+    /// `scrolled` into view earlier in the tick. Asserts that the poll and
+    /// the measurement run in that world, and that the widget is measured
+    /// only after a scroll.
+    fn reply(&self, method: &str, params: &Value, world: i64, scrolled: bool) -> Value {
+        let mounted = matches!(self.widget, Widget::Mounted(_));
         match method {
-            "Runtime.evaluate" => json!({ "result": { "type": "object", "value": {
+            "Page.createIsolatedWorld" => {
+                assert_eq!(params["frameId"], "MAIN");
+                json!({ "executionContextId": world })
+            }
+            "Runtime.evaluate" => {
+                assert_eq!(params["contextId"], world, "the poll ran outside the world");
+                json!({ "result": { "type": "object", "value": {
                 "token": self.token,
                 "markers": self.light_markers,
                 "loading": self.loading,
-            } } }),
+            } } })
+            }
             "Page.getFrameTree" => {
                 let mut children = Vec::new();
                 if mounted && !self.out_of_process {
@@ -158,6 +173,7 @@ impl Page {
                 } })
             }
             "Target.getTargets" => {
+                assert_eq!(params["filter"][0]["type"], "iframe");
                 let mut infos = vec![
                     json!({ "type": "page", "targetId": "MAIN", "url": "https://site.example/" }),
                 ];
@@ -174,15 +190,22 @@ impl Page {
             }
             "DOM.resolveNode" => {
                 assert_eq!(params["backendNodeId"], WIDGET_NODE);
+                assert_eq!(
+                    params["executionContextId"], world,
+                    "measured outside the world"
+                );
+                assert!(
+                    scrolled,
+                    "measured the widget before scrolling it into view"
+                );
                 json!({ "object": { "type": "object", "objectId": "WIDGET_OBJECT" } })
             }
             "Runtime.callFunctionOn" => {
                 assert_eq!(params["objectId"], "WIDGET_OBJECT");
-                let Widget::Mounted { before, after } = &self.widget else {
+                let Widget::Mounted(at) = &self.widget else {
                     panic!("measured a widget the page does not have");
                 };
-                let value = if scrolled { after } else { before };
-                json!({ "result": { "type": "object", "value": value } })
+                json!({ "result": { "type": "object", "value": at } })
             }
             _ => json!({}),
         }
@@ -192,8 +215,8 @@ impl Page {
 /// One CDP command the driver sent, with the poll tick it belongs to.
 #[derive(Debug, Clone)]
 pub(crate) struct Call {
-    /// The poll tick: each `Runtime.evaluate` (the poll evaluator) opens
-    /// one, and the commands after it belong to it.
+    /// The poll tick: each `Page.getFrameTree` (a tick's first command)
+    /// opens one, and the commands after it belong to it.
     pub tick: usize,
     /// The method, with the event `type` appended for mouse events —
     /// `Input.dispatchMouseEvent(mousePressed)` — so that a test can count
@@ -221,10 +244,12 @@ pub(crate) async fn serve(mock: &mut MockConnection, page: impl Fn(usize) -> Pag
     let mut tick = 0usize;
     let mut current = page(0);
     let mut scrolled = false;
+    // Context id of the isolated world made last; 0 before the first.
+    let mut world = 0;
 
     while let Some((method, id)) = mock.recv_cmd_timeout(DRAIN_BUDGET).await {
         let params = mock.last_sent()["params"].clone();
-        if method == "Runtime.evaluate" {
+        if method == "Page.getFrameTree" {
             tick = polls;
             polls += 1;
             current = page(tick);
@@ -232,6 +257,9 @@ pub(crate) async fn serve(mock: &mut MockConnection, page: impl Fn(usize) -> Pag
         }
         if method == SCROLL {
             scrolled = true;
+        }
+        if method == "Page.createIsolatedWorld" {
+            world += 1;
         }
         let mut label = method.clone();
         if method == MOUSE {
@@ -242,12 +270,11 @@ pub(crate) async fn serve(mock: &mut MockConnection, page: impl Fn(usize) -> Pag
             label,
             params: params.clone(),
         });
-        if method == "Runtime.evaluate" && current.between_documents {
-            mock.reply_err(id, -32000, "Cannot find default execution context")
-                .await;
+        if let (true, Some((code, message))) = (method == "Runtime.evaluate", current.poll_error) {
+            mock.reply_err(id, code, message).await;
             continue;
         }
-        mock.reply(id, current.reply(&method, &params, scrolled))
+        mock.reply(id, current.reply(&method, &params, world, scrolled))
             .await;
     }
     calls
@@ -257,7 +284,7 @@ pub(crate) async fn serve(mock: &mut MockConnection, page: impl Fn(usize) -> Pag
 pub(crate) fn polls(calls: &[Call]) -> usize {
     calls
         .iter()
-        .filter(|call| call.label == "Runtime.evaluate")
+        .filter(|call| call.label == "Page.getFrameTree")
         .count()
 }
 

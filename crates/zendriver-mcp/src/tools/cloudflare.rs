@@ -315,6 +315,7 @@ mod tests {
                     "frame": { "id": "MAIN", "loaderId": "D1" },
                     "childFrames": [{ "frame": { "id": "W", "url": "https://gate.alien.invalid/w" } }],
                 } }),
+                "Page.createIsolatedWorld" => json!({ "executionContextId": 1 }),
                 "Target.getTargets" => json!({ "targetInfos": [] }),
                 "DOM.getFrameOwner" => json!({ "backendNodeId": 7 }),
                 "DOM.resolveNode" => json!({ "object": { "objectId": "O" } }),
