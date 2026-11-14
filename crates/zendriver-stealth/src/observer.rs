@@ -228,7 +228,10 @@ fn headless_screen_switches(screen: &ScreenSpec) -> Result<Vec<String>, StealthE
 /// another renderer process than its page's, where the overrides and the
 /// script of the page's session don't apply. (An iframe in its page's process
 /// isn't a target; the page's setup covers it.) Workers and worklets get no
-/// setup.
+/// setup of their own. But a timezone override applies to its whole renderer
+/// process, so a worker reads the timezone that a page or iframe in its
+/// process was given, else the timezone that Chrome started in (see
+/// [`timezone`](Self::timezone)).
 #[derive(Debug)]
 pub struct StealthObserver {
     profile: StealthProfile,
