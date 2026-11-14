@@ -94,13 +94,13 @@ const GUARDED: &str = r#"<!doctype html>
 <p>guarded content</p>"#;
 
 /// A site's own page that adds a Turnstile widget by script a second after
-/// it has loaded, as a page that asks its server first whether the visitor
-/// needs a challenge does. Checking the box fills in the token.
+/// its button is clicked, as a form that asks its server whether the
+/// visitor needs a challenge does. Checking the box fills in the token.
 const LATE: &str = r#"<!doctype html>
 <title>Sign up</title>
-<form id="form"></form>
+<form id="form"><button type="button" id="submit">Sign up</button></form>
 <script>
-  setTimeout(() => {
+  document.getElementById("submit").addEventListener("click", () => setTimeout(() => {
     const host = document.createElement("div");
     const input = document.createElement("input");
     input.type = "hidden";
@@ -113,7 +113,7 @@ const LATE: &str = r#"<!doctype html>
     addEventListener("message", (event) => {
       if (event.data && event.data.passed === true) input.value = "late-token";
     });
-  }, 1000);
+  }, 1000));
 </script>"#;
 
 fn routes() -> Router {
@@ -232,8 +232,8 @@ async fn a_page_without_a_challenge_is_already_clear_at_once() {
     browser.close().await;
 }
 
-/// A widget that a page's script adds after the page has loaded is not
-/// there on the first look, so only a `wait_for_challenge` window lets the
+/// A widget that a page's script adds a second after a click is not there
+/// on the run's first look, so only a `wait_for_challenge` window lets the
 /// run find it, click it, and return the page's token.
 #[tokio::test]
 async fn wait_for_challenge_clicks_a_widget_that_a_script_adds_later() {
@@ -242,11 +242,8 @@ async fn wait_for_challenge_clicks_a_widget_that_a_script_adds_later() {
     let tab = browser.main_tab();
     tab.goto(server.url(SITE_A, "/late")).await.unwrap();
     tab.wait_for_load().await.unwrap();
-    let bare: bool = tab
-        .evaluate("document.querySelector('[name=cf-turnstile-response]') === null")
-        .await
-        .unwrap();
-    assert!(bare, "the widget was added before the run's first look");
+    let submit = tab.find().css("#submit").one().await.unwrap();
+    submit.click().await.unwrap();
 
     let outcome = tab
         .cloudflare()

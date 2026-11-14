@@ -35,14 +35,15 @@ The driver returns a [`ClearanceOutcome`] on success. All four are
 ordinary terminals, the last one included:
 
 - **`AlreadyClear`** — the page showed no challenge marker when the run
-  first saw it parsed (after the `wait_for_challenge` window, if one is
-  set), nor on any tick before: no challenge was served, or a clearance
-  cookie skipped it. Without a window, the run returns on that first
-  look, so calling `wait_for_clearance` after a navigation that met no
-  challenge costs one poll tick, or a few while the page is still
-  parsing. It says only that no Turnstile challenge was found:
-  - It is decided once, on that look. A widget that a page's script
-    mounts later is missed (see [Widgets that a script adds
+  looked at it parsed, nor on any tick before: no challenge was served,
+  or a clearance cookie skipped it. By default, the run decides this on
+  its first look at the parsed page, so calling `wait_for_clearance`
+  after a navigation that met no challenge costs one poll tick, or a few
+  while the page is still parsing. With a `wait_for_challenge` window,
+  the run decides it when the window ends. It says only that no
+  Turnstile challenge was found:
+  - It is decided once. A widget that a page's script mounts after the
+    decision is missed (see [Widgets that a script adds
     later](#widgets-that-a-script-adds-later)), and so is a challenge
     whose navigation has not committed yet, so call it after the
     navigation has loaded.
@@ -50,7 +51,8 @@ ordinary terminals, the last one included:
     limits) carry no Turnstile marker, so they land here too.
   - A `container` override that leaves out the default's script clause
     makes Cloudflare's full-page challenge land here too, before its
-    widget appears.
+    widget appears, unless a `wait_for_challenge` window lasts until it
+    does.
 
   The other way round, another provider's widget matching the default
   `[data-sitekey]` reads as a challenge, and the run goes on to its
@@ -119,8 +121,9 @@ it, shadow root or not. The tick then resolves in this order:
    without anything to click.
    **No marker at the first look returns `AlreadyClear`.** The first tick
    that sees the page parsed, with no marker on it or on any tick before,
-   ends the run. With a `wait_for_challenge` window, only such a tick
-   after the window ends it.
+   ends the run. With a `wait_for_challenge` window, the tick that ends
+   the run is the first such tick that starts after the window has
+   ended.
 2. **Measure, scroll, measure, click.** On a tick that may click, the
    widget is measured first, so one that is no click target never
    scrolls the page. Raw mouse events carry viewport coordinates, so a
@@ -369,7 +372,7 @@ single-page app, a form that renders Turnstile when it is submitted, or
 a page that asks its server first whether the visitor needs a
 challenge. On the first look there is nothing to find, and the run would
 return `AlreadyClear`. Give such a page a window in which the run keeps
-looking:
+looking, here 10 seconds:
 
 ```rust,ignore
 tab.find().css("button[type=submit]").one().await?.click().await?;
@@ -380,14 +383,21 @@ let outcome = tab.cloudflare()
     .await?;
 ```
 
-A marker seen within the window makes the run go on as usual, until a
-terminal or the clearance timeout; with none seen, the run returns
-`AlreadyClear` once the window has passed. A window longer than the
-clearance timeout counts as equal to it.
+The window starts on the run's first look that finds the page parsed,
+so the time the next page takes to load does not use it up, and it
+starts again when a navigation replaces the page. Once the run has seen
+a marker, the window no longer matters: the run goes on until a token,
+until every marker is gone, or until the clearance timeout. With no
+marker seen, the run returns `AlreadyClear` on a look that it starts
+when the window has ended, or at the clearance timeout if the window
+would end after it.
 
 One run handles one challenge: it ends at the first token. A page that
 can show its widget again later, e.g. when its server asks for a fresh
-token, needs another run then.
+token, needs another run then. That run returns at once with any token
+already in a token input, the old one included, so start it after the
+page has emptied or removed the old token input, or point
+`TurnstileSelectors::token_inputs` at the new widget's input.
 
 ## Tuning
 
@@ -395,14 +405,17 @@ token, needs another run then.
   more CPU but reacts faster to clearance. Defaults to 500 ms which
   balances responsiveness against load.
 - `.wait_for_challenge(Duration::from_secs(10))` — keep looking for a
-  challenge for that long before returning `AlreadyClear`, for a page
-  whose script adds the widget later. Defaults to zero. See [Widgets
-  that a script adds later](#widgets-that-a-script-adds-later).
+  challenge for that long after the page is parsed before returning
+  `AlreadyClear`, for a page whose script adds the widget later.
+  Defaults to zero. See [Widgets that a script adds
+  later](#widgets-that-a-script-adds-later).
 - `.selectors(..)` / `.click_policy(..)` / `.on_click(..)` — the markers
   and the click, covered in [Markers and clicks are
   yours](#markers-and-clicks-are-yours).
 - Pass a generous `wait_for_clearance` timeout (30-60 s): a page with no
-  challenge marker returns before it, and a page with one is what it is
-  for. Later navigations with the same
+  challenge marker returns before it (unless its `wait_for_challenge`
+  window would end after it), and a page with one is what it is for.
+  Later navigations with the same
   `user_data_dir` usually carry Cloudflare's clearance cookie, get no
-  challenge at all, and return `AlreadyClear` on the first tick.
+  challenge at all, and return `AlreadyClear` on the first tick (by
+  default, without a window).

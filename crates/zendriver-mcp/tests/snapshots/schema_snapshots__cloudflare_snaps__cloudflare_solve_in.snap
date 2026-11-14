@@ -31,7 +31,7 @@ properties:
     default: 30000
     minimum: 0
   wait_for_challenge_ms:
-    description: "Keep looking for a challenge marker until this many milliseconds\nhave passed since the call started, before returning\n`already_clear`. Defaults to 0: the solver decides on its first look\nat the parsed page. Set it when a script adds the widget after the\npage has loaded, e.g. right after a click that brings up a\nTurnstile. A marker seen in time makes the solve go on as usual until\n`timeout_ms`; a value above `timeout_ms` counts as equal to it."
+    description: "Keep looking for a challenge marker for this many milliseconds after\nthe solver's first look that finds the page parsed, before returning\n`already_clear`. Defaults to 0: the solver decides on that first\nlook. Set it when a script adds the widget after the page has\nloaded, e.g. right after a click that brings up a Turnstile. The time\nthe page takes to load does not count, and a navigation to a new\npage starts the wait again. Once a marker is seen, this no longer\nmatters: the solve goes on until another outcome or `timeout_ms`.\nWith no marker seen, the call returns `already_clear` when the wait\nends, or at `timeout_ms` if the wait would end after it."
     type:
       - integer
       - "null"

@@ -7,7 +7,8 @@
 //! state as a `Result<ClearanceOutcome, CloudflareError>` where:
 //!
 //! - `Ok(ClearanceOutcome::AlreadyClear)` — the page showed no challenge
-//!   marker when first seen parsed.
+//!   marker when first seen parsed, or, with `wait_for_challenge_ms`, none
+//!   until that wait ended.
 //! - `Ok(ClearanceOutcome::TokenAcquired(t))` — a configured token input
 //!   (`cf-turnstile-response` by default) picked up a token.
 //! - `Ok(ClearanceOutcome::ChallengeGone)` — every challenge marker is gone
@@ -58,13 +59,16 @@ pub struct SolveInput {
     /// raising is a safe knob for slow / sandboxed environments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_interval_ms: Option<u64>,
-    /// Keep looking for a challenge marker until this many milliseconds
-    /// have passed since the call started, before returning
-    /// `already_clear`. Defaults to 0: the solver decides on its first look
-    /// at the parsed page. Set it when a script adds the widget after the
-    /// page has loaded, e.g. right after a click that brings up a
-    /// Turnstile. A marker seen in time makes the solve go on as usual until
-    /// `timeout_ms`; a value above `timeout_ms` counts as equal to it.
+    /// Keep looking for a challenge marker for this many milliseconds after
+    /// the solver's first look that finds the page parsed, before returning
+    /// `already_clear`. Defaults to 0: the solver decides on that first
+    /// look. Set it when a script adds the widget after the page has
+    /// loaded, e.g. right after a click that brings up a Turnstile. The time
+    /// the page takes to load does not count, and a navigation to a new
+    /// page starts the wait again. Once a marker is seen, this no longer
+    /// matters: the solve goes on until another outcome or `timeout_ms`.
+    /// With no marker seen, the call returns `already_clear` when the wait
+    /// ends, or at `timeout_ms` if the wait would end after it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_for_challenge_ms: Option<u64>,
     /// Override the page markers that identify the Turnstile widget. Omit to
@@ -196,11 +200,12 @@ fn configure<'a>(mut bypass: CloudflareBypass<'a>, input: SolveInput) -> Cloudfl
 #[derive(Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
-    /// The page showed no challenge marker when the solver first saw it
-    /// parsed after `wait_for_challenge_ms` (0 by default), and none
-    /// before; without that window, the call returns at once. It says only
+    /// The page showed no challenge marker when the solver looked at it
+    /// parsed, and none before. By default, the solver decides this on its
+    /// first look at the parsed page, so the call returns at once; with
+    /// `wait_for_challenge_ms`, it decides when that wait ends. It says only
     /// that no Turnstile challenge was found: a widget a script mounts after
-    /// that look is not waited for, and Cloudflare's block pages ("Sorry,
+    /// the decision is not waited for, and Cloudflare's block pages ("Sorry,
     /// you have been blocked") carry no marker either. `token` will be
     /// `None`.
     AlreadyClear,
@@ -319,9 +324,10 @@ mod tests {
     /// wiring branches from the tool left this module green.
     ///
     /// So drive a real bypass over a mock CDP connection and read the wire.
-    /// The fake page shows no marker on the first look, so the driver gets
-    /// past it only if the request's `wait_for_challenge_ms` reached it;
-    /// it then puts the widget's frame at the request's host, so the
+    /// The fake page shows no marker on the first look, so the run does not
+    /// end there in `AlreadyClear` only if `configure` passed the request's
+    /// `wait_for_challenge_ms` on to the driver. The page then puts the
+    /// widget's frame at the request's host, so the
     /// driver finds the widget only if the request's marker reached the
     /// frame lookup; and the click must land where the request's fractions
     /// put it — 7% / 50% of the same box would be (105.6, 220), so neither

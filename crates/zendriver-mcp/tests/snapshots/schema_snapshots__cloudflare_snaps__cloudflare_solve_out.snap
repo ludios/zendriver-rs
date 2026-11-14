@@ -21,7 +21,7 @@ $defs:
   Outcome:
     description: "Terminal outcome of a turnstile bypass attempt.\n\n`AlreadyClear`, `Solved` and `ChallengeGone` mirror the lib's\n`ClearanceOutcome` variants. `Timeout` mirrors the lib's `ClearanceOutcome::TimedOut` — a\ndeadline in a turnstile flow is a normal outcome, not an error —\nsurfacing it on the success channel so agents can branch on `outcome`\nwithout try/catch around a timeout."
     oneOf:
-      - description: "The page showed no challenge marker when the solver first saw it\nparsed after `wait_for_challenge_ms` (0 by default), and none\nbefore; without that window, the call returns at once. It says only\nthat no Turnstile challenge was found: a widget a script mounts after\nthat look is not waited for, and Cloudflare's block pages (\"Sorry,\nyou have been blocked\") carry no marker either. `token` will be\n`None`."
+      - description: "The page showed no challenge marker when the solver looked at it\nparsed, and none before. By default, the solver decides this on its\nfirst look at the parsed page, so the call returns at once; with\n`wait_for_challenge_ms`, it decides when that wait ends. It says only\nthat no Turnstile challenge was found: a widget a script mounts after\nthe decision is not waited for, and Cloudflare's block pages (\"Sorry,\nyou have been blocked\") carry no marker either. `token` will be\n`None`."
         type: string
         const: already_clear
       - description: "Turnstile produced a token — the first non-empty value of an element\nmatching `selectors.token_inputs`, tried in order;\n`cf-turnstile-response` by default.\nThe token is available in [`SolveOutput::token`]."
