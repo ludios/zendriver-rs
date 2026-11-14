@@ -761,8 +761,8 @@ US, Russia, Canada, Australia, Brazil, ...) resolve to a single representative
 zone (the country's first `zone1970.tab` entry, with a few curated overrides
 — e.g. `RU` → `Europe/Moscow`, not `Europe/Kaliningrad`), not any particular
 visitor's actual local zone. Treat it as a coherent default, not a precise
-one — set `.persona(Persona::builder().timezone("America/Los_Angeles").build())`
-(or `.persona_overlay(..)`) when a specific zone within the country matters.
+one — set `.persona_overlay(Persona::builder().timezone("America/Los_Angeles").build())`
+when a specific zone within the country matters.
 
 ```toml
 [dependencies]
@@ -786,18 +786,17 @@ browser is routed through a rotating or third-party proxy pool and you want
 the locale to match wherever that proxy happens to exit — use
 [`BrowserBuilder::geo_auto`] instead. It probes the exit IP through a bundled
 [`IpApiResolver`] (a proxied GET against `ip-api.com`) and folds the result
-into the persona overlay, for the fields that `.persona(..)` /
-`.persona_overlay(..)` / `.geo_locale(..)` left unset. The language (`locale`
-+ `languages`) and the `timezone` are filled independently:
+into the persona overlay. The result has two parts, the language (`locale`
+and `languages`) and the `timezone`, and each is filled only if nothing else
+sets it: not `.persona(..)`, `.persona_overlay(..)` or `.geo_locale(..)`, and
+not a pin of the `StealthProfile` (its `locale`, `languages` or `timezone`).
 
-- a persona that sets `locale` (or `languages`) keeps it, and still gets the
-  exit IP's timezone — the way to say "English, wherever the proxy exits";
-- a persona that sets `timezone` keeps it, and still gets the exit IP's
-  language;
-- with both set, there is nothing to fill and no request is made.
-
-A locale or timezone pinned on the `StealthProfile` does not count as set
-here: like any persona value, the probe's result outranks it.
+- With only a `locale` (or a `languages` list) set, that language is kept,
+  and the timezone is the exit IP's: the way to say "English, wherever the
+  proxy exits".
+- With only a `timezone` set, that timezone is kept, and the language is the
+  exit IP's country's.
+- With both set, there is nothing to fill, and no request is made.
 
 **Timezone precision beats `geo_locale` here:** `ip-api.com`'s response
 carries the exit IP's exact IANA `timezone`, not just its country, so

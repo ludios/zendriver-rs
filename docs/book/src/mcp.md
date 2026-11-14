@@ -151,18 +151,20 @@ present in the schema but only takes effect when the `geo` feature is enabled.
   credentials, which every tab answers the proxy's `Fetch.authRequired`
   challenge with (requires the default `interception` feature). Always
   present in the schema.
-- `geo_auto: bool` — auto-derive `locale`/`languages` from the exit IP's
-  country via a proxied probe to `ip-api.com` (mirrors `proxy` above), instead
-  of naming a country explicitly via `geo_country`. Makes at most one outbound
-  request, only at launch, only when `true`. Fills only what `persona` leaves
-  unset: a `persona` locale is kept and the timezone still comes from the
-  exit IP, and with both set no request is made. Requires the opt-in `geo`
-  feature; always present in the schema (ignored with a logged warning on a
-  non-`geo` build).
+- `geo_auto: bool` — auto-derive the language (`locale` + `languages`) and
+  the timezone from the exit IP via a proxied probe to `ip-api.com` (mirrors
+  `proxy` above), instead of naming a country explicitly via `geo_country`.
+  Makes at most one outbound request, only at launch, only when `true`. Each
+  of the two parts is filled only if nothing else sets it (`persona`, or
+  the `locale` / `geo_country` / `timezone` of `browser_stealth_set`): with
+  only a locale set, the locale is kept and the timezone is the exit IP's;
+  with only a timezone set, the timezone is kept and the language is the exit
+  IP's country's; with both set, no request is made. Requires the opt-in
+  `geo` feature; always present in the schema (ignored with a logged warning
+  on a non-`geo` build).
 - `geo_endpoint: string` — override the probe endpoint (default
-  `http://ip-api.com/json`); only meaningful with `geo_auto: true`. Note this
-  bypasses proxy mirroring — only the bundled default endpoint routes through
-  `proxy`.
+  `http://ip-api.com/json`); only meaningful with `geo_auto: true`. The probe
+  of a custom endpoint goes through `proxy` too, like the default one's.
 - `input_profile: "native" | "coherent"` — select input-timing realism
   (keyboard/mouse), **independent** of `stealth_profile`. When unset, the
   default follows the resolved stealth profile: a spoofed stealth profile

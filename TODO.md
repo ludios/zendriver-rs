@@ -213,7 +213,9 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
 
 Each item needs a test; `unit` is fine where no browser is involved.
 
-- [ ] **Browser:** *(BR #9, #10, #12)*
+- [ ] **Browser:** *(BR #8–#10, #12)*
+  - `geo_locale` replaces a timezone or languages that the base `.persona(..)` sets (it merges into the overlay without looking at `persona`, and its effect depends on call order); the launch-time geo probe no longer does
+  - *From Astra's review of `5f444a0a1` (2026-11-14; reproduced by Astra, not checked again):* a geo endpoint's timezone that Chrome doesn't know (`Not/AZone`) fails the launch with `TabSetup`, since the observer passes on Chrome's rejection of `Emulation.setTimezoneOverride`; `geo_auto` mirrors only the credentials in the proxy URL, not those of `proxy_auth`; a custom `GeoResolver` that never answers blocks `launch` / `connect` with no deadline; and `IpApiResolver` follows redirects, so "at most one request" isn't enforced
   - `BrowserContext` `Drop` panics outside a tokio runtime (`unit`)
   - `connect()` ignores tracker blocking. It honors `proxy_auth` since `bc8a71f74`, but no test covers `proxy_auth` through `connect()`: every test in `proxy_auth.rs` launches Chrome.
   - a target that detaches during the registrar stays registered forever

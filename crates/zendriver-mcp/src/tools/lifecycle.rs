@@ -88,13 +88,16 @@ pub struct OpenInput {
     /// probe reports the same exit IP Chrome will actually use. The resolved
     /// timezone is the EXACT IANA zone the probe reports for the exit IP
     /// (not a country-representative one), so multi-timezone countries (US,
-    /// RU, CA, AU, BR, ...) get the visitor's real local zone. Fills only
-    /// what `persona` leaves unset: its `locale`/`languages` are kept and
-    /// the timezone is still derived, its `timezone` is kept and the
-    /// language is still derived, and with both set no request is made.
-    /// Always present in the schema so the wire shape is feature-stable;
-    /// only takes effect when the server is built with the `geo` feature
-    /// (otherwise ignored — a warning is logged).
+    /// RU, CA, AU, BR, ...) get the visitor's real local zone. The result
+    /// has two parts, the language (`locale` + `languages`) and the
+    /// timezone, and each is filled only if nothing else sets it (`persona`,
+    /// or the `locale` / `geo_country` / `timezone` of `browser_stealth_set`):
+    /// with only a locale set, the locale is kept and the timezone is the
+    /// exit IP's; with only a timezone set, the timezone is kept and the
+    /// language is the exit IP's country's; with both set, no request is
+    /// made. Always present in the schema so the wire shape is
+    /// feature-stable; only takes effect when the server is built with the
+    /// `geo` feature (otherwise ignored — a warning is logged).
     #[serde(default)]
     pub geo_auto: bool,
     /// Override the geo-probe endpoint (default `http://ip-api.com/json`).

@@ -31,6 +31,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
+#[cfg(feature = "geo")]
+use zendriver_stealth::Fingerprint;
 use zendriver_stealth::{
     GpuBackend, InputProfile, Persona, Seed, StealthObserver, StealthProfile, Strategy, Surface,
 };
@@ -793,7 +795,7 @@ pub struct BrowserBuilder {
     /// `self.proxy` including its credentials) or [`BrowserBuilder::geo_resolver`]
     /// (bring your own). Probed at most once, asynchronously, by
     /// `apply_geo_overlay` in `launch()` / `connect()`, which gives the
-    /// result only to the fields that the caller left unset.
+    /// result only to the parts that nothing else sets.
     #[cfg(feature = "geo")]
     pub(crate) geo_resolver: Option<Arc<dyn zendriver_stealth::geo::GeoResolver>>,
     /// Enable the bundled curated tracker/fingerprinter blocklist.
@@ -1678,18 +1680,21 @@ impl BrowserBuilder {
     }
 
     /// Auto-derive locale/languages/timezone from the exit IP via a proxied
-    /// probe to `ip-api.com`. Opt-in; makes ONE outbound request at launch
-    /// only when set.
+    /// probe to `ip-api.com`. Opt-in; [`launch`](Self::launch) and
+    /// [`connect`](Self::connect) make at most ONE outbound request, and only
+    /// when this is set.
     ///
-    /// The result fills only what `persona` / `persona_overlay` /
-    /// `geo_locale` left unset, as two independent parts: the language
-    /// (`locale` + `languages`, filled only when both are unset) and the
-    /// `timezone`. So a persona that sets `locale` keeps it and still gets
-    /// the exit IP's timezone, and one that sets `timezone` keeps it and
-    /// still gets the exit IP's language. When both parts are set (as after
-    /// `geo_locale`), there is nothing to fill and no request is made. A
-    /// timezone or locale pinned on the [`StealthProfile`] does not count as
-    /// set here: like any persona value, the result outranks it.
+    /// The result has two parts, each filled only if nothing else sets it:
+    ///
+    /// - the language (`locale` + `languages`), unless a `locale` or a
+    ///   non-empty `languages` list is set;
+    /// - the `timezone`, unless a `timezone` is set.
+    ///
+    /// "Set" means by `persona`, `persona_overlay`, `geo_locale`, or a pin
+    /// of the [`StealthProfile`]. So a persona with only a `locale` keeps
+    /// that locale and gets the exit IP's timezone, and a persona with only
+    /// a `timezone` keeps that timezone and gets the exit IP's language.
+    /// When both parts are set, no request is made.
     ///
     /// Mirrors the proxy set via [`Self::proxy`], including its credentials
     /// — the probe authenticates the same way the browser itself will.
@@ -1709,7 +1714,9 @@ impl BrowserBuilder {
     }
 
     /// Supply a custom [`zendriver_stealth::geo::GeoResolver`] (your own
-    /// service / offline DB) in place of the bundled `ip-api.com` probe.
+    /// service / offline DB) in place of the bundled `ip-api.com` probe. Its
+    /// result fills the same parts as [`Self::geo_auto`]'s, under the same
+    /// conditions.
     #[cfg(feature = "geo")]
     #[must_use]
     pub fn geo_resolver(
@@ -1721,33 +1728,42 @@ impl BrowserBuilder {
     }
 
     /// Probe the geo resolver (if one is set) and put its result into
-    /// `persona_overlay`, for the fields that neither `persona` nor
-    /// `persona_overlay` sets. The language (`locale` + `languages`) and the
-    /// `timezone` are filled independently; when both are already set, the
-    /// resolver isn't probed. For the timezone, the resolver's exact zone
-    /// (e.g. `IpApiResolver` parsing ip-api's `timezone` field) is preferred
-    /// to the country's representative zone.
+    /// `persona_overlay`, for the parts that nothing sets yet. The parts are
+    /// the language (`locale` + `languages`) and the `timezone`; what can
+    /// set one is the persona (`persona` with `persona_overlay` over it) and
+    /// `fingerprint`, the stealth profile's, which carries the profile's
+    /// pins. When both parts are set, the resolver isn't probed. For the
+    /// timezone, the resolver's exact zone (e.g. `IpApiResolver` parsing
+    /// ip-api's `timezone` field) is preferred to the country's
+    /// representative zone.
     #[cfg(feature = "geo")]
-    async fn apply_geo_overlay(&mut self) {
+    async fn apply_geo_overlay(&mut self, fingerprint: &Fingerprint) {
         let Some(resolver) = self.geo_resolver.clone() else {
             return;
         };
-        let personas = [self.persona.as_ref(), self.persona_overlay.as_ref()];
+        let mut persona = self.persona.clone().unwrap_or_default();
+        if let Some(overlay) = &self.persona_overlay {
+            persona = persona.overlay(overlay.clone());
+        }
         // An empty `languages` list counts as unset (see `Persona::languages`).
-        let language_set = personas.iter().flatten().any(|p| {
-            p.locale.is_some() || p.languages.as_ref().is_some_and(|list| !list.is_empty())
-        });
-        let timezone_set = personas.iter().flatten().any(|p| p.timezone.is_some());
+        let lists = [&persona.languages, &fingerprint.languages];
+        let language_set = persona.locale.is_some()
+            || fingerprint.locale.is_some()
+            || lists
+                .iter()
+                .any(|list| list.as_ref().is_some_and(|l| !l.is_empty()));
+        let timezone_set = persona.timezone.is_some() || fingerprint.timezone.is_some();
         if language_set && timezone_set {
             return;
         }
-        // A failed probe is NOT "no geo data" — it silently launches the
-        // default (US-English) persona behind whatever exit IP the proxy
-        // actually has, which is exactly the incoherence `geo_auto` exists
-        // to prevent. This records the consequence, since nothing downstream
-        // can. The *reason* is one line up in the log only when the resolver
-        // is the bundled [`crate::geo_resolver::IpApiResolver`], which logs
-        // every one of its own exits; a resolver supplied through
+        // A failed probe is NOT "no geo data": the launch goes on with
+        // Chrome's own language or timezone (whichever the probe was to
+        // fill) behind whatever exit IP the proxy actually has, which is
+        // exactly the incoherence `geo_auto` exists to prevent. This
+        // records the consequence, since nothing downstream can. The
+        // *reason* is one line up in the log only when the resolver is the
+        // bundled [`crate::geo_resolver::IpApiResolver`], which logs every
+        // one of its own exits; a resolver supplied through
         // [`Self::geo_resolver`] need not.
         //
         // Prefixed on the function, not on `geo_auto`: this runs for any
@@ -1755,24 +1771,20 @@ impl BrowserBuilder {
         // called is how a log line sends someone the wrong way at 2am.
         let Some(geo) = resolver.resolve().await else {
             tracing::warn!(
-                "geo overlay: resolver returned no geo; persona keeps its default \
-                 locale/timezone, which may not match the exit IP"
+                "geo overlay: resolver returned no geo; the language and the timezone that \
+                 nothing else sets stay Chrome's own, which may not match the exit IP"
             );
             return;
         };
         let derived = zendriver_stealth::geo::persona(geo.country);
-        let mut fill = Persona::default();
+        let overlay = self.persona_overlay.get_or_insert_with(Persona::default);
         if !language_set {
-            fill.locale = derived.locale;
-            fill.languages = derived.languages;
+            overlay.locale = derived.locale;
+            overlay.languages = derived.languages;
         }
         if !timezone_set {
-            fill.timezone = geo.timezone.or(derived.timezone);
+            overlay.timezone = geo.timezone.or(derived.timezone);
         }
-        // `fill` holds only fields that the overlay leaves unset (or, for
-        // `languages`, empty), so it is the side whose fields must win.
-        let overlay = self.persona_overlay.take().unwrap_or_default();
-        self.persona_overlay = Some(overlay.overlay(fill));
     }
 
     /// Override a single fingerprint [`Surface`]'s render [`Strategy`].
@@ -4267,13 +4279,6 @@ impl BrowserBuilder {
         // `finish_connect` can `set_browser`.
         let registrar = Arc::new(TabRegistrar::new(input_profile));
 
-        // 3b. Resolve the geo-derived locale overlay (if `.geo_auto()` /
-        // `.geo_resolver(..)` is set), before `resolved_persona()` below reads
-        // `persona_overlay`. Fail-soft, and a no-op when unset or when the
-        // caller set both the language and the timezone.
-        #[cfg(feature = "geo")]
-        self.apply_geo_overlay().await;
-
         // 4. Resolve fingerprint + build observer chain + profile flags.
         // Chain order (see `assemble_observer_chain`): stealth → user-supplied
         // observers → force-open-shadow-roots → tab registrar LAST, the
@@ -4289,6 +4294,12 @@ impl BrowserBuilder {
                     None => profile.clone(),
                 };
                 let fp = profile.resolve_fingerprint(&exe, &self.env)?;
+                // Fill the language and the timezone from the geo resolver
+                // (if `.geo_auto()` / `.geo_resolver(..)` set one), before
+                // `resolved_persona()` reads `persona_overlay`. Fail-soft,
+                // and a no-op when both are already set.
+                #[cfg(feature = "geo")]
+                self.apply_geo_overlay(&fp).await;
                 let observer =
                     StealthObserver::with_persona(profile.clone(), fp, self.resolved_persona()?);
                 let mut flags = profile.build_flags();
@@ -4606,11 +4617,6 @@ impl BrowserBuilder {
 
         let ws_url = resolve_ws_url(&endpoint).await?;
 
-        // Resolve the geo-derived locale overlay (same as `launch`) before
-        // `resolved_persona()` below reads `persona_overlay`.
-        #[cfg(feature = "geo")]
-        self.apply_geo_overlay().await;
-
         // Resolve the per-tab InputProfile (decoupled from `StealthProfile`,
         // see `resolved_input_profile`) + build the observer chain exactly
         // like `launch` does (stealth observer → user observers →
@@ -4618,18 +4624,19 @@ impl BrowserBuilder {
         // The spawn-only branches (`executable`, flags, TempDir) are
         // intentionally skipped — `connect` never launches a process.
         let registrar = Arc::new(TabRegistrar::new(self.resolved_input_profile()));
-        let stealth_obs: Option<Arc<dyn TargetObserver>> = if let Some(ref profile) = self.stealth {
+        let mut stealth_obs: Option<Arc<dyn TargetObserver>> = None;
+        if let Some(profile) = self.stealth.clone() {
             // No executable to resolve a fingerprint from on the connect path;
             // fall back to the profile's default fingerprint.
             let fp = profile.resolve_fingerprint(Path::new(""), &[])?;
-            Some(Arc::new(StealthObserver::with_persona(
-                profile.clone(),
-                fp,
-                self.resolved_persona()?,
-            )))
-        } else {
-            None
-        };
+            // Fill the language and the timezone from the geo resolver (same
+            // as `launch`), before `resolved_persona()` reads
+            // `persona_overlay`.
+            #[cfg(feature = "geo")]
+            self.apply_geo_overlay(&fp).await;
+            let observer = StealthObserver::with_persona(profile, fp, self.resolved_persona()?);
+            stealth_obs = Some(Arc::new(observer));
+        }
         let observers = assemble_observer_chain(
             stealth_obs,
             &self.extra_observers,
@@ -6277,6 +6284,23 @@ mod tests {
         assert_eq!(p.locale.as_deref(), Some("en-US"));
     }
 
+    /// The fingerprint of `builder`'s stealth profile, resolved the way
+    /// `connect` does: without a Chrome binary.
+    #[cfg(feature = "geo")]
+    fn stealth_fingerprint(builder: &BrowserBuilder) -> Fingerprint {
+        let profile = builder.stealth.as_ref().expect("a stealth profile");
+        profile
+            .resolve_fingerprint(Path::new(""), &[])
+            .expect("fingerprint")
+    }
+
+    /// Run `builder`'s geo step with [`stealth_fingerprint`].
+    #[cfg(feature = "geo")]
+    async fn apply_geo(builder: &mut BrowserBuilder) {
+        let fingerprint = stealth_fingerprint(builder);
+        builder.apply_geo_overlay(&fingerprint).await;
+    }
+
     /// A [`zendriver_stealth::geo::GeoResolver`] stub that always resolves to
     /// a fixed country and counts how many times it was probed, so tests can
     /// assert the probe fired (or, when there was nothing to fill, did NOT
@@ -6333,7 +6357,7 @@ mod tests {
             cc: "DE",
             calls: calls.clone(),
         });
-        builder.apply_geo_overlay().await;
+        apply_geo(&mut builder).await;
         let p = builder.resolved_persona().unwrap();
         assert_eq!(p.locale.as_deref(), Some("de-DE"));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -6359,7 +6383,10 @@ mod tests {
             cc: "XYZ",
             calls: calls.clone(),
         });
-        let ((), logs) = crate::log_capture::with_captured_logs(builder.apply_geo_overlay()).await;
+        // Resolved outside the capture: without a Chrome binary, it warns.
+        let fingerprint = stealth_fingerprint(&builder);
+        let geo_step = builder.apply_geo_overlay(&fingerprint);
+        let ((), logs) = crate::log_capture::with_captured_logs(geo_step).await;
 
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -6396,7 +6423,7 @@ mod tests {
                 cc: "DE",
                 calls: calls.clone(),
             });
-        builder.apply_geo_overlay().await;
+        apply_geo(&mut builder).await;
         let p = builder.resolved_persona().unwrap();
         assert_eq!(p.locale.as_deref(), Some("en-US"));
         assert_eq!(
@@ -6419,7 +6446,7 @@ mod tests {
                 cc: "DE",
                 timezone: Some("Europe/Berlin"),
             });
-        builder.apply_geo_overlay().await;
+        apply_geo(&mut builder).await;
         let p = builder.resolved_persona().unwrap();
         assert_eq!(p.locale.as_deref(), Some("ja-JP"));
         assert_eq!(
@@ -6431,18 +6458,19 @@ mod tests {
 
     /// `languages` alone sets the language too: it outranks `locale` (see
     /// `Persona::languages`), so a derived locale beside it would be dead
-    /// weight at best.
+    /// weight at best. The list is in the base persona, where the probe's
+    /// languages once replaced it.
     #[cfg(feature = "geo")]
     #[tokio::test]
     async fn pinned_languages_are_kept_without_a_derived_locale() {
         let languages = vec!["en-GB".to_string(), "en".to_string()];
         let mut builder = Browser::builder()
-            .persona_overlay(Persona::builder().languages(languages.clone()).build())
+            .persona(Persona::builder().languages(languages.clone()).build())
             .geo_resolver(StubGeoResolver {
                 cc: "DE",
                 timezone: Some("Europe/Berlin"),
             });
-        builder.apply_geo_overlay().await;
+        apply_geo(&mut builder).await;
         let p = builder.resolved_persona().unwrap();
         assert_eq!(p.languages, Some(languages));
         assert_eq!(p.locale, None);
@@ -6460,7 +6488,7 @@ mod tests {
                 cc: "DE",
                 timezone: None,
             });
-        builder.apply_geo_overlay().await;
+        apply_geo(&mut builder).await;
         let p = builder.resolved_persona().unwrap();
         assert_eq!(p.locale.as_deref(), Some("de-DE"));
         assert_eq!(
@@ -6480,10 +6508,65 @@ mod tests {
                 cc: "US",
                 timezone: Some("America/Los_Angeles"),
             });
-        builder.apply_geo_overlay().await;
+        apply_geo(&mut builder).await;
         let p = builder.resolved_persona().unwrap();
         assert_eq!(p.timezone.as_deref(), Some("Asia/Tokyo"));
         assert_eq!(p.locale.as_deref(), Some("en-US"));
+    }
+
+    /// A pin of the stealth profile sets its part too. That is where MCP's
+    /// `browser_stealth_set` puts a timezone or a locale, so the probe must
+    /// fill only the other part.
+    #[cfg(feature = "geo")]
+    #[tokio::test]
+    async fn stealth_profile_pins_are_kept() {
+        let geo = || StubGeoResolver {
+            cc: "US",
+            timezone: Some("America/Los_Angeles"),
+        };
+        let mut builder = Browser::builder()
+            .stealth(StealthProfile::native().timezone("Asia/Tokyo"))
+            .geo_resolver(geo());
+        apply_geo(&mut builder).await;
+        let p = builder.resolved_persona().unwrap();
+        assert_eq!(
+            p.timezone, None,
+            "the profile's timezone must stay in effect"
+        );
+        assert_eq!(p.locale.as_deref(), Some("en-US"));
+
+        let mut builder = Browser::builder()
+            .stealth(StealthProfile::native().locale("ja-JP"))
+            .geo_resolver(geo());
+        apply_geo(&mut builder).await;
+        let p = builder.resolved_persona().unwrap();
+        assert_eq!(p.locale, None, "the profile's locale must stay in effect");
+        assert_eq!(p.languages, None);
+        assert_eq!(p.timezone.as_deref(), Some("America/Los_Angeles"));
+    }
+
+    /// What counts is the persona as resolved: an empty overlay list hides
+    /// the base persona's list, which leaves the language unset.
+    #[cfg(feature = "geo")]
+    #[tokio::test]
+    async fn an_empty_overlay_list_over_a_base_list_is_filled() {
+        let base = Persona::builder()
+            .languages(vec!["fr-FR".to_string()])
+            .build();
+        let mut builder = Browser::builder()
+            .persona(base)
+            .persona_overlay(Persona::builder().languages(Vec::new()).build())
+            .geo_resolver(StubGeoResolver {
+                cc: "DE",
+                timezone: None,
+            });
+        apply_geo(&mut builder).await;
+        let p = builder.resolved_persona().unwrap();
+        assert_eq!(p.locale.as_deref(), Some("de-DE"));
+        assert_eq!(
+            p.languages,
+            Some(vec!["de-DE".to_string(), "de".to_string()])
+        );
     }
 
     /// With the language and the timezone both set, even across the base
@@ -6499,7 +6582,7 @@ mod tests {
                 cc: "DE",
                 calls: calls.clone(),
             });
-        builder.apply_geo_overlay().await;
+        apply_geo(&mut builder).await;
         let p = builder.resolved_persona().unwrap();
         assert_eq!(p.locale.as_deref(), Some("ja-JP"));
         assert_eq!(p.timezone.as_deref(), Some("Asia/Tokyo"));
@@ -6523,7 +6606,7 @@ mod tests {
         let mut builder = Browser::builder()
             .persona_overlay(overlay)
             .geo_resolver(NoneResolver);
-        builder.apply_geo_overlay().await;
+        apply_geo(&mut builder).await;
         let p = builder.resolved_persona().unwrap();
         assert_eq!(p.timezone.as_deref(), Some("UTC"));
         assert_eq!(p.locale, None);
@@ -6544,7 +6627,7 @@ mod tests {
                     cc: "DE",
                     calls: calls.clone(),
                 });
-        builder.apply_geo_overlay().await;
+        apply_geo(&mut builder).await;
         let p = builder.resolved_persona().unwrap();
         assert_eq!(p.device_memory_gb, Some(16));
         assert_eq!(p.locale.as_deref(), Some("de-DE"));
@@ -6555,13 +6638,9 @@ mod tests {
     #[cfg(feature = "geo")]
     #[tokio::test]
     async fn geo_overlay_preserves_explicit_timezone_while_filling_locale() {
-        // Precedence regression guard for the auto-probe path (mirrors
-        // `geo_locale_preserves_explicit_timezone` above): a
-        // `.persona_overlay(..)` that pins only `.timezone` (no locale) must
-        // keep that timezone after `apply_geo_overlay` resolves — the
-        // geo-derived persona (which now also carries a `.timezone`) must
-        // only fill the locale/languages gap, never clobber an explicit
-        // field the caller already set.
+        // A `.persona_overlay(..)` that pins only `.timezone` (no locale)
+        // must keep that timezone: the probe's result (here with only the
+        // country's representative zone) fills the language alone.
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let overlay = Persona::builder().timezone("Asia/Tokyo").build();
         let mut builder =
@@ -6571,7 +6650,7 @@ mod tests {
                     cc: "DE",
                     calls: calls.clone(),
                 });
-        builder.apply_geo_overlay().await;
+        apply_geo(&mut builder).await;
         let p = builder.resolved_persona().unwrap();
         assert_eq!(
             p.timezone.as_deref(),
@@ -6595,7 +6674,7 @@ mod tests {
             cc: "US",
             timezone: Some("America/Los_Angeles"),
         });
-        builder.apply_geo_overlay().await;
+        apply_geo(&mut builder).await;
         let p = builder.resolved_persona().unwrap();
         assert_eq!(p.timezone.as_deref(), Some("America/Los_Angeles"));
         assert_eq!(p.locale.as_deref(), Some("en-US"));
@@ -6611,17 +6690,14 @@ mod tests {
             cc: "US",
             timezone: None,
         });
-        builder.apply_geo_overlay().await;
+        apply_geo(&mut builder).await;
         let p = builder.resolved_persona().unwrap();
         assert_eq!(p.timezone.as_deref(), Some("America/New_York"));
     }
 
-    /// An explicit `.persona_overlay(..)` timezone (no locale, so the probe
-    /// still fires per the existing skip-guard) must still win over the
-    /// resolver's EXACT probe timezone, not just the country-representative
-    /// one — the overlay merge direction (`derived.overlay(existing)`) must
-    /// keep protecting a caller-pinned field even now that `derived` itself
-    /// can carry an exact tz.
+    /// An explicit `.persona_overlay(..)` timezone must win over the
+    /// resolver's EXACT probe timezone, not just over the country's
+    /// representative one. The probe still runs, for the language.
     #[cfg(feature = "geo")]
     #[tokio::test]
     async fn explicit_timezone_wins_over_exact_probe_timezone() {
@@ -6633,7 +6709,7 @@ mod tests {
                     cc: "US",
                     timezone: Some("America/Los_Angeles"),
                 });
-        builder.apply_geo_overlay().await;
+        apply_geo(&mut builder).await;
         let p = builder.resolved_persona().unwrap();
         assert_eq!(
             p.timezone.as_deref(),
