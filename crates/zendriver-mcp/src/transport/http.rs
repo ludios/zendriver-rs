@@ -83,8 +83,10 @@ pub async fn serve(
         std::process::exit(1);
     });
     // The sessions run in tasks of their own, which outlive the server
-    // future, so their states are still there to clean up, and they can
-    // still take tool calls: a shut-down session opens no browser.
+    // future, so their states are still there to clean up. Dropping that
+    // future closed the listener, and axum lets each open connection finish
+    // the requests it has in flight, then closes it. Such a request can
+    // still reach a session, but a shut-down session opens no browser.
     let states: Vec<_> = {
         let mut sessions = sessions
             .lock()
