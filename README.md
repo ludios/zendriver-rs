@@ -4,34 +4,41 @@
 
 ## About this fork
 
-This is [ludios/zendriver-rs](https://github.com/ludios/zendriver-rs), an LLM-authored fork of [TurtIeSocks/zendriver-rs](https://github.com/TurtIeSocks/zendriver-rs). It began with an AI review of upstream's code and with runs against real sites, and it fixes the bugs that those found, most of them with a test that runs against real Chrome.
+This is [ludios/zendriver-rs](https://github.com/ludios/zendriver-rs), an LLM-authored fork of [TurtIeSocks/zendriver-rs](https://github.com/TurtIeSocks/zendriver-rs). It began with an AI review of upstream's code and with runs against real sites, and it has fixed many of the bugs that those found, most of them with a test that runs against real Chrome. [TODO.md](TODO.md) lists what is still open.
 
-The API here differs from upstream's in places (interception most of all).
+The fork branched from upstream in September 2026 and has none of upstream's later changes. The main one that it lacks: upstream now attaches out-of-process iframes and gives them the stealth setup.
 
-Changed:
+The fork isn't on crates.io. The crates there, the docs.rs pages and the hosted book that the rest of this README links to are all upstream's, and the fork's API differs from upstream's in places (interception most of all). The fork's own book is in [docs/book/src/](docs/book/src/). To use the fork:
 
-- **Navigation waits wait for the right page.** Upstream's `wait_for_load` ends when any frame stops loading, so an iframe ends it, and so does a navigation that finished earlier. Here it follows the main frame's own navigation, also after `back` / `forward` / `reload` and in a new tab. New: `Tab::expect_navigation` and `Tab::wait_for_url`.
-- **No skipped CDP events.** Upstream's subscribers each filter one lossy broadcast of the whole connection, in which a slow subscriber loses events. Here a subscriber gets its session's events in the order Chrome sent them, and a stream that can't continue ends with its reason (overflow, detach, shutdown) instead of skipping events. The load waits, `wait_for_idle`, `expect_*`, the network monitor and interception all read these streams.
+```bash
+cargo add zendriver --git https://github.com/ludios/zendriver-rs
+cargo install zendriver-mcp --git https://github.com/ludios/zendriver-rs --locked
+```
+
+What the fork does better than upstream (compared with upstream's `main` of 2026-11-08, `26c4f09c2`):
+
+- **Navigation waits follow the main frame.** Upstream's `wait_for_load` ends when any frame stops loading, so an iframe can end it. Here it follows the main frame's loading, also after `back` / `forward` / `reload` and in a new tab. New: `Tab::expect_navigation` and `Tab::wait_for_url`.
+- **CDP events in order, with no silent loss.** Upstream's subscribers each filter one lossy broadcast of the whole connection, in which a slow subscriber loses events. Here the load waits, `wait_for_idle`, `expect_*`, the network monitor and interception each read a stream of their session's events (`SessionHandle::events`) in the order Chrome sent them. A stream that can't continue (after an overflow, for example) ends with its reason, so its reader knows that events are missing.
 - **Proxy credentials go only to the proxy.** Upstream answers every HTTP auth challenge with them, so a site that answers 401 receives the proxy's username and password.
-- **Interception rules that work together.** Upstream runs one `Fetch` actor per rule set: the actors replace each other's patterns, race to answer each paused request, and turn `Fetch` off for all of them when one is dropped. Here each tab has one ordered list of rules and streams (tracker blocking included), the first entry that fits a paused request decides it, and Chrome pauses only the requests that some entry acts on. A `modify_response` rule runs without the caller also naming the Response stage; upstream's needs that, so the `modify_response` action of upstream's MCP server does nothing.
-- **Stealth with far less JavaScript in the page.** Nine of upstream's injected patches are deleted (`webdriver`, `plugins`, `permissions`, `chrome`, `webrtc`, `screen`, `codecs`, `broken_image`, `mouse`): given the right launch flags and CDP overrides, Chrome reports those values itself, with no replaced function for a detector to find. (`mouse.js` was itself a tell: it sent pages mouse events with `isTrusted === false`.) `native()` now injects no script at all, and `spoofed()` patches only what Chrome can't be told: WebGL / WebGPU, `deviceMemory`, and readback noise.
-- **Headless Chrome looks like a desktop.** Launch switches give it a screen, window and viewport that agree, instead of JS getters on `screen`. On Linux it also gets a mouse, so pages no longer match `(pointer: none)` and `(hover: none)`.
-- **Finding and using elements stays out of the page's own JavaScript.** Queries and element actions run in the isolated world. On a test page that records calls to its wrapped DOM methods, finding, clicking and typing made 66 recorded calls before this change, and makes none now. Scrolling uses Chrome's `DOM.scrollIntoViewIfNeeded`, which doesn't re-centre an element that is already in view.
+- **Interception rules that work together.** Upstream runs one `Fetch` actor per rule set: the actors replace each other's patterns, race to answer each paused request, and turn `Fetch` off for all of them when one is dropped. Here each tab has one ordered list of rules and streams (tracker blocking included), and the first entry that fits a paused request decides it. A `modify_response` rule runs without the caller also naming the Response stage; upstream's needs that, so the `modify_response` action of upstream's MCP server does nothing.
+- **Stealth with far less JavaScript in the page.** Ten of upstream's injected patches are deleted (`webdriver`, `plugins`, `permissions`, `chrome`, `user_agent_data`, `webrtc`, `screen`, `codecs`, `broken_image`, `mouse`), and `navigator_props` is cut down to `deviceMemory`: given the right launch flags and CDP overrides, Chrome reports those values itself, with no replaced function for a detector to find. (`mouse.js` was itself a tell: it sent pages mouse events with `isTrusted === false`.) `native()` now injects no script at all, and `spoofed()` patches only what Chrome can't be told: WebGL / WebGPU, `deviceMemory`, readback noise, and the font and hardware values that a persona sets.
+- **Headless Chrome looks like a desktop.** Under `native()` and `spoofed()`, launch switches give it a screen, window and viewport that agree, instead of JS getters on `screen`. On Linux it also gets a mouse, so pages no longer match `(pointer: none)` and `(hover: none)`.
+- **Finding and using elements stays out of the page's own JavaScript.** Queries and element actions run in the isolated world (one exception: focusing a custom element may call its own `focus()`). On a test page that records calls to its wrapped DOM methods, finding, clicking and typing made 66 recorded calls while queries ran in the main world, as upstream's do, and now make none. Scrolling uses Chrome's `DOM.scrollIntoViewIfNeeded`, which doesn't re-centre an element that is already in view.
 - **Element queries and checks that agree with Chrome.**
   - `role()` asks Chrome's accessibility tree, so it finds implicit roles and elements in shadow roots. Upstream's finds only `role="…"` attributes: 0 of 32 ordinary links on a test page.
   - The hit test before a click sees into shadow roots, and sees an overlay that covers an iframe.
   - `visible_only` keeps elements below the fold, which upstream's (and so its MCP `browser_click`) can't find.
   - An invalid selector or regex fails at once with `JsException`. Upstream polls until the timeout and reports `ElementNotFound`.
-  - `Frame::evaluate_main` runs in the iframe's own main world. Upstream's runs in the top page for an iframe in the page's process.
+  - For an iframe in the page's process, `Frame::evaluate_main` runs in the iframe's own main world. Upstream's runs in the top page.
 - **Calls that always failed now work.** `Browser::connect("http://…")`, and the browser-level cookie jar's `for_url` and `delete`. A tab in an isolated `BrowserContext` now reads that context's cookies, not the default context's.
 - **Downloads outlive their tab.** A download is followed on the browser's connection, so closing its tab doesn't lose it, and closing a tab no longer resets where the other tabs' downloads go.
-- **MCP server.** `browser_back` / `_forward` / `_reload` wait for the page; `browser_wait_for_url` and `wait_for_navigation` (on `browser_click` / `browser_press`) are new; agents see and position rules in the ordered interception list; and over HTTP, SIGTERM closes every session's Chrome instead of leaving them running.
+- **MCP server.** `browser_back` / `_forward` / `_reload` take a `wait_for` and wait for the page; `browser_wait_for_url` and `wait_for_navigation` (on `browser_click` / `browser_press`) are new; agents see and position rules in the ordered interception list. On SIGTERM over HTTP, the server closes each session's Chrome (within a bounded time) before it exits; upstream's handles no signal there, and leaves every Chrome running.
 - **`BrowserBuilder::env` / `env_remove`** set and remove environment variables for the launched Chrome.
-- **Tests against real Chrome.** `zendriver-testkit` gives every such test a local fixture server (two sites, an authenticating proxy) and checks on close that Chrome's whole process tree exited. A contract test sends every CDP command that the library uses to a real Chrome, to prove that the command exists at the scope where the library sends it. A stealth probe compares the identity that the page, an iframe, a worker and the HTTP headers each report.
+- **Tests against real Chrome.** The newer ones share `zendriver-testkit`: a local fixture server (two sites, an authenticating proxy), and a check on close that Chrome's whole process tree exited. A contract test sends each CDP command that the library names to a real Chrome at the command's listed scope, to catch a command that Chrome doesn't have there (the cause of the cookie-jar failures). A stealth probe compares the identity that the page, an iframe, a worker and the HTTP headers each report.
 
-The rest of this README is upstream's, updated in some places.
+## Upstream's README
 
----
+What follows is upstream's README, with its descriptions updated for the fork's changes. Its badges, install commands and links still name upstream's crates and site.
 
 Async-first browser automation via the Chrome DevTools Protocol, with a coherent stealth identity and explicit anti-detection controls on by default — drive real Chrome from Rust, or hand the keys to an LLM agent over the [Model Context Protocol](https://modelcontextprotocol.io/).
 
