@@ -827,11 +827,9 @@ const WS_MAX_BYTES: usize = 256 << 20;
 /// socket. Only the message/frame size limits are overridden; everything else
 /// keeps tungstenite's defaults.
 fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
-    tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
-        max_message_size: Some(WS_MAX_BYTES),
-        max_frame_size: Some(WS_MAX_BYTES),
-        ..Default::default()
-    }
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(WS_MAX_BYTES))
+        .max_frame_size(Some(WS_MAX_BYTES))
 }
 
 /// Connect to a Chrome DevTools WebSocket URL and spawn the actor with no

@@ -52,7 +52,7 @@ axum        = { version = "0.8" }
 # External — runtime
 tokio              = { version = "1.40",  features = ["full"] }
 tokio-util         = { version = "0.7",   features = ["rt"] }
-tokio-tungstenite  = { version = "0.24" }
+tokio-tungstenite  = { version = "0.30" }
 tokio-stream       = { version = "0.1",   features = ["sync"] }
 futures            = { version = "0.3" }
 async-trait        = { version = "0.1" }
