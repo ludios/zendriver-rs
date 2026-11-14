@@ -372,46 +372,56 @@ impl StealthObserver {
         headless_screen_switches(&self.screen())
     }
 
-    /// The language list that pages advertise, as Chrome takes it both in
-    /// `Emulation.setUserAgentOverride.acceptLanguage` and in its
-    /// `--accept-lang` switch: the tags joined with commas (e.g. `en-US,en`),
-    /// without `;q=` weights, which Chrome appends itself. (Given a weighted
-    /// list, Chrome would weight it again: `en-US,en;q=0.9;q=0.9`.)
-    ///
-    /// The fingerprint is already merged with the persona (see
-    /// `with_persona`), so this is the effective list: a caller's
-    /// `Persona::languages` / `Persona::locale` reaches Chrome from here.
-    fn accept_language(&self) -> String {
-        crate::lang::fingerprint_languages(&self.fingerprint).join(",")
-    }
-
-    /// The `--accept-lang` switch that makes Chrome's own language list the
-    /// one that this observer's `Emulation.setUserAgentOverride` gives each
-    /// page and out-of-process iframe; `None` for `Off`, which sends no
-    /// overrides.
+    /// The `--accept-lang` switch that gives Chrome itself the language list
+    /// that a persona or the stealth profile configures (the list that this
+    /// observer's `Emulation.setUserAgentOverride` gives each page and
+    /// out-of-process iframe): the tags joined with commas, without `;q=`
+    /// weights, which Chrome appends itself. `None` when no language is
+    /// configured, for a list with a tag that isn't ASCII letters, digits
+    /// and `-` (Chrome would take an empty or malformed value as "no
+    /// languages", and send no `Accept-Language` at all), and for `Off`,
+    /// which sends no overrides.
     ///
     /// The override doesn't reach workers: a dedicated, shared or service
     /// worker reads Chrome's own list in `navigator.languages`, and its
     /// requests carry that list in `Accept-Language`. Launched with this
-    /// switch, Chrome has the same list in both places.
+    /// switch, Chrome's own list is the configured one.
+    ///
+    /// Two limits. Chrome saves the list in the profile's preferences
+    /// (`intl.accept_languages`), where a later launch of that
+    /// `user_data_dir` without the switch finds it; that is why no switch
+    /// is asked for the `en-US,en` that pages get when no language is
+    /// configured. And where Chrome reads its own list, it changes it in
+    /// ways that the override's list isn't changed: in headers, each
+    /// regional tag is followed by its base language if the list lacks it,
+    /// and an isolated browser context gets a list built from the first
+    /// language only. So a page and a worker agree fully for a list like
+    /// `de-DE,de`, which those changes leave as it is.
     #[must_use]
     pub fn accept_language_flag(&self) -> Option<String> {
         if self.profile.kind() == ProfileKind::Off {
             return None;
         }
-        Some(format!("--accept-lang={}", self.accept_language()))
+        let languages = crate::lang::configured_languages(&self.fingerprint)?;
+        let is_tag = |tag: &String| {
+            !tag.is_empty() && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        };
+        if !languages.iter().all(is_tag) {
+            return None;
+        }
+        Some(format!("--accept-lang={}", languages.join(",")))
     }
 
     /// The IANA timezone that this observer sets on each page and
     /// out-of-process iframe, with `Emulation.setTimezoneOverride`: the
-    /// persona's, else the profile's pin. `None` when neither sets one, and
-    /// for `Off`, which sends no overrides.
+    /// persona's, else the fingerprint's (which a stealth profile's pin
+    /// sets). `None` when neither sets one, and for `Off`, which sends no
+    /// overrides.
     ///
     /// A renderer process drops that override when the session that set it
-    /// ends, even while other targets of the process live on. So a launch
-    /// also starts Chrome in this timezone where it can (see
-    /// `BrowserBuilder::launch` in `zendriver`), which makes it the one that
-    /// Chrome falls back to.
+    /// ends, even while other targets of the process live on. A caller that
+    /// starts Chrome can start it in this timezone as well, which is then
+    /// what such a target falls back to.
     #[must_use]
     pub fn timezone(&self) -> Option<&str> {
         if self.profile.kind() == ProfileKind::Off {
@@ -487,7 +497,20 @@ impl TargetObserver for StealthObserver {
         // UA override — Emulation.setUserAgentOverride carries the Client-Hints
         // metadata too, so we don't have to send Network.setUserAgentOverride
         // separately.
-        let accept_language = self.accept_language();
+        let accept_language = {
+            // The fingerprint is already merged with the persona (see
+            // `with_persona`), so its language list is the effective one — a
+            // caller's `Persona::languages` / `Persona::locale` reaches the
+            // header from here.
+            let langs = crate::lang::fingerprint_languages(&self.fingerprint);
+            // `Emulation.setUserAgentOverride.acceptLanguage` wants a PLAIN
+            // comma-separated locale list (e.g. `en-US,en`) — Chrome appends the
+            // `;q=` weights itself. Passing an already-weighted string (the
+            // `accept_language()` header form) makes Chrome double them, yielding
+            // a malformed `Accept-Language: en-US,en;q=0.9;q=0.9`. Send the bare
+            // list so the emitted header is a clean `en-US,en;q=0.9`.
+            langs.join(",")
+        };
         // Persona UA-CH wins when supplied — field-wise, falling back to the
         // fingerprint-derived value for any sub-field the persona left
         // unset. Absent persona UA-CH → today's behavior (fingerprint's
@@ -1899,9 +1922,10 @@ mod persona_reaches_cdp_tests {
         );
     }
 
-    /// The launch switch must carry the list that the override sends (the
-    /// persona's, else `en-US,en`), and `off`, which sends no override, must
-    /// ask for no switch.
+    /// The launch switch must carry the configured list, which is the one
+    /// that the override sends. With no language configured, pages get
+    /// `en-US,en`, but there must be no switch: Chrome would save that list
+    /// in the profile. And `off`, which sends no override, asks for none.
     #[test]
     fn accept_language_flag_carries_the_list_that_the_override_sends() {
         let observer = |profile: StealthProfile, locale: Option<&str>| {
@@ -1918,10 +1942,14 @@ mod persona_reaches_cdp_tests {
                 .as_deref(),
             Some("--accept-lang=de-DE,de")
         );
-        assert_eq!(
-            observer(native(), None).accept_language_flag().as_deref(),
-            Some("--accept-lang=en-US,en")
-        );
+        assert_eq!(observer(native(), None).accept_language_flag(), None);
+        for malformed in ["", "de DE", "de,fr", "dé"] {
+            assert_eq!(
+                observer(native(), Some(malformed)).accept_language_flag(),
+                None,
+                "{malformed:?}"
+            );
+        }
         assert_eq!(
             observer(StealthProfile::off(), Some("de-DE")).accept_language_flag(),
             None

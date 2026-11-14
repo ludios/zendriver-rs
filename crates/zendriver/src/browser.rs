@@ -510,6 +510,23 @@ pub(crate) fn merge_launch_flags(
     base_flags
 }
 
+/// Whether `timezone` has the form of a tz database name of a region and a
+/// place (`America/Los_Angeles`, `Etc/GMT+5`), or is `UTC`: the timezones
+/// that mean the same to Chrome as its `TZ` environment variable and as the
+/// `timezoneId` of `Emulation.setTimezoneOverride`.
+///
+/// `TZ` reads other strings differently: libc opens one that starts with `/`
+/// (or `:/`) as a file, in every Chrome process; a POSIX offset such as
+/// `GMT+5:30`, which the override takes as UTC+5:30, means UTC-5:30; and an
+/// empty string means UTC, where an empty override means "no override".
+fn is_tz_database_name(timezone: &str) -> bool {
+    let name_bytes = |part: &str| {
+        let ok = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'+');
+        !part.is_empty() && part.bytes().all(ok)
+    };
+    timezone == "UTC" || (timezone.contains('/') && timezone.split('/').all(name_bytes))
+}
+
 /// The name and value of `flag` if it is a switch, parsed as Chrome parses a
 /// POSIX command line: the name follows `--` or `-` and ends at the first
 /// `=`, and a switch without `=` has the empty value.
@@ -1193,8 +1210,11 @@ impl BrowserBuilder {
     /// Set Chrome's UI locale via `--lang=<v>` (e.g. `"en-US"`, `"de-DE"`).
     ///
     /// Influences the browser-chrome language and the default
-    /// `Accept-Language` header. For full stealth-coherent locale spoofing,
-    /// prefer configuring it through the [`StealthProfile`] instead.
+    /// `Accept-Language` header, which only workers send under a stealth
+    /// profile other than `off`: pages get the stealth language list
+    /// (`en-US,en` unless a persona or the profile configures one). For
+    /// full stealth-coherent locale spoofing, prefer configuring it through
+    /// the [`StealthProfile`] or a persona instead.
     ///
     /// # Examples
     ///
@@ -1448,16 +1468,17 @@ impl BrowserBuilder {
     ///
     /// On Unix, [`BrowserBuilder::launch`] sets one variable of its own:
     /// `TZ`, to the timezone that stealth presents (a persona's `timezone`,
-    /// including one from [`BrowserBuilder::geo_auto`] /
-    /// [`BrowserBuilder::geo_locale`], else
-    /// [`StealthProfile::timezone`]),
-    /// when there is one and the stealth profile isn't `off`. Every Chrome
-    /// process then starts in that timezone, so a target keeps it even where
-    /// the `Emulation.setTimezoneOverride` of stealth doesn't reach, or
-    /// stops applying (Chrome drops it from all of a site's iframes in a tab
-    /// when the session of the first of them ends). A call of this or of
-    /// [`BrowserBuilder::env_remove`] that names `TZ` wins over that. Windows'
-    /// Chrome doesn't read `TZ`, so there the override is all there is.
+    /// including one from `geo_auto` / `geo_locale`, else the stealth
+    /// profile's, e.g. from [`StealthProfile::timezone`]). It does so when
+    /// there is such a timezone, the stealth profile isn't `off`, and the
+    /// timezone is a tz database name such as `America/Los_Angeles`, or
+    /// `UTC`. Every Chrome process then starts in that timezone, so a target
+    /// keeps it even where the `Emulation.setTimezoneOverride` of stealth
+    /// doesn't reach, or stops applying (Chrome drops it from all of a
+    /// site's iframes in a tab when the session of the first of them ends).
+    /// A call of this or of [`BrowserBuilder::env_remove`] that names `TZ`
+    /// wins over that. Windows' Chrome doesn't read `TZ`, so there the
+    /// override is all there is.
     ///
     /// Use it for what Chrome (or the loader that starts it) takes only from
     /// its environment, such as the Wayland compositor's socket
@@ -2035,14 +2056,16 @@ impl BrowserBuilder {
     /// sets a variable, and `(name, None)` removes it.
     ///
     /// On Unix, the first is `TZ` = `timezone` (the timezone that stealth
-    /// presents, if any), so that every Chrome process starts in it. The
-    /// caller's changes ([`env`](Self::env) and
-    /// [`env_remove`](Self::env_remove)) follow, so one that names `TZ` wins.
-    /// Windows' Chrome doesn't read `TZ`.
+    /// presents, if any), so that every Chrome process starts in it; but
+    /// only for a timezone that [`is_tz_database_name`], since `TZ` means
+    /// other things for other strings. The caller's changes
+    /// ([`env`](Self::env) and [`env_remove`](Self::env_remove)) follow, so
+    /// one that names `TZ` wins. Windows' Chrome doesn't read `TZ`.
     fn chrome_env(&self, timezone: Option<&str>) -> Vec<(OsString, Option<OsString>)> {
         let mut env = Vec::new();
         if cfg!(unix)
             && let Some(timezone) = timezone
+            && is_tz_database_name(timezone)
         {
             env.push(("TZ".into(), Some(timezone.into())));
         }
@@ -4218,7 +4241,10 @@ impl BrowserBuilder {
     ///    [`BrowserBuilder::observer`] for the chain's order).
     /// 3. Appends the profile's stealth flags to the launch argv, and, for a
     ///    headless launch, its screen switches (see
-    ///    [`StealthProfile::native`]).
+    ///    [`StealthProfile::native`]); and starts Chrome with the language
+    ///    list that a persona or the profile configures (`--accept-lang`)
+    ///    and, on Unix, in their timezone (`TZ`; see
+    ///    [`BrowserBuilder::env`]).
     /// 4. Sends `Target.setAutoAttach { waitForDebuggerOnStart: true }` at
     ///    browser scope so the actor can route pauses through observers
     ///    before any page script runs.
@@ -5823,6 +5849,38 @@ mod tests {
             builder.chrome_env(Some("Asia/Tokyo")),
             [tz("Asia/Tokyo"), tz("UTC"), (OsString::from("TZ"), None)]
         );
+    }
+
+    /// Only a tz database name may become `TZ`: libc would open a path as a
+    /// file in every Chrome process, and reads a POSIX offset or an empty
+    /// string differently than the CDP override does.
+    #[test]
+    fn only_a_tz_database_name_becomes_tz() {
+        for name in [
+            "UTC",
+            "Asia/Tokyo",
+            "America/Argentina/Buenos_Aires",
+            "Etc/GMT+5",
+        ] {
+            assert!(super::is_tz_database_name(name), "{name}");
+        }
+        for other in [
+            "",
+            "/etc/passwd",
+            ":/etc/localtime",
+            "../../home/user/file",
+            "Asia/../x",
+            "Asia//Tokyo",
+            "Asia/Tokyo/",
+            "GMT+5:30",
+            "GMT+0530",
+            "Asia/To\0kyo",
+            "PST8PDT",
+        ] {
+            assert!(!super::is_tz_database_name(other), "{other:?}");
+        }
+        #[cfg(unix)]
+        assert_eq!(BrowserBuilder::new().chrome_env(Some("/tmp/fifo")), []);
     }
 
     #[test]

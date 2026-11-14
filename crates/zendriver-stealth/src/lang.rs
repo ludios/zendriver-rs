@@ -72,7 +72,7 @@ fn derive_from_locale(locale: &str) -> Vec<String> {
 /// folded a persona in, the fingerprint already carries whatever the persona
 /// pinned, so the observer reads that one value instead of re-deriving the
 /// persona-vs-fingerprint precedence at each CDP call site.
-fn configured_languages(fp: &Fingerprint) -> Option<Vec<String>> {
+pub(crate) fn configured_languages(fp: &Fingerprint) -> Option<Vec<String>> {
     if let Some(langs) = fp.languages.as_ref().filter(|v| !v.is_empty()) {
         return Some(langs.clone());
     }

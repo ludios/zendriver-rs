@@ -14,6 +14,7 @@
 #![cfg(all(feature = "integration-tests", target_os = "linux"))]
 #![allow(clippy::panic)]
 
+use serde_json::{Value, json};
 use zendriver::stealth::{Platform, StealthProfile};
 use zendriver::{Browser, BrowserBuilder, Persona};
 use zendriver_testkit::{
@@ -22,8 +23,9 @@ use zendriver_testkit::{
 };
 
 /// Load the probe in a browser launched from `builder`, and check that its
-/// disagreements are exactly `profile`'s known ones.
-async fn check(profile: &str, builder: BrowserBuilder) {
+/// disagreements are exactly `profile`'s known ones. Returns the probe's
+/// readings (see [`PROBE_JS`]).
+async fn check(profile: &str, builder: BrowserBuilder) -> Value {
     let server = FixtureServer::start().await;
     let browser = launch_for_test(builder).await;
     let tab = browser.main_tab();
@@ -35,16 +37,19 @@ async fn check(profile: &str, builder: BrowserBuilder) {
     if let Err(mismatch) = check_known_disagreements(profile, &found, &[]) {
         panic!("{mismatch}\nProbe: {probe:#}");
     }
+    probe
 }
 
-/// A persona's language is one that Chrome doesn't have by itself, so it
-/// shows where the language doesn't reach. The override gives it to pages
-/// only: the worker reads Chrome's own list, and its requests carry that
-/// list, so a launch has to give Chrome the persona's list too.
+/// A persona's language differs from the one that Chrome starts with, so it
+/// shows where the persona's doesn't reach. The override gives it to pages
+/// and iframes only: the worker reads Chrome's own list, and its requests
+/// carry that list, so a launch has to give Chrome the persona's list too.
 #[tokio::test]
 async fn probe_agrees_with_a_personas_language() {
     let german: Persona = r#"{"locale": "de-DE"}"#.parse().expect("persona JSON");
-    check("native", Browser::builder().persona_overlay(german)).await;
+    let probe = check("native", Browser::builder().persona_overlay(german)).await;
+    // Agreeing on Chrome's own language would be no proof.
+    assert_eq!(probe["worker"]["languages"], json!(["de-DE", "de"]));
 }
 
 /// `profile` with the page's hardware pinned (see [`PINNED_HARDWARE`]).

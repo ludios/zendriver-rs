@@ -67,10 +67,11 @@ pub struct Persona {
     /// `Emulation.setLocaleOverride` from its first entry. When unset, all
     /// three derive from [`locale`](Self::locale).
     ///
-    /// Those overrides reach pages and iframes only. For workers, which
-    /// read Chrome's own list, `zendriver` also launches Chrome with
-    /// `--accept-lang` set to this list (unless the caller passes that
-    /// switch).
+    /// The first two reach pages and iframes only. For workers, which read
+    /// Chrome's own list, `zendriver` also launches Chrome with
+    /// `--accept-lang` set to this list (or to the one derived from
+    /// `locale`), unless the caller passes that switch. Chrome saves the
+    /// list in the profile's preferences.
     ///
     /// The list outranks [`locale`](Self::locale) because a real Chrome
     /// always reports `navigator.language` as `navigator.languages[0]` — a

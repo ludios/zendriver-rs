@@ -97,6 +97,10 @@ inherits the rest of your program's environment, and your program's own
 environment doesn't change. To keep an inherited variable away from Chrome
 (such as a secret), use `.env_remove(key)`.
 
+One variable is set for you: on Unix, a launch gives Chrome `TZ`, set to the
+timezone of your persona or stealth profile, if there is one. Your own
+`.env("TZ", ..)` or `.env_remove("TZ")` wins over it.
+
 It's for what Chrome (or the loader that starts it) takes only from its
 environment, such as `LD_LIBRARY_PATH`. For example, to run
 headed Chrome on a Wayland compositor that your program started (such as a

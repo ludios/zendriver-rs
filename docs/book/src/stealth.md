@@ -88,15 +88,21 @@ in the page:
   `Sec-CH-UA-*` headers), `navigator.platform`, and the
   `Accept-Language` header and `navigator.languages`, so that Chrome's
   own getters report one coherent identity. The timezone, locale and
-  geolocation overrides follow the profile and the persona. On Linux and
-  macOS, a launch also starts Chrome with `TZ` set to that timezone, so
+  geolocation overrides follow the profile and the persona. On Unix (Linux
+  and macOS included), a launch also starts Chrome with `TZ` set to that
+  timezone, if it is a tz database name such as `America/Los_Angeles`, so
   every Chrome process is in it from the start (your own
   `BrowserBuilder::env("TZ", ..)` or `env_remove("TZ")` wins).
 - **Languages for workers** — the override above gives the language list
   to pages and iframes only; a dedicated, shared or service worker reads
-  Chrome's own list. So a launch also passes `--accept-lang` with the same
-  list (your own `--accept-lang` wins), and `navigator.languages` and the
-  `Accept-Language` header agree everywhere.
+  Chrome's own list. So when a persona or the profile configures a language,
+  a launch also passes `--accept-lang` with its list (your own
+  `--accept-lang` wins), and a worker's `navigator.languages` and
+  `Accept-Language` header are the page's. Chrome saves that list in the
+  profile's preferences. The match is exact for a list like `de-DE,de`
+  (what a `locale` alone gives); for a list whose regional tags lack their
+  base language, and in an isolated browser context, Chrome's own handling
+  of its list still differs from the override's.
 - **A screen for headless Chrome** — headless Chrome's own screen is
   800x600, with no taskbar. So when zendriver launches a headless
   Chrome, it passes `--screen-info` for a 1920x1080 screen with a
