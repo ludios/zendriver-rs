@@ -105,7 +105,6 @@ Also for this round:
   - elements bound to the OOPIF's session *(QE #3)*
   - parent id *(FI #4)*
   - in-flight request leak in the idle tracker *(TAB #5)*
-  - `force_open_shadow_roots` *(TAB #10)*
 
   Test `chrome` with the cross-site fixture: `launch_for_test(Browser::builder())`, then goto `server.url(SITE_A, "/iframe-cross-site")`.
 - [ ] **`set_value` / `clear` throw on `<select>` and non-input elements.** Pick the setter that matches the element's own prototype. *(QE #5)* Test `chrome`.

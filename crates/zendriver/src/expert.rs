@@ -47,7 +47,8 @@ pub(crate) const FORCE_OPEN_SHADOW_ROOT_SCRIPT: &str = r#"(function () {
 })();"#;
 
 /// [`TargetObserver`] that installs [`FORCE_OPEN_SHADOW_ROOT_SCRIPT`] on every
-/// new page target via `Page.addScriptToEvaluateOnNewDocument`.
+/// new page target, and every new out-of-process iframe target, via
+/// `Page.addScriptToEvaluateOnNewDocument`.
 ///
 /// Added to the observer chain by
 /// [`BrowserBuilder::launch`](crate::BrowserBuilder::launch) /
@@ -65,9 +66,9 @@ impl TargetObserver for ShadowRootObserver {
     }
 
     async fn on_target_attached(&self, session: PausedSession<'_>) -> Result<(), ObserverError> {
-        // Only page targets have a DOM to patch; iframes inherit the patch via
-        // the parent in flat session mode, and workers have no `Element`.
-        if session.target_info.kind != "page" {
+        // A page, or an out-of-process iframe, which is a target of its own
+        // that the page's script doesn't reach. Workers have no `Element`.
+        if !matches!(session.target_info.kind.as_str(), "page" | "iframe") {
             return Ok(());
         }
         // `Page.enable` is idempotent; the stealth observer may also enable it

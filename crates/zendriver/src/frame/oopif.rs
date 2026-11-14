@@ -20,10 +20,11 @@
 //!    document (so the parent's `Page.frameAttached` handler has already
 //!    registered a same-id entry by the time the OOPIF target attaches).
 //!
-//! If neither id matches anything in the registry the OOPIF attaches
-//! before any parent observed `Page.frameAttached` for the host iframe
-//! — a rare race. We log a warning and skip registration; the OOPIF's
-//! session is still alive (the actor will release the debugger after the
+//! If neither id matches anything in the registry (the OOPIF is inside
+//! another OOPIF, whose frames no tab tracks, or it attaches before any
+//! parent observed `Page.frameAttached` for the host iframe), we skip
+//! registration; the OOPIF's session is still alive (the actor will release
+//! the debugger after the
 //! observer returns) but no `Frame` handle is exposed for it. The next
 //! `Page.frameAttached` from the parent tab will create a same-origin
 //! placeholder entry that callers can use for queries on the parent side,
@@ -32,7 +33,7 @@
 
 use std::sync::Arc;
 
-use tracing::{trace, warn};
+use tracing::{debug, trace};
 use zendriver_transport::{SessionHandle, TargetInfo};
 
 use crate::browser::BrowserInner;
@@ -103,7 +104,9 @@ pub(crate) async fn register_oopif_frame(
             }
         }
     }
-    warn!(
+    // The usual case for an OOPIF inside another OOPIF, whose frames no tab
+    // tracks.
+    debug!(
         target_id = %target_info.target_id,
         opener_frame_id = ?target_info.opener_frame_id,
         "OOPIF attached with no matching parent frame; skipping registration",

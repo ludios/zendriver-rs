@@ -138,6 +138,7 @@ const COMMANDS: &[(&str, Scope)] = &[
     ("Target.getTargetInfo", P),
     ("Target.getTargets", B),
     ("Target.setAutoAttach", B),
+    ("Target.setAutoAttach", P),
 ];
 
 /// Commands the library sends where Chrome doesn't have them: known bugs,

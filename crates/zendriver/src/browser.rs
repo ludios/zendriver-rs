@@ -18,7 +18,7 @@
 //! # Ok(()) }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -1863,13 +1863,14 @@ impl BrowserBuilder {
     /// Register an additional [`TargetObserver`].
     ///
     /// Observers fire on each new attached target of type `page` or
-    /// `iframe` (`session.target_info.kind`). An `iframe` target is an
-    /// out-of-process iframe: a cross-site iframe, which Chrome runs in
-    /// another renderer process than its page's, so that what an observer
-    /// sets up on the page's session doesn't reach it. An observer never
-    /// sees a worker or worklet target. The stealth observer (if any) is
-    /// added before user observers; user observers run in the order they
-    /// were registered.
+    /// `iframe` (`session.target_info.kind`), and are told of its end. An
+    /// `iframe` target is an out-of-process iframe: one that Chrome runs in
+    /// another renderer process than its page's, as it does a cross-site
+    /// iframe. What an observer sets up on the page's session (an override,
+    /// a script for new documents) mostly doesn't apply there, so set it up
+    /// on the iframe's own session too. An observer never sees a worker or
+    /// worklet target. The stealth observer (if any) is added before user
+    /// observers; user observers run in the order they were registered.
     /// The internal tab-registrar observer
     /// always runs last, after every observer registered here — a ready
     /// barrier that keeps a `Tab` from being handed back until every
@@ -2912,8 +2913,8 @@ impl TargetObserver for TabRegistrar {
 
 /// [`TargetObserver`] that makes Chrome attach the out-of-process iframes,
 /// the dedicated workers and the worklets of every page, and of every
-/// out-of-process iframe, paused like the page itself, so that the observer
-/// chain runs on each of them before its first script does.
+/// out-of-process iframe. Chrome pauses each new one like a new page, so
+/// that the observer chain runs on it before its first script does.
 ///
 /// The browser-scoped auto-attach (see [`auto_attach_params`]) attaches
 /// top-level targets only. Chrome reports an out-of-process iframe to the
@@ -2970,31 +2971,45 @@ impl TargetObserver for ChildTargetAutoAttach {
 /// [`ChildTargetAutoAttach`] makes Chrome attach: [`BrowserBuilder::observer`]
 /// promises `page` and `iframe` targets only. An observer that relies on that
 /// may send every target a command that a worker refuses (any of the `Page`
-/// domain), and its error would leave the worker paused for good.
-///
-/// `on_target_detached` still reports the end of every session, so also of
-/// those that the observer never saw attach.
-struct PagesAndIframesOnly(Arc<dyn TargetObserver>);
+/// domain), and its error would fail the worker's setup, so that the worker
+/// never starts.
+struct PagesAndIframesOnly {
+    observer: Arc<dyn TargetObserver>,
+    /// The ids of the attached sessions that `observer` was told of, so that
+    /// it is told of the end of those only.
+    told: std::sync::Mutex<HashSet<String>>,
+}
 
 #[async_trait::async_trait]
 impl TargetObserver for PagesAndIframesOnly {
     fn name(&self) -> &'static str {
-        self.0.name()
+        self.observer.name()
     }
 
     fn failure_policy(&self) -> zendriver_transport::ObserverFailurePolicy {
-        self.0.failure_policy()
+        self.observer.failure_policy()
     }
 
     async fn on_target_attached(&self, session: PausedSession<'_>) -> Result<(), ObserverError> {
         if !matches!(session.target_info.kind.as_str(), "page" | "iframe") {
             return Ok(());
         }
-        self.0.on_target_attached(session).await
+        self.told
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session.session_id.to_owned());
+        self.observer.on_target_attached(session).await
     }
 
     async fn on_target_detached(&self, session_id: &str) {
-        self.0.on_target_detached(session_id).await;
+        let told = self
+            .told
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id);
+        if told {
+            self.observer.on_target_detached(session_id).await;
+        }
     }
 }
 
@@ -3037,8 +3052,10 @@ fn assemble_observer_chain(
     obs_vec.push(Arc::new(ChildTargetAutoAttach) as Arc<dyn TargetObserver>);
     obs_vec.extend(stealth_obs);
     for observer in extra_observers {
-        obs_vec
-            .push(Arc::new(PagesAndIframesOnly(Arc::clone(observer))) as Arc<dyn TargetObserver>);
+        obs_vec.push(Arc::new(PagesAndIframesOnly {
+            observer: Arc::clone(observer),
+            told: std::sync::Mutex::new(HashSet::new()),
+        }));
     }
     if force_open_shadow_roots {
         obs_vec.push(Arc::new(crate::expert::ShadowRootObserver) as Arc<dyn TargetObserver>);
@@ -4138,7 +4155,8 @@ impl BrowserBuilder {
     /// When a [`StealthProfile`] is set (the default), this:
     /// 1. Resolves a [`zendriver_stealth::Fingerprint`] from the resolved
     ///    Chrome executable.
-    /// 2. Prepends the profile's [`StealthObserver`] to the observer chain.
+    /// 2. Adds the profile's [`StealthObserver`] to the observer chain (see
+    ///    [`BrowserBuilder::observer`] for the chain's order).
     /// 3. Appends the profile's stealth flags to the launch argv, and, for a
     ///    headless launch, its screen switches (see
     ///    [`StealthProfile::native`]).
@@ -6031,7 +6049,8 @@ mod tests {
         assert_eq!(names, vec!["child-auto-attach", "tab-registrar"]);
     }
 
-    /// [`TargetObserver`] that records the type of each target it is given.
+    /// [`TargetObserver`] that records the type of each target it is given,
+    /// and then the id of each session whose end it is told of.
     struct KindRecorder(std::sync::Mutex<Vec<String>>);
 
     #[async_trait::async_trait]
@@ -6048,11 +6067,16 @@ mod tests {
             kinds.push(session.target_info.kind.clone());
             Ok(())
         }
+
+        async fn on_target_detached(&self, session_id: &str) {
+            self.0.lock().expect("kinds").push(session_id.to_owned());
+        }
     }
 
     /// `BrowserBuilder::observer` promises `page` and `iframe` targets only,
     /// so the dedicated workers and worklets that Chrome attaches don't
-    /// reach a caller's observer; they are still released.
+    /// reach a caller's observer, and neither do their ends; they are still
+    /// released.
     #[tokio::test]
     async fn a_callers_observer_sees_only_pages_and_iframes() {
         use zendriver_transport::testing::MockConnection;
@@ -6083,8 +6107,25 @@ mod tests {
                 }
             }
         }
-        conn.shutdown();
         assert_eq!(*recorder.0.lock().expect("kinds"), ["page", "iframe"]);
+
+        for kind in ["worker", "worklet", "iframe"] {
+            let detached = json!({ "sessionId": format!("S-{kind}") });
+            mock.emit_event("Target.detachedFromTarget", detached).await;
+        }
+        // The observers are told in tasks of their own; the iframe's end
+        // comes last, so the others' would have been recorded by then.
+        for _ in 0..200 {
+            if recorder.0.lock().expect("kinds").len() == 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        conn.shutdown();
+        assert_eq!(
+            *recorder.0.lock().expect("kinds"),
+            ["page", "iframe", "S-iframe"]
+        );
     }
 
     /// Chrome reports an out-of-process iframe only to the session of its
