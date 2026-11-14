@@ -88,7 +88,10 @@ in the page:
   `Sec-CH-UA-*` headers), `navigator.platform`, and the
   `Accept-Language` header and `navigator.languages`, so that Chrome's
   own getters report one coherent identity. The timezone, locale and
-  geolocation overrides follow the profile and the persona.
+  geolocation overrides follow the profile and the persona. On Linux and
+  macOS, a launch also starts Chrome with `TZ` set to that timezone, so
+  every Chrome process is in it from the start (your own
+  `BrowserBuilder::env("TZ", ..)` or `env_remove("TZ")` wins).
 - **A screen for headless Chrome** — headless Chrome's own screen is
   800x600, with no taskbar. So when zendriver launches a headless
   Chrome, it passes `--screen-info` for a 1920x1080 screen with a

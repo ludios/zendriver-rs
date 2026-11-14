@@ -195,6 +195,37 @@ async fn removing_a_cross_site_iframe_keeps_the_tabs_geolocation() {
     browser.close().await;
 }
 
+/// A renderer process holds one timezone override for all of its targets,
+/// and drops it when the session that set it ends. So when the first of a
+/// site's two iframes is removed, the second falls back to the timezone that
+/// Chrome started in. On Unix, a launch starts Chrome in the persona's
+/// timezone (as `TZ`), so the second iframe's timezone stays the persona's.
+#[cfg(unix)]
+#[tokio::test]
+async fn removing_a_cross_site_iframe_keeps_its_siblings_timezone() {
+    // A zone that no host of these tests is in.
+    const ZONE: &str = "Pacific/Kiritimati";
+    const FRAME_SCRIPT: &str = "
+        const zone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+        parent.postMessage(zone(), '*');
+        onmessage = () => parent.postMessage(zone(), '*');";
+    let persona: Persona = format!(r#"{{"timezone": "{ZONE}"}}"#)
+        .parse()
+        .expect("persona JSON");
+    let server = server(FRAME_SCRIPT, 2).await;
+    let browser = launch_for_test(Browser::builder().persona_overlay(persona)).await;
+    let tab = load_page(&browser, &server).await;
+    assert_eq!(posted(&tab, 2).await, json!([ZONE, ZONE]));
+
+    eval(&tab, "document.querySelector('iframe').remove()").await;
+    let one_left = || async { iframe_targets(&browser).await == 1 };
+    assert_eventually(WITHIN, "the first iframe's target is gone", one_left).await;
+    let ask = "document.querySelector('iframe').contentWindow.postMessage('zone', '*')";
+    eval(&tab, ask).await;
+    assert_eq!(posted(&tab, 3).await[2], json!(ZONE));
+    browser.close().await;
+}
+
 /// `force_open_shadow_roots` reaches a cross-site iframe: the shadow root
 /// that its script asks to be closed is open.
 #[tokio::test]

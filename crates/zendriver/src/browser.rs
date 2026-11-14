@@ -1444,6 +1444,19 @@ impl BrowserBuilder {
     /// starts no process. The `chrome --version` that the stealth profile
     /// may run first (to learn Chrome's version) gets these variables too.
     ///
+    /// On Unix, [`BrowserBuilder::launch`] sets one variable of its own:
+    /// `TZ`, to the timezone that stealth presents (a persona's `timezone`,
+    /// including one from [`BrowserBuilder::geo_auto`] /
+    /// [`BrowserBuilder::geo_locale`], else
+    /// [`StealthProfile::timezone`]),
+    /// when there is one and the stealth profile isn't `off`. Every Chrome
+    /// process then starts in that timezone, so a target keeps it even where
+    /// the `Emulation.setTimezoneOverride` of stealth doesn't reach, or
+    /// stops applying (Chrome drops it from all of a site's iframes in a tab
+    /// when the session of the first of them ends). A call of this or of
+    /// [`BrowserBuilder::env_remove`] that names `TZ` wins over that. Windows'
+    /// Chrome doesn't read `TZ`, so there the override is all there is.
+    ///
     /// Use it for what Chrome (or the loader that starts it) takes only from
     /// its environment, such as the Wayland compositor's socket
     /// (`WAYLAND_DISPLAY`) or the directories of shared libraries
@@ -2003,6 +2016,26 @@ impl BrowserBuilder {
             v.push("about:blank".to_string());
         }
         v
+    }
+
+    /// The changes that `launch` makes to the environment that the Chrome
+    /// process inherits, in the order to apply them: `(name, Some(value))`
+    /// sets a variable, and `(name, None)` removes it.
+    ///
+    /// On Unix, the first is `TZ` = `timezone` (the timezone that stealth
+    /// presents, if any), so that every Chrome process starts in it. The
+    /// caller's changes ([`env`](Self::env) and
+    /// [`env_remove`](Self::env_remove)) follow, so one that names `TZ` wins.
+    /// Windows' Chrome doesn't read `TZ`.
+    fn chrome_env(&self, timezone: Option<&str>) -> Vec<(OsString, Option<OsString>)> {
+        let mut env = Vec::new();
+        if cfg!(unix)
+            && let Some(timezone) = timezone
+        {
+            env.push(("TZ".into(), Some(timezone.into())));
+        }
+        env.extend(self.env.iter().cloned());
+        env
     }
 
     /// The switches that `observer` asks for in a headless launch (none in a
@@ -4229,6 +4262,7 @@ impl BrowserBuilder {
         // Chain order (see `assemble_observer_chain`): stealth → user-supplied
         // observers → force-open-shadow-roots → tab registrar LAST, the
         // ready barrier.
+        let mut timezone = None;
         let (stealth_obs, extra_flags): (Option<Arc<dyn TargetObserver>>, Vec<String>) =
             if let Some(ref profile) = self.stealth {
                 // BrowserBuilder is the authority: when it set a backend, it
@@ -4243,6 +4277,7 @@ impl BrowserBuilder {
                     StealthObserver::with_persona(profile.clone(), fp, self.resolved_persona()?);
                 let mut flags = profile.build_flags();
                 flags.extend(self.headless_stealth_flags(&observer, &flags)?);
+                timezone = observer.timezone().map(str::to_owned);
                 (Some(Arc::new(observer)), flags)
             } else {
                 (None, Vec::new())
@@ -4312,7 +4347,7 @@ impl BrowserBuilder {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        for (key, value) in &self.env {
+        for (key, value) in self.chrome_env(timezone.as_deref()) {
             match value {
                 Some(value) => cmd.env(key, value),
                 None => cmd.env_remove(key),
@@ -5746,6 +5781,24 @@ mod tests {
         assert!(debug.contains("API_KEY=<redacted>"), "{debug}");
         assert!(debug.contains("WAYLAND_SOCKET (removed)"), "{debug}");
         assert!(!debug.contains("hunter2"), "{debug}");
+    }
+
+    /// Chrome must start in the timezone that stealth presents, and a
+    /// caller who names `TZ` must still get their way: their changes are
+    /// applied after ours.
+    #[cfg(unix)]
+    #[test]
+    fn chrome_env_puts_the_stealth_timezone_before_the_callers_changes() {
+        let tz = |value: &str| (OsString::from("TZ"), Some(OsString::from(value)));
+        let builder = BrowserBuilder::new();
+        assert_eq!(builder.chrome_env(None), []);
+        assert_eq!(builder.chrome_env(Some("Asia/Tokyo")), [tz("Asia/Tokyo")]);
+
+        let builder = BrowserBuilder::new().env("TZ", "UTC").env_remove("TZ");
+        assert_eq!(
+            builder.chrome_env(Some("Asia/Tokyo")),
+            [tz("Asia/Tokyo"), tz("UTC"), (OsString::from("TZ"), None)]
+        );
     }
 
     #[test]

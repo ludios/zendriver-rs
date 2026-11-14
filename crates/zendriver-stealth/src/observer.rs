@@ -371,6 +371,24 @@ impl StealthObserver {
         }
         headless_screen_switches(&self.screen())
     }
+
+    /// The IANA timezone that this observer sets on each page and
+    /// out-of-process iframe, with `Emulation.setTimezoneOverride`: the
+    /// persona's, else the profile's pin. `None` when neither sets one, and
+    /// for `Off`, which sends no overrides.
+    ///
+    /// A renderer process drops that override when the session that set it
+    /// ends, even while other targets of the process live on. So a launch
+    /// also starts Chrome in this timezone where it can (see
+    /// `BrowserBuilder::launch` in `zendriver`), which makes it the one that
+    /// Chrome falls back to.
+    #[must_use]
+    pub fn timezone(&self) -> Option<&str> {
+        if self.profile.kind() == ProfileKind::Off {
+            return None;
+        }
+        self.fingerprint.timezone.as_deref()
+    }
 }
 
 /// The `navigator.cpuPerformance` tier that Chrome would most likely report
@@ -1861,6 +1879,41 @@ mod persona_reaches_cdp_tests {
             params(&frames, "Emulation.setTimezoneOverride")["timezoneId"].as_str(),
             Some("Asia/Tokyo"),
             "an explicitly set Persona::timezone must reach Emulation.setTimezoneOverride"
+        );
+    }
+
+    /// `timezone()` is what a launch starts Chrome in, so it must be the
+    /// zone that the override sets (the persona's, over the fingerprint's),
+    /// and nothing under `off`, which sets no override.
+    #[test]
+    fn timezone_is_the_one_that_the_override_sets() {
+        let observer = |profile: StealthProfile, persona_zone: Option<&str>| {
+            let fp = Fingerprint {
+                timezone: Some("America/New_York".into()),
+                ..bare_fingerprint()
+            };
+            let persona = Persona {
+                timezone: persona_zone.map(str::to_owned),
+                ..Persona::default()
+            };
+            StealthObserver::with_persona(profile, fp, persona)
+        };
+        let native = StealthProfile::native;
+        assert_eq!(
+            observer(native(), Some("Asia/Tokyo")).timezone(),
+            Some("Asia/Tokyo")
+        );
+        assert_eq!(
+            observer(native(), None).timezone(),
+            Some("America/New_York")
+        );
+        assert_eq!(
+            observer(StealthProfile::off(), Some("Asia/Tokyo")).timezone(),
+            None
+        );
+        assert_eq!(
+            StealthObserver::new(native(), bare_fingerprint()).timezone(),
+            None
         );
     }
 

@@ -47,7 +47,9 @@ pub struct Persona {
     /// fingerprint's applies: the host's, or the profile's `memory_gb` pin.
     pub device_memory_gb: Option<u32>,
     /// IANA timezone name (e.g. `"Europe/Berlin"`). Drives
-    /// `Emulation.setTimezoneOverride`, which is what `Intl` and `Date` read.
+    /// `Emulation.setTimezoneOverride`, which is what `Intl` and `Date` read;
+    /// on Unix, `zendriver` also launches Chrome with `TZ` set to it (see
+    /// its `BrowserBuilder::env`).
     /// When unset, the [`Fingerprint`](crate::Fingerprint)'s own timezone
     /// applies — from
     /// [`StealthProfile::timezone`](crate::StealthProfile::timezone) — and

@@ -306,7 +306,8 @@ impl StealthProfile {
         self
     }
     /// Override the reported timezone via `Emulation.setTimezoneOverride`
-    /// (IANA name, e.g. `"America/Los_Angeles"`).
+    /// (IANA name, e.g. `"America/Los_Angeles"`). On Unix, `zendriver` also
+    /// launches Chrome with `TZ` set to it (see its `BrowserBuilder::env`).
     #[must_use]
     pub fn timezone(mut self, tz: impl Into<String>) -> Self {
         self.per_field.timezone = Some(tz.into());
