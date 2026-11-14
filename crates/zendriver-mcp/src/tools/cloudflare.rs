@@ -252,6 +252,9 @@ pub async fn solve_turnstile(
 ) -> Result<SolveOutput, ErrorData> {
     let s = state.lock().await;
     let tab = current_tab(&s).await?;
+    // Other tools go on while the solver waits, which with
+    // `wait_for_challenge_ms` it does even on a page without a challenge.
+    drop(s);
     // Build the bypass driver. `tab.cloudflare()` borrows `tab` for the
     // bypass's `'_` lifetime, but `wait_for_clearance` consumes `self`, so
     // the bypass lives only for the single await we're about to do.
