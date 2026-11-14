@@ -185,9 +185,11 @@ fn configure<'a>(mut bypass: CloudflareBypass<'a>, input: SolveInput) -> Cloudfl
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     /// The page showed no challenge marker when the solver first saw it
-    /// parsed, so there was nothing to solve; the call returns at once.
-    /// Decided on that first look: a widget a script mounts later is not
-    /// waited for. `token` will be `None`.
+    /// parsed, and none before; the call returns at once. It says only that
+    /// no Turnstile challenge was found: a widget a script mounts after that
+    /// first look is not waited for, and Cloudflare's block pages ("Sorry,
+    /// you have been blocked") carry no marker either. `token` will be
+    /// `None`.
     AlreadyClear,
     /// Turnstile produced a token — the first non-empty value of an element
     /// matching `selectors.token_inputs`, tried in order;
@@ -204,7 +206,7 @@ pub enum Outcome {
     /// is added by script after it is parsed lands here too, so verify the
     /// page before treating what you read next as post-challenge content.
     ChallengeGone,
-    /// `timeout_ms` elapsed without reaching either success state. `token`
+    /// `timeout_ms` elapsed without reaching another outcome. `token`
     /// will be `None`. Not a hard error — agents can retry or give up.
     Timeout,
 }
@@ -215,13 +217,14 @@ pub struct SolveOutput {
     /// Which terminal state the bypass reached.
     pub outcome: Outcome,
     /// Turnstile response token. Populated only when `outcome == Solved`;
-    /// `None` for `ChallengeGone` and `Timeout`.
+    /// `None` for `AlreadyClear`, `ChallengeGone` and `Timeout`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
 
 /// Drive the Turnstile clearance flow on the current tab, returning the
-/// terminal outcome (`Solved`, `ChallengeGone`, or `Timeout`) within
+/// terminal outcome (`AlreadyClear`, `Solved`, `ChallengeGone`, or
+/// `Timeout`) within
 /// `timeout_ms`.
 ///
 /// See module-level docs for outcome semantics.

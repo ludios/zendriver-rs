@@ -10,10 +10,10 @@
 //! keeps every `ImpervaError` (CAPTCHA-without-solver, CDP failure, JS error)
 //! as a real MCP error.
 //!
-//! Unlike Cloudflare's three states, Imperva reports a fourth —
 //! [`ImpervaClearanceOutcome::AlreadyClear`] (no surface present at call
-//! time, fast path) — surfaced as a distinct [`Outcome::AlreadyClear`] so an
-//! agent can skip redundant follow-up work.
+//! time, fast path) is surfaced as a distinct [`Outcome::AlreadyClear`], as
+//! it is for Cloudflare and DataDome, so an agent can skip redundant
+//! follow-up work.
 //!
 //! The lib's `on_captcha` solver hook is intentionally **not** wired over
 //! MCP (same class as the interception stream non-goal): a CAPTCHA surface

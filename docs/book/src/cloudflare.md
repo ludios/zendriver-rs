@@ -35,13 +35,24 @@ The driver returns a [`ClearanceOutcome`] on success. All four are
 ordinary terminals, the last one included:
 
 - **`AlreadyClear`** — the page showed no challenge marker when the run
-  first saw it parsed: no Cloudflare gate, or a clearance cookie that
-  skipped it. The run returns on that first look, so calling
-  `wait_for_clearance` after every navigation is safe and costs one poll
-  tick on a page without a challenge. It is decided once, at call time:
-  a widget that a page's script mounts later is missed, and so is a
-  challenge whose navigation has not committed yet, so call it after the
-  navigation has loaded.
+  first saw it parsed, nor on any tick before: no challenge was served,
+  or a clearance cookie skipped it. The run returns on that first look,
+  so calling `wait_for_clearance` after a navigation that met no
+  challenge costs one poll tick, or a few while the page is still
+  parsing. It says only that no Turnstile challenge was found:
+  - It is decided once, on that first look. A widget that a page's
+    script mounts later is missed, and so is a challenge whose
+    navigation has not committed yet, so call it after the navigation
+    has loaded.
+  - Cloudflare's block pages ("Sorry, you have been blocked", rate
+    limits) carry no Turnstile marker, so they land here too.
+  - A `container` override that leaves out the default's script clause
+    makes Cloudflare's full-page challenge land here too, before its
+    widget appears.
+
+  The other way round, another provider's widget matching the default
+  `[data-sitekey]` reads as a challenge, and the run goes on to its
+  timeout.
 - **`TokenAcquired(token)`** — the `cf-turnstile-response` input picked
   up a non-empty value. The page can now proceed; the token is also
   forwarded to Cloudflare server-side on the next request.
@@ -60,8 +71,8 @@ ordinary terminals, the last one included:
   before trusting what you scrape next.
 - **`TimedOut { saw_challenge }`** — the deadline elapsed. `true` means
   a real challenge sat on the page and never resolved; `false` means the
-  run never got to look at the page parsed (it was still loading at the
-  deadline).
+  run never saw the page parsed: it was still loading, or changing under
+  every look, until the deadline.
 
 [`ClearanceOutcome`]: https://docs.rs/zendriver/latest/zendriver/enum.ClearanceOutcome.html
 
@@ -104,6 +115,9 @@ it, shadow root or not. The tick then resolves in this order:
    immediately. This is also the invisible-Turnstile path, where no
    iframe mounts and Cloudflare's loader script fills the field in
    without anything to click.
+   **No marker at the first look returns `AlreadyClear`.** The first tick
+   that sees the page parsed, with no marker on it or on any tick before,
+   ends the run.
 2. **Measure, scroll, measure, click.** On a tick that may click, the
    widget is measured first, so one that is no click target never
    scrolls the page. Raw mouse events carry viewport coordinates, so a
@@ -202,7 +216,7 @@ and legacy inputs both hold one is read the modern way. An empty value turns a m
 off rather than widening it: an empty `container` drops the container
 signal, an empty `iframe_src_contains` matches no iframe (rather than
 every iframe, which is what a bare substring test would otherwise do),
-and an empty `token_inputs` leaves only the marker-vanished and deadline
+and an empty `token_inputs` leaves the no-marker, marker-vanished and deadline
 terminals.
 
 Some things stay fixed, because they are the library's judgement rather
@@ -307,8 +321,9 @@ find.
 
 Call `wait_for_clearance` **after** the navigation completes but
 **before** any post-challenge code that depends on being past the gate.
-It is safe to call after every navigation: a page without a challenge
-returns `AlreadyClear` at once. The typical sequence:
+It is safe to call after every navigation that has loaded: a page
+without a challenge marker returns `AlreadyClear` at once. The typical
+sequence:
 
 ```rust,ignore
 tab.goto(url).await?;
@@ -319,15 +334,15 @@ match tab.cloudflare()
     .await?
 {
     ClearanceOutcome::AlreadyClear => {
-        // No challenge on this page.
+        // No Turnstile challenge found on this page.
     }
     ClearanceOutcome::TokenAcquired(_) | ClearanceOutcome::ChallengeGone => {
         // Past the gate. After the full-page challenge, the tab now shows
         // the page it navigated to.
     }
     ClearanceOutcome::TimedOut { saw_challenge: false } => {
-        // The page was still loading at the deadline.
-        return Err("the page did not load".into());
+        // The run never saw the page parsed.
+        return Err("the page never settled".into());
     }
     ClearanceOutcome::TimedOut { saw_challenge: true } => {
         // A real challenge that never resolved. Worth failing the job.
@@ -340,7 +355,7 @@ let data = tab.find().css(".product-grid").one().await?;
 ```
 
 The `?` propagates the two real faults, `Call` and `JsError`. Everything
-else is a terminal you decide about: "no gate on this page"
+else is a terminal you decide about: "no challenge found on this page"
 (`AlreadyClear`) and "a gate we could not pass"
 (`TimedOut { saw_challenge: true }`) want opposite handling.
 
@@ -352,7 +367,8 @@ else is a terminal you decide about: "no gate on this page"
 - `.selectors(..)` / `.click_policy(..)` / `.on_click(..)` — the markers
   and the click, covered in [Markers and clicks are
   yours](#markers-and-clicks-are-yours).
-- Pass a generous `wait_for_clearance` timeout (30-60 s): only a page
-  with a challenge spends it. Later navigations with the same
+- Pass a generous `wait_for_clearance` timeout (30-60 s): a page with no
+  challenge marker returns before it, and a page with one is what it is
+  for. Later navigations with the same
   `user_data_dir` usually carry Cloudflare's clearance cookie, get no
   challenge at all, and return `AlreadyClear` on the first tick.

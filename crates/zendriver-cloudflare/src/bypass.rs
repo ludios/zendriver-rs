@@ -15,8 +15,9 @@
 //!    non-empty token is observed — including the **invisible Turnstile**
 //!    path, where nothing is clicked and the token is populated directly.
 //!    Resolves to [`ClearanceOutcome::AlreadyClear`] when the first
-//!    observation of a parsed document shows no marker at all: a page with
-//!    no challenge costs one tick, not the timeout.
+//!    observation of a parsed document shows no marker, and no earlier tick
+//!    saw one: a page with no challenge costs the ticks it takes to parse,
+//!    not the timeout.
 //! 3. If a click is due and the widget is mounted, scrolls it into view
 //!    and measures it; if it is a click target (non-zero size and visible),
 //!    clicks the point the [`ClickPolicy`] chose inside it — by default
@@ -78,15 +79,28 @@ pub enum ClearanceOutcome {
     /// the page before treating what you scrape next as clean.
     ChallengeGone,
     /// No challenge marker was on the page when the run first saw it
-    /// parsed: no container, no token input, no widget, and none of
-    /// Cloudflare's own page scripts. Fast path: the run ends on that first
-    /// look, so calling `wait_for_clearance` after every navigation costs
-    /// one poll tick on a page without a challenge.
+    /// parsed, nor on any tick before: no container, no token input, no
+    /// widget, and (with the default selectors) none of the scripts that
+    /// the pages of Cloudflare's full-page challenge load. Fast path: the
+    /// run ends on that first look, so calling `wait_for_clearance` after a
+    /// navigation that met no challenge costs one poll tick, or a few while
+    /// the page is still parsing.
     ///
-    /// Decided once, at call time: a widget that a page's script mounts
-    /// later is missed, and so is a challenge whose navigation has not
-    /// committed yet. Call it after the navigation that may lead to a
-    /// challenge has loaded (`goto`, then `wait_for_load`).
+    /// It says only that no Turnstile challenge was found:
+    /// - It is decided once, on that first look. A widget that a page's
+    ///   script mounts later is missed, and so is a challenge whose
+    ///   navigation has not committed yet: call it after the navigation that
+    ///   may lead to a challenge has loaded (`goto`, then `wait_for_load`).
+    /// - Cloudflare's block pages ("Sorry, you have been blocked", rate
+    ///   limits) carry no Turnstile marker, so they land here too.
+    /// - With a [`container`](TurnstileSelectors::container) that leaves
+    ///   out the default's script clause, Cloudflare's full-page challenge
+    ///   lands here too: its widget and token input appear after it is
+    ///   parsed.
+    ///
+    /// The other way round, another provider's widget matching the default
+    /// `[data-sitekey]` reads as a challenge, and the run then goes on to
+    /// its timeout.
     AlreadyClear,
     /// Deadline elapsed without a terminal clearance state. `saw_challenge`
     /// is `true` if any challenge marker (container, hidden input, or live
@@ -260,9 +274,10 @@ impl<'a> CloudflareBypass<'a> {
     /// Poll the page until a Turnstile clearance terminal state is reached or
     /// `timeout` elapses.
     ///
-    /// Safe to call on any page: one without a challenge returns
-    /// [`ClearanceOutcome::AlreadyClear`] on the first look at it parsed,
-    /// with nothing clicked or scrolled.
+    /// Safe to call after any navigation has loaded: a page without a
+    /// challenge marker returns [`ClearanceOutcome::AlreadyClear`] on the
+    /// first look at it parsed, with nothing clicked or scrolled. Read that
+    /// variant's docs for what it does not establish.
     ///
     /// Handles both the **interactive** flow (challenge iframe mounts → we
     /// click it → token appears) and the **invisible** flow (no iframe;
@@ -271,7 +286,7 @@ impl<'a> CloudflareBypass<'a> {
     ///
     /// # Returns
     /// - `Ok(ClearanceOutcome::AlreadyClear)` — the first observation of the
-    ///   parsed page showed no challenge marker.
+    ///   parsed page showed no challenge marker, and no earlier one did.
     /// - `Ok(ClearanceOutcome::TokenAcquired(token))` — a configured token
     ///   input picked up a non-empty value, either after we clicked the
     ///   interactive iframe or because the page uses invisible Turnstile.

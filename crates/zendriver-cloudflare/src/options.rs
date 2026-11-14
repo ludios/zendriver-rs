@@ -76,7 +76,7 @@ pub struct TurnstileSelectors {
     /// way. Defaults to
     /// `["[name=\"cf-turnstile-response\"]", "[name=\"cf_challenge_response\"]"]`.
     /// Empty entries are skipped; an empty list disables token detection,
-    /// leaving only the marker-vanished and deadline terminals.
+    /// leaving the no-marker, marker-vanished and deadline terminals.
     pub token_inputs: Vec<String>,
 }
 

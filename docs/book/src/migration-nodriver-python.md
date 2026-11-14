@@ -86,9 +86,9 @@ match tab.cloudflare()
     ClearanceOutcome::TokenAcquired(_) | ClearanceOutcome::ChallengeGone => {
         /* past the gate, as far as the markers tell */
     }
-    ClearanceOutcome::AlreadyClear => { /* no gate */ }
+    ClearanceOutcome::AlreadyClear => { /* no challenge found */ }
     ClearanceOutcome::TimedOut { saw_challenge: false } => {
-        return Err("the page did not load".into());
+        return Err("the page never settled".into());
     }
     ClearanceOutcome::TimedOut { saw_challenge: true } => {
         return Err("cloudflare challenge did not clear".into());

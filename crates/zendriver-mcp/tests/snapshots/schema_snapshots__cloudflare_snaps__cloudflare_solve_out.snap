@@ -11,7 +11,7 @@ properties:
     description: Which terminal state the bypass reached.
     $ref: "#/$defs/Outcome"
   token:
-    description: "Turnstile response token. Populated only when `outcome == Solved`;\n`None` for `ChallengeGone` and `Timeout`."
+    description: "Turnstile response token. Populated only when `outcome == Solved`;\n`None` for `AlreadyClear`, `ChallengeGone` and `Timeout`."
     type:
       - string
       - "null"
@@ -21,7 +21,7 @@ $defs:
   Outcome:
     description: "Terminal outcome of a turnstile bypass attempt.\n\n`AlreadyClear`, `Solved` and `ChallengeGone` mirror the lib's\n`ClearanceOutcome` variants. `Timeout` mirrors the lib's `ClearanceOutcome::TimedOut` — a\ndeadline in a turnstile flow is a normal outcome, not an error —\nsurfacing it on the success channel so agents can branch on `outcome`\nwithout try/catch around a timeout."
     oneOf:
-      - description: "The page showed no challenge marker when the solver first saw it\nparsed, so there was nothing to solve; the call returns at once.\nDecided on that first look: a widget a script mounts later is not\nwaited for. `token` will be `None`."
+      - description: "The page showed no challenge marker when the solver first saw it\nparsed, and none before; the call returns at once. It says only that\nno Turnstile challenge was found: a widget a script mounts after that\nfirst look is not waited for, and Cloudflare's block pages (\"Sorry,\nyou have been blocked\") carry no marker either. `token` will be\n`None`."
         type: string
         const: already_clear
       - description: "Turnstile produced a token — the first non-empty value of an element\nmatching `selectors.token_inputs`, tried in order;\n`cf-turnstile-response` by default.\nThe token is available in [`SolveOutput::token`]."
@@ -30,6 +30,6 @@ $defs:
       - description: "Every challenge marker seen earlier is gone without a token, and the\npage has settled: a navigation replaced it with a parsed document\n(how Cloudflare's full-page challenge ends, on the page it guards),\nor it stayed without markers for three seconds. `token` will be\n`None`.\n\nNot proof the gate was passed: a replacement page whose every marker\nis added by script after it is parsed lands here too, so verify the\npage before treating what you read next as post-challenge content."
         type: string
         const: challenge_gone
-      - description: "`timeout_ms` elapsed without reaching either success state. `token`\nwill be `None`. Not a hard error — agents can retry or give up."
+      - description: "`timeout_ms` elapsed without reaching another outcome. `token`\nwill be `None`. Not a hard error — agents can retry or give up."
         type: string
         const: timeout

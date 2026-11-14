@@ -63,8 +63,9 @@ async fn end_to_end_solve_turnstile() {
         .expect("browser_open ok");
 
     // 2. Navigate to a known Turnstile-protected page. We don't wait for
-    //    idle — the challenge mounts asynchronously and the bypass driver
-    //    has its own poll loop.
+    //    idle; a widget the page mounts by script after the solver's first
+    //    look at it parsed ends the call as `already_clear`, which this
+    //    best-effort test accepts.
     client
         .call_tool(CallToolRequestParams::new("browser_goto").with_arguments({
             let mut m = serde_json::Map::new();
