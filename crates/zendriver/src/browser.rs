@@ -1704,10 +1704,10 @@ impl BrowserBuilder {
     /// probe to `ip-api.com`. Opt-in; [`launch`](Self::launch) and
     /// [`connect`](Self::connect) make at most ONE outbound request, and only
     /// when this is set. They make none when an earlier `launch` or `connect`
-    /// in this process, with the same proxy and proxy credentials (or with
-    /// no proxy), succeeded in its probe less than a minute ago or is still
-    /// probing; they then use that probe's result, which can be a failure
-    /// if the probe was still running. See
+    /// with `geo_auto()` in this process, with the same proxy and proxy
+    /// credentials (or with no proxy), succeeded in its probe less than a
+    /// minute ago or is still probing; they then use that probe's result,
+    /// which can be a failure if the probe was still running. See
     /// [`crate::IpApiResolver::cache_ttl`] to change that minute.
     ///
     /// The result has two parts, each filled only if nothing else sets it:

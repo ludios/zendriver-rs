@@ -41,158 +41,6 @@ struct Probe {
     timeout: Duration,
 }
 
-/// A finished probe's result (`None`: the probe failed), and when it
-/// finished.
-type Outcome = (Option<ResolvedGeo>, Instant);
-
-/// The [`Outcome`] of one probe, for every resolve that awaits it; pending
-/// while the probe is in flight.
-type SharedOutcome = Shared<BoxFuture<'static, Outcome>>;
-
-/// The latest probe of each configuration (a [`Probe`] and a cache TTL),
-/// shared by every [`IpApiResolver`] in this process. Starting a probe
-/// first evicts every probe that [`reusable`] rejects for its own TTL.
-static PROBES: LazyLock<Mutex<HashMap<(Probe, Duration), SharedOutcome>>> =
-    LazyLock::new(Default::default);
-
-/// Whether a resolve whose cache TTL is `ttl` may await `outcome` instead of
-/// starting a probe: the probe is in flight, or it succeeded less than `ttl`
-/// ago.
-fn reusable(outcome: &SharedOutcome, ttl: Duration) -> bool {
-    match outcome.peek() {
-        None => true,
-        Some((geo, finished_at)) => geo.is_some() && finished_at.elapsed() < ttl,
-    }
-}
-
-impl Default for IpApiResolver {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl IpApiResolver {
-    /// A resolver hitting `http://ip-api.com/json` directly (no proxy), with
-    /// a 5-second timeout and a 1-minute [`Self::cache_ttl`]. Chain
-    /// [`Self::endpoint`] / [`Self::timeout`] / [`Self::cache_ttl`] to
-    /// customize; `BrowserBuilder::geo_auto` wires the proxy (and its
-    /// credentials, if any) via [`Self::with_proxy`].
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            probe: Probe {
-                endpoint: "http://ip-api.com/json".into(),
-                proxy: None,
-                proxy_auth: None,
-                timeout: Duration::from_secs(5),
-            },
-            cache_ttl: Duration::from_secs(60),
-        }
-    }
-
-    /// Override the probe endpoint (default `http://ip-api.com/json`, which
-    /// is plaintext HTTP — a malicious or compromised proxy operator can
-    /// observe or tamper with the response since it's routed through
-    /// `with_proxy`; override to an HTTPS endpoint if you need integrity).
-    /// Must return a JSON body with a top-level `countryCode` string field;
-    /// an optional top-level `timezone` string field (ip-api's exact IANA
-    /// zone for the exit IP) is used when present, falling back to the
-    /// country-representative zone otherwise.
-    #[must_use]
-    pub fn endpoint(mut self, url: impl Into<String>) -> Self {
-        self.probe.endpoint = url.into();
-        self
-    }
-
-    /// Override the request timeout (default 5s).
-    #[must_use]
-    pub fn timeout(mut self, d: Duration) -> Self {
-        self.probe.timeout = d;
-        self
-    }
-
-    /// Override how long a successful probe is reused (default 1 minute);
-    /// `Duration::ZERO` turns off both the reuse and the sharing of a probe
-    /// in flight. Reuse and sharing reduce the requests that a burst of
-    /// launches sends to the endpoint; `ip-api.com`'s free endpoint allows
-    /// 45 requests a minute per IP.
-    ///
-    /// A successful probe is reused by every later
-    /// [`resolve`](GeoResolver::resolve) in this process, of this resolver
-    /// or of any other `IpApiResolver` with the same configuration (the
-    /// same endpoint, proxy or lack of one, proxy credentials, timeout, and
-    /// TTL), until `ttl` has passed since the probe finished. A resolve that
-    /// starts while a probe of the same configuration is in flight waits for
-    /// that probe and gets its result, even a failure. A resolve that starts
-    /// after a probe failed sends a new probe. So a configuration with no
-    /// success in the last `ttl` probes again: for example, a new proxy, or
-    /// a new session ID in the username of a sticky-session proxy.
-    ///
-    /// The exit IP can change while the configuration stays the same, and a
-    /// reused result then belongs to the earlier exit IP until `ttl` has
-    /// passed: without a proxy, a VPN or a switch of networks changes this
-    /// machine's own exit IP, and a rotating proxy can change its exit IP
-    /// between any two connections.
-    #[must_use]
-    pub fn cache_ttl(mut self, ttl: Duration) -> Self {
-        self.cache_ttl = ttl;
-        self
-    }
-
-    /// Route the probe through `server` (mirrors the browser's own proxy so
-    /// the resolved country matches the exit IP Chrome will actually use),
-    /// authenticating with `auth` (`user`, `pass`) when the proxy requires
-    /// it — passed to reqwest via [`reqwest::Proxy::basic_auth`], never
-    /// embedded in the proxy URL string, so it can't leak into an error
-    /// `Display`.
-    ///
-    /// Called by `BrowserBuilder::geo_auto`, wiring the proxy from
-    /// [`crate::browser::BrowserBuilder::proxy`] through here. Public so
-    /// callers building a custom-endpoint resolver by hand (e.g.
-    /// `zendriver-mcp`'s `geo_endpoint` option) can mirror the same proxy
-    /// the browser itself uses, the same way `geo_auto`'s bundled default
-    /// does.
-    #[must_use]
-    pub fn with_proxy(mut self, server: Option<String>, auth: Option<(String, String)>) -> Self {
-        self.probe.proxy = server;
-        self.probe.proxy_auth = auth;
-        self
-    }
-
-    /// The outcome to await for this resolver's configuration: that of the
-    /// probe in flight, or of a success younger than the TTL. Failing both,
-    /// that of a new probe, which runs as a task of its own so that no
-    /// resolve awaiting it can cancel or stall it.
-    fn shared_outcome(&self) -> SharedOutcome {
-        let key = (self.probe.clone(), self.cache_ttl);
-        let mut probes = PROBES.lock().unwrap_or_else(PoisonError::into_inner);
-        let existing = probes
-            .get(&key)
-            .filter(|outcome| reusable(outcome, self.cache_ttl))
-            .cloned();
-        if let Some(outcome) = existing {
-            return outcome;
-        }
-        probes.retain(|(_, ttl), outcome| reusable(outcome, *ttl));
-        let probe = self.probe.clone();
-        let task = tokio::spawn(
-            async move { (probe.run().await, Instant::now()) }
-                .in_current_span()
-                .with_current_subscriber(),
-        );
-        let outcome = async move {
-            task.await.unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "geo probe: its task ended without a result");
-                (None, Instant::now())
-            })
-        }
-        .boxed()
-        .shared();
-        probes.insert(key, outcome.clone());
-        outcome
-    }
-}
-
 impl Probe {
     /// Ask the endpoint, through the proxy if one is set, for the exit IP's
     /// country and timezone. `None` means the probe failed; each failure is
@@ -275,6 +123,156 @@ impl Probe {
     }
 }
 
+/// A finished probe's result (`None`: the probe failed), and when it
+/// finished.
+type Outcome = (Option<ResolvedGeo>, Instant);
+
+/// The [`Outcome`] of one probe, for every resolve that awaits it; pending
+/// while the probe is in flight.
+type SharedOutcome = Shared<BoxFuture<'static, Outcome>>;
+
+/// The latest probe of each configuration (a [`Probe`] and a cache TTL),
+/// shared by every [`IpApiResolver`] in this process. Each resolve first
+/// evicts every probe that [`reusable`] rejects for its own TTL.
+static PROBES: LazyLock<Mutex<HashMap<(Probe, Duration), SharedOutcome>>> =
+    LazyLock::new(Default::default);
+
+/// Whether a resolve whose cache TTL is `ttl` may await `outcome` instead of
+/// starting a probe: the probe is in flight, or it succeeded less than `ttl`
+/// ago.
+fn reusable(outcome: &SharedOutcome, ttl: Duration) -> bool {
+    match outcome.peek() {
+        None => true,
+        Some((geo, finished_at)) => geo.is_some() && finished_at.elapsed() < ttl,
+    }
+}
+
+impl Default for IpApiResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IpApiResolver {
+    /// A resolver hitting `http://ip-api.com/json` directly (no proxy), with
+    /// a 5-second timeout and a 1-minute [`Self::cache_ttl`]. Chain
+    /// [`Self::endpoint`] / [`Self::timeout`] / [`Self::cache_ttl`] to
+    /// customize; `BrowserBuilder::geo_auto` wires the proxy (and its
+    /// credentials, if any) via [`Self::with_proxy`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            probe: Probe {
+                endpoint: "http://ip-api.com/json".into(),
+                proxy: None,
+                proxy_auth: None,
+                timeout: Duration::from_secs(5),
+            },
+            cache_ttl: Duration::from_secs(60),
+        }
+    }
+
+    /// Override the probe endpoint (default `http://ip-api.com/json`, which
+    /// is plaintext HTTP — a malicious or compromised proxy operator can
+    /// observe or tamper with the response since it's routed through
+    /// `with_proxy`; override to an HTTPS endpoint if you need integrity).
+    /// Must return a JSON body with a top-level `countryCode` string field;
+    /// an optional top-level `timezone` string field (ip-api's exact IANA
+    /// zone for the exit IP) is used when present, falling back to the
+    /// country-representative zone otherwise.
+    #[must_use]
+    pub fn endpoint(mut self, url: impl Into<String>) -> Self {
+        self.probe.endpoint = url.into();
+        self
+    }
+
+    /// Override the request timeout (default 5s).
+    #[must_use]
+    pub fn timeout(mut self, d: Duration) -> Self {
+        self.probe.timeout = d;
+        self
+    }
+
+    /// Override how long a successful probe is reused (default 1 minute);
+    /// `Duration::ZERO` turns off both the reuse and the sharing of a probe
+    /// in flight. Reuse and sharing reduce the requests that a burst of
+    /// launches sends to the endpoint; `ip-api.com`'s free endpoint allows
+    /// 45 requests a minute per IP.
+    ///
+    /// A successful probe is reused by every later
+    /// [`resolve`](GeoResolver::resolve) in this process, of this resolver
+    /// or of any other `IpApiResolver` with the same configuration (the
+    /// same endpoint, proxy or lack of one, proxy credentials, timeout, and
+    /// TTL), until `ttl` has passed since the probe finished. A resolve that
+    /// starts while a probe of the same configuration is in flight waits for
+    /// that probe and gets its result, even a failure. A resolve that starts
+    /// after a probe failed sends a new probe. So a configuration with no
+    /// success in the last `ttl` probes again: for example, a new proxy, or
+    /// a new session ID in the username of a sticky-session proxy. A probe
+    /// runs to its end even when every resolve that awaits it is cancelled.
+    ///
+    /// The exit IP can change while the configuration stays the same, and a
+    /// reused result then belongs to the earlier exit IP until `ttl` has
+    /// passed: without a proxy, a VPN or a switch of networks changes this
+    /// machine's own exit IP, and a rotating proxy can change its exit IP
+    /// between any two connections.
+    #[must_use]
+    pub fn cache_ttl(mut self, ttl: Duration) -> Self {
+        self.cache_ttl = ttl;
+        self
+    }
+
+    /// Route the probe through `server` (mirrors the browser's own proxy so
+    /// the resolved country matches the exit IP Chrome will actually use),
+    /// authenticating with `auth` (`user`, `pass`) when the proxy requires
+    /// it — passed to reqwest via [`reqwest::Proxy::basic_auth`], never
+    /// embedded in the proxy URL string, so it can't leak into an error
+    /// `Display`.
+    ///
+    /// Called by `BrowserBuilder::geo_auto`, wiring the proxy from
+    /// [`crate::browser::BrowserBuilder::proxy`] through here. Public so
+    /// callers building a custom-endpoint resolver by hand (e.g.
+    /// `zendriver-mcp`'s `geo_endpoint` option) can mirror the same proxy
+    /// the browser itself uses, the same way `geo_auto`'s bundled default
+    /// does.
+    #[must_use]
+    pub fn with_proxy(mut self, server: Option<String>, auth: Option<(String, String)>) -> Self {
+        self.probe.proxy = server;
+        self.probe.proxy_auth = auth;
+        self
+    }
+
+    /// The outcome to await for this resolver's configuration: that of the
+    /// probe in flight, or of a success younger than the TTL. Failing both,
+    /// that of a new probe, which a task of its own drives to its end, so
+    /// that no resolve awaiting it can cancel or stall it, and so that it
+    /// finishes even when nothing awaits it any more.
+    fn shared_outcome(&self) -> SharedOutcome {
+        debug_assert!(!self.cache_ttl.is_zero(), "a zero TTL turns sharing off");
+        let key = (self.probe.clone(), self.cache_ttl);
+        let mut probes = PROBES.lock().unwrap_or_else(PoisonError::into_inner);
+        probes.retain(|(_, ttl), outcome| reusable(outcome, *ttl));
+        if let Some(outcome) = probes.get(&key) {
+            let outcome = outcome.clone();
+            drop(probes);
+            tracing::debug!(
+                in_flight = outcome.peek().is_none(),
+                "geo probe: using a shared probe instead of sending one"
+            );
+            return outcome;
+        }
+        let probe = self.probe.clone();
+        let outcome = async move { (probe.run().await, Instant::now()) }
+            .in_current_span()
+            .with_current_subscriber()
+            .boxed()
+            .shared();
+        tokio::spawn(outcome.clone());
+        probes.insert(key, outcome.clone());
+        outcome
+    }
+}
+
 #[async_trait]
 impl GeoResolver for IpApiResolver {
     /// The result of the probe in flight for this resolver's configuration
@@ -284,7 +282,14 @@ impl GeoResolver for IpApiResolver {
         if self.cache_ttl.is_zero() {
             return self.probe.run().await;
         }
-        let (geo, _) = self.shared_outcome().await;
+        // The probe's own timeout ends it in time, unless its task is on a
+        // runtime that nothing drives any more; this bounds the wait anyway,
+        // a second later, so that the probe's own warning comes first.
+        let bound = self.probe.timeout + Duration::from_secs(1);
+        let Ok((geo, _)) = tokio::time::timeout(bound, self.shared_outcome()).await else {
+            tracing::warn!("geo probe: the shared probe did not finish in time");
+            return None;
+        };
         geo
     }
 }
@@ -519,35 +524,54 @@ mod tests {
         );
     }
 
-    /// Resolvers with one configuration reuse a success until it is older
-    /// than their TTL; a resolver with a zero TTL never reuses one.
+    /// A finished probe can be awaited instead of probing only while it is
+    /// a success younger than the TTL; a probe in flight always can.
+    #[tokio::test]
+    async fn reusable_accepts_only_a_probe_in_flight_or_a_recent_success() {
+        let minute = Duration::from_secs(60);
+        let finished = |geo: Option<ResolvedGeo>| {
+            let finished_at = Instant::now()
+                .checked_sub(minute)
+                .expect("the machine has been up for over a minute");
+            let outcome: SharedOutcome =
+                futures::future::ready((geo, finished_at)).boxed().shared();
+            assert!(outcome.clone().now_or_never().is_some());
+            outcome
+        };
+        let success = finished(Some(ResolvedGeo {
+            country: country("DE"),
+            timezone: None,
+        }));
+        assert!(reusable(&success, minute * 2));
+        assert!(!reusable(&success, minute));
+        assert!(!reusable(&finished(None), minute * 2));
+
+        let in_flight: SharedOutcome = futures::future::pending().boxed().shared();
+        assert!(reusable(&in_flight, minute));
+    }
+
+    /// Resolvers with one configuration share a success; a resolver whose
+    /// configuration differs, if only in its timeout or its TTL, does not,
+    /// and neither does one with a zero TTL.
     ///
     /// Each cache test's endpoint is unique to it (here, by its path),
     /// because wiremock's pooled servers repeat ports across tests.
     #[tokio::test]
-    async fn a_success_is_reused_until_it_expires() {
+    async fn only_resolvers_with_one_configuration_share_a_success() {
         let server = answering_de().await;
-        let endpoint = format!("{}/cache-reuse", server.uri());
-        let resolver = |ttl| {
-            IpApiResolver::new()
-                .endpoint(endpoint.clone())
-                .cache_ttl(ttl)
-        };
-        let ttl = Duration::from_millis(300);
-        for (r, requests_after) in [
-            (resolver(ttl), 1),
-            (resolver(ttl), 1),
-            (resolver(Duration::ZERO), 2),
-        ] {
+        let endpoint = format!("{}/cache-configuration", server.uri());
+        let resolver = || IpApiResolver::new().endpoint(endpoint.clone());
+        let resolvers = [
+            (resolver(), 1),
+            (resolver(), 1),
+            (resolver().timeout(Duration::from_secs(6)), 2),
+            (resolver().cache_ttl(Duration::from_secs(61)), 3),
+            (resolver().cache_ttl(Duration::ZERO), 4),
+        ];
+        for (r, requests_after) in resolvers {
             assert_eq!(r.resolve().await.map(|g| g.country), Some(country("DE")));
             assert_eq!(requests(&server).await, requests_after);
         }
-        tokio::time::sleep(ttl).await;
-        assert_eq!(
-            resolver(ttl).resolve().await.map(|g| g.country),
-            Some(country("DE"))
-        );
-        assert_eq!(requests(&server).await, 3, "the success must have expired");
     }
 
     /// New proxy credentials (e.g. a new sticky-session ID in the username)
@@ -585,6 +609,17 @@ mod tests {
         assert_eq!(requests(&server).await, 1);
     }
 
+    /// Wait until `done` holds, polling every 10 ms, for at most 10 s.
+    async fn wait_until(what: &str, mut done: impl AsyncFnMut() -> bool) {
+        let waited = tokio::time::timeout(Duration::from_secs(10), async {
+            while !done().await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(waited.is_ok(), "timed out waiting until {what}");
+    }
+
     /// A probe outlives the resolve that started it: cancelling that resolve
     /// while its request is in flight leaves the probe running, and a later
     /// resolve gets the probe's result instead of sending a request of its
@@ -605,9 +640,11 @@ mod tests {
 
         let first = resolver();
         let mut first = first.resolve();
-        let cut_short = tokio::time::timeout(Duration::from_millis(200), &mut first).await;
-        assert!(cut_short.is_err(), "the response is delayed past the cut");
-        assert_eq!(requests(&server).await, 1, "the request must be in flight");
+        assert!(futures::poll!(&mut first).is_pending());
+        wait_until("the request is in flight", async || {
+            requests(&server).await == 1
+        })
+        .await;
         drop(first);
 
         assert_eq!(
@@ -615,6 +652,46 @@ mod tests {
             Some(country("DE"))
         );
         assert_eq!(requests(&server).await, 1);
+    }
+
+    /// A probe that nothing awaits any more still finishes, so a failure it
+    /// ends in is not handed to a later resolve as if it were still in
+    /// flight: that resolve probes again.
+    #[tokio::test]
+    async fn a_probe_finishes_after_every_resolve_awaiting_it_was_cancelled() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(502).set_body_string("Bad Gateway"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_string(r#"{"countryCode":"DE"}"#),
+            )
+            .mount(&server)
+            .await;
+        let resolver = IpApiResolver::new().endpoint(format!("{}/cache-abandoned", server.uri()));
+
+        let mut first = resolver.resolve();
+        assert!(futures::poll!(&mut first).is_pending());
+        drop(first);
+        // Another test's resolve may evict the finished probe, which is as
+        // good: eviction never touches a probe in flight.
+        let key = (resolver.probe.clone(), resolver.cache_ttl);
+        let in_flight = || {
+            let probes = PROBES.lock().unwrap_or_else(PoisonError::into_inner);
+            probes
+                .get(&key)
+                .is_some_and(|outcome| outcome.peek().is_none())
+        };
+        wait_until("the abandoned probe has finished", async || !in_flight()).await;
+
+        assert_eq!(
+            resolver.resolve().await.map(|g| g.country),
+            Some(country("DE"))
+        );
+        assert_eq!(requests(&server).await, 2);
     }
 
     /// The resolves waiting for a probe in flight share its failure, but a
