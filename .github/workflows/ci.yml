@@ -53,6 +53,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --lib --locked
+      # `geo` is not a default feature, so the run above skips the tests of
+      # zendriver's geo resolver and of the geo overlay at launch.
+      - run: cargo test -p zendriver --features geo --lib --locked
       # `--lib` skips binaries, and the CLI's argument-contract tests live in
       # one — behind the same non-default `cli` feature.
       - run: cargo test -p zendriver-fetcher --bins --features cli --locked
