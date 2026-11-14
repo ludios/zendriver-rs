@@ -57,6 +57,7 @@ Sub-error returned wrapped in `ZendriverError::Browser`.
 | `DevtoolsParse` | Launch: Chrome's stderr announced a DevTools URL that didn't parse. | Should not happen with stable Chrome; file a bug. |
 | `ConnectEndpoint { endpoint, reason }` | `connect`: the endpoint isn't a `ws://`, `wss://` or `http://` URL with a host (`https://` is rejected: the DevTools server has no TLS), connecting to it failed, or its `/json/version` reply wasn't a `200` with a `webSocketDebuggerUrl`. `reason` says which, with the reply's status line and the start of its body. | Check the endpoint, e.g. `curl http://HOST:PORT/json/version`. |
 | `Cleanup(io::Error)` | `tempfile` cleanup of the `user_data_dir` failed. | Usually harmless; check filesystem permissions if persistent. |
+| `ImproveChromeBinary { executable, reason }` | `improve_chrome_binary(true)`, but zendriver couldn't make (or reuse) an improved copy of Chrome: not Linux, launching the executable doesn't end in an x86-64 ELF executable through wrapper scripts that zendriver can follow, the place of a patch isn't found exactly once in this Chrome build, or making the copy failed. | `reason` says which. See [An improved Chrome binary](./stealth.md#an-improved-chrome-binary-improve_chrome_binary); drop the option to launch Chrome itself. |
 
 ## `TransportError` variants
 

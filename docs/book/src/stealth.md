@@ -82,7 +82,11 @@ in the page:
   `Emulation.setTouchEmulationEnabled` with `enabled: false` yourself
   puts the page back at no pointer, until it navigates again.
 - **UA scrub** — strips the `HeadlessChrome` segment from the User-Agent
-  string and the Sec-CH-UA brand list.
+  string and the Sec-CH-UA brand list. The override reaches pages, their
+  iframes and their dedicated workers; shared and service workers read
+  Chrome's own user agent, which in a headless launch still says
+  `HeadlessChrome` (see [An improved Chrome
+  binary](#an-improved-chrome-binary-improve_chrome_binary)).
 - **Emulation overrides** — `Emulation.setUserAgentOverride` sets the
   User-Agent, the UA client hints (`navigator.userAgentData` and the
   `Sec-CH-UA-*` headers), `navigator.platform`, and the
@@ -348,6 +352,54 @@ per-surface `Strategy::Native` on `Webgl`, which leaves the real renderer
 in place for one persona rather than the whole profile. An explicit
 `Webgpu` `Block` (hiding `navigator.gpu`) is renderer-neutral, so it is
 still honored if you set it.
+
+## An improved Chrome binary (`improve_chrome_binary`)
+
+zendriver's user-agent override reaches pages, their iframes and their
+dedicated workers. A shared or service worker reads Chrome's own user
+agent instead, in `navigator.userAgent` and in the `User-Agent` header of
+its requests, and a headless Chrome's own says `HeadlessChrome/`. Chrome's
+`--user-agent` switch would replace it, but then Chrome gives those
+workers only the low-entropy client hints: their
+`navigator.userAgentData.getHighEntropyValues()` reports an empty
+`architecture`, `bitness`, `uaFullVersion` and `fullVersionList`.
+
+`improve_chrome_binary(true)` launches a copy of Chrome whose executable
+zendriver patched, to fix what no flag or DevTools command can:
+
+```rust,no_run
+use zendriver::Browser;
+
+# async fn ex() -> zendriver::Result<()> {
+let browser = Browser::builder()
+    .improve_chrome_binary(true)
+    .launch()
+    .await?;
+# Ok(()) }
+```
+
+The one patch so far takes `Headless` out of Chrome's own user agent.
+Chrome's code that builds the user agent checks for `--headless` with its
+own copy of the switch name (`embedder_support::kHeadless`), which no
+other code reads; headless mode reads another copy. The patch renames
+that copy, so the user agent says `Chrome/` while Chrome stays headless,
+and the workers keep every client hint. zendriver finds that copy in each
+Chrome build by the instructions that load it, and fails the launch with
+`BrowserError::ImproveChromeBinary` for a build where it doesn't find
+exactly one.
+
+The copy is made at the first launch of each Chrome build, in
+`$XDG_CACHE_HOME/zendriver/improved-chrome` (else
+`~/.cache/zendriver/improved-chrome`), and reused after; making it deletes
+the copy of an older build at the same path. It mirrors Chrome's
+installation: the executable is copied (as a reflink on btrfs or XFS,
+which takes no space), the wrapper scripts that launching Chrome runs
+first (Chrome's own `google-chrome`, and NixOS's wrapper of it) are
+copied to run the copies, and every other file is a symlink to the
+original.
+
+Only Linux's x86-64 Chrome can be improved so far; on macOS and Windows,
+`launch()` fails with `BrowserError::ImproveChromeBinary`.
 
 ## End-to-end example
 

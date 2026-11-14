@@ -114,6 +114,18 @@ pub struct OpenInput {
     /// matches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geo_endpoint: Option<String>,
+    /// Launch an improved copy of Chrome, whose executable zendriver patched
+    /// to fix what no flag or DevTools command can (default: `false`). The
+    /// one improvement so far: in a headless launch, the user agent that
+    /// shared and service workers read (in `navigator.userAgent` and in
+    /// their requests' `User-Agent` header) says `Chrome/`, not
+    /// `HeadlessChrome/`. The copy is made once per Chrome build, in the
+    /// user's cache directory. Only Linux's x86-64 Chrome can be improved:
+    /// elsewhere, or when zendriver doesn't find the place of a patch in
+    /// this Chrome build, `browser_open` fails. See
+    /// `BrowserBuilder::improve_chrome_binary`.
+    #[serde(default)]
+    pub improve_chrome_binary: bool,
 }
 
 /// A custom tracker-blocklist source for `browser_open`.
@@ -229,7 +241,8 @@ pub async fn open(
     let mut builder = Browser::builder()
         .headless(input.headless)
         .gpu_backend(input.gpu_backend)
-        .stealth(stealth);
+        .stealth(stealth)
+        .improve_chrome_binary(input.improve_chrome_binary);
     if let Some(choice) = input.input_profile {
         builder = builder.input_profile(input_profile_for(choice));
     }

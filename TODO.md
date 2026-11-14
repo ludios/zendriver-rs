@@ -176,6 +176,7 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
   - **A dedicated worker's `navigator.platform`** is the host's (`NavigatorBase::platform`): no override reaches it.
 - [ ] **Worker GPU name, `deviceMemory` and `hardwareConcurrency` differ from the page under `spoofed`.** No stealth patch or override for these reaches a worker, and `KNOWN_DISAGREEMENTS` files all three under this item. *(R6)*
   - A reviewer of `9f0372ace` (2026-11-07) attached a dedicated worker in Chrome 157 and sent it `Emulation.setHardwareConcurrencyOverride`, and the worker's own getter then reported the persona's count. So page-session auto-attach of dedicated workers, with the observer applying the CPU-count override to them before they run, would close the `hardwareConcurrency` part.
+- [ ] **`improve_chrome_binary` improves only Linux's x86-64 Chrome.** *(2026-11-14)* On macOS and Windows, a launch with it fails. Chrome's code is in the Mach-O `Google Chrome Framework` on macOS (arm64 or x86-64; a patched copy must be signed again, ad hoc) and in the PE `chrome.dll` on Windows. Each needs its own reading of sections and of the instructions that load an address (on arm64, `adrp` + `add`). Linux on arm64 needs the latter too. Test `chrome`, on each platform: `tests/improve_binary.rs`.
 - [ ] **Canvas farbling turns transparent pixels into `(1,1,1,0)`.** *(ST #2)*
 - [ ] **macOS UA-CH `platformVersion` / `architecture` describe an impossible machine.** *(ST #3)*
 - [ ] **`chrome_version(major)` invents a build number.** *(ST #4)* Test `unit`.

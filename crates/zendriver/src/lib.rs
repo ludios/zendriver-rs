@@ -88,6 +88,8 @@ pub(crate) mod expert;
 pub mod frame;
 #[cfg(feature = "geo")]
 mod geo_resolver;
+#[cfg(target_os = "linux")]
+mod improve_binary;
 pub mod input;
 pub(crate) mod io;
 pub(crate) mod isolated_world;

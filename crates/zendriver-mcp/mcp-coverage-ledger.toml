@@ -1254,3 +1254,16 @@ excluded = "bitflags-generated constructor of every named mouse button; Rust erg
 [[entry]]
 api = "zendriver::IpApiResolver::cache_ttl"
 excluded = "browser_open.geo_auto keeps the default 1-minute reuse, which spares ip-api's per-IP rate limit across the server's launches; the result is keyed by proxy, credentials, and endpoint, so an agent that changes any of them gets a new probe"
+
+# ── BrowserBuilder::improve_chrome_binary (2026-11-14) ──────────────────────
+[[entry]]
+api = "zendriver::browser::BrowserBuilder::improve_chrome_binary"
+covered = "browser_open.improve_chrome_binary"
+
+[[entry]]
+api = "zendriver::error::BrowserError::ImproveChromeBinary"
+excluded = "error variant, not an operation; a launch with improve_chrome_binary whose Chrome zendriver can't improve, surfaced as a browser_open failure"
+
+[[entry]]
+api = "zendriver::BrowserError::ImproveChromeBinary"
+excluded = "crate-root re-export of the above variant; same browser_open failure surface"

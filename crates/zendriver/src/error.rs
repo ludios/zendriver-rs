@@ -494,6 +494,20 @@ pub enum BrowserError {
         /// Human-readable cause (missing path, bad archive, IO error, …).
         reason: String,
     },
+
+    /// [`BrowserBuilder::improve_chrome_binary`](crate::BrowserBuilder::improve_chrome_binary)
+    /// is on, but zendriver couldn't make (or reuse) an improved copy of
+    /// Chrome: the platform isn't Linux, launching `executable` doesn't end in
+    /// an x86-64 ELF executable through wrapper scripts that zendriver can
+    /// follow, the place of one of zendriver's patches isn't found exactly
+    /// once in this Chrome build, or making the copy failed.
+    #[error("could not improve the Chrome binary {executable:?}: {reason}")]
+    ImproveChromeBinary {
+        /// The Chrome executable that zendriver was to launch.
+        executable: PathBuf,
+        /// Human-readable cause.
+        reason: String,
+    },
 }
 
 /// The error of a navigation or load wait whose session's events ended

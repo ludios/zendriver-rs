@@ -200,6 +200,7 @@ pub fn zendriver::browser::BrowserBuilder::geo_locale(self, impl core::convert::
 pub fn zendriver::browser::BrowserBuilder::geo_resolver(self, impl zendriver_stealth::geo::GeoResolver + 'static) -> Self
 pub fn zendriver::browser::BrowserBuilder::gpu_backend(self, zendriver_stealth::flags::GpuBackend) -> Self
 pub fn zendriver::browser::BrowserBuilder::headless(self, bool) -> Self
+pub fn zendriver::browser::BrowserBuilder::improve_chrome_binary(self, bool) -> Self
 pub fn zendriver::browser::BrowserBuilder::input_profile(self, zendriver_stealth::input_profile::InputProfile) -> Self
 pub fn zendriver::browser::BrowserBuilder::lang(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn zendriver::browser::BrowserBuilder::new() -> Self
@@ -539,6 +540,9 @@ pub zendriver::error::BrowserError::ExtensionLoad::path: std::path::PathBuf
 pub zendriver::error::BrowserError::ExtensionLoad::reason: alloc::string::String
 pub zendriver::error::BrowserError::GpuBackendUnavailable
 pub zendriver::error::BrowserError::HandshakeTimeout
+pub zendriver::error::BrowserError::ImproveChromeBinary
+pub zendriver::error::BrowserError::ImproveChromeBinary::executable: std::path::PathBuf
+pub zendriver::error::BrowserError::ImproveChromeBinary::reason: alloc::string::String
 pub zendriver::error::BrowserError::SpawnFailed(std::io::error::Error)
 pub zendriver::error::BrowserError::WsTimeout
 impl core::convert::From<zendriver::error::BrowserError> for zendriver::error::ZendriverError
@@ -2468,6 +2472,9 @@ pub zendriver::BrowserError::ExtensionLoad::path: std::path::PathBuf
 pub zendriver::BrowserError::ExtensionLoad::reason: alloc::string::String
 pub zendriver::BrowserError::GpuBackendUnavailable
 pub zendriver::BrowserError::HandshakeTimeout
+pub zendriver::BrowserError::ImproveChromeBinary
+pub zendriver::BrowserError::ImproveChromeBinary::executable: std::path::PathBuf
+pub zendriver::BrowserError::ImproveChromeBinary::reason: alloc::string::String
 pub zendriver::BrowserError::SpawnFailed(std::io::error::Error)
 pub zendriver::BrowserError::WsTimeout
 impl core::convert::From<zendriver::error::BrowserError> for zendriver::error::ZendriverError
@@ -3157,6 +3164,7 @@ pub fn zendriver::browser::BrowserBuilder::geo_locale(self, impl core::convert::
 pub fn zendriver::browser::BrowserBuilder::geo_resolver(self, impl zendriver_stealth::geo::GeoResolver + 'static) -> Self
 pub fn zendriver::browser::BrowserBuilder::gpu_backend(self, zendriver_stealth::flags::GpuBackend) -> Self
 pub fn zendriver::browser::BrowserBuilder::headless(self, bool) -> Self
+pub fn zendriver::browser::BrowserBuilder::improve_chrome_binary(self, bool) -> Self
 pub fn zendriver::browser::BrowserBuilder::input_profile(self, zendriver_stealth::input_profile::InputProfile) -> Self
 pub fn zendriver::browser::BrowserBuilder::lang(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn zendriver::browser::BrowserBuilder::new() -> Self

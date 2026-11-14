@@ -29,6 +29,10 @@ properties:
     description: "Run Chrome with `--headless=new` (default: `true`)."
     type: boolean
     default: true
+  improve_chrome_binary:
+    description: "Launch an improved copy of Chrome, whose executable zendriver patched\nto fix what no flag or DevTools command can (default: `false`). The\none improvement so far: in a headless launch, the user agent that\nshared and service workers read (in `navigator.userAgent` and in\ntheir requests' `User-Agent` header) says `Chrome/`, not\n`HeadlessChrome/`. The copy is made once per Chrome build, in the\nuser's cache directory. Only Linux's x86-64 Chrome can be improved:\nelsewhere, or when zendriver doesn't find the place of a patch in\nthis Chrome build, `browser_open` fails. See\n`BrowserBuilder::improve_chrome_binary`."
+    type: boolean
+    default: false
   input_profile:
     description: "Select the input-timing profile for synthesized keyboard/mouse\nevents, independent of `stealth_profile`. When unset, the default\nfollows the resolved stealth profile (mirrors\n`BrowserBuilder::resolved_input_profile()`): a spoofed stealth\nprofile (`spoof_macos`/`spoof_linux`/`spoof_windows`) implies\n`coherent` (human-paced typing, jittery mouse motion), while\n`auto`/`native` stealth implies `native` (zero-overhead,\ndeterministic timing). Pass `native` or `coherent` explicitly to pin\nthe input timing regardless of the stealth setting."
     anyOf:

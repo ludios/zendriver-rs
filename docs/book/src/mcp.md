@@ -170,6 +170,13 @@ present in the schema but only takes effect when the `geo` feature is enabled.
 - `geo_endpoint: string` — override the probe endpoint (default
   `http://ip-api.com/json`); only meaningful with `geo_auto: true`. The probe
   of a custom endpoint goes through `proxy` too, like the default one's.
+- `improve_chrome_binary: bool` — launch an improved copy of Chrome, whose
+  executable zendriver patched (default `false`): in a headless launch, the
+  user agent that shared and service workers read says `Chrome/`, not
+  `HeadlessChrome/`. Only Linux's x86-64 Chrome can be improved; elsewhere,
+  or for a Chrome build where zendriver doesn't find the place of a patch,
+  `browser_open` fails. See
+  [An improved Chrome binary](./stealth.md#an-improved-chrome-binary-improve_chrome_binary).
 - `input_profile: "native" | "coherent"` — select input-timing realism
   (keyboard/mouse), **independent** of `stealth_profile`. When unset, the
   default follows the resolved stealth profile: a spoofed stealth profile

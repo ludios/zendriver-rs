@@ -767,6 +767,9 @@ pub struct BrowserBuilder {
     /// forces `{mode: "open"}`. See
     /// [`BrowserBuilder::force_open_shadow_roots`]. **Detectable.**
     pub(crate) force_open_shadow_roots: bool,
+    /// When `true`, `launch` runs an improved copy of Chrome. See
+    /// [`BrowserBuilder::improve_chrome_binary`].
+    pub(crate) improve_chrome_binary: bool,
     pub(crate) extra_args: Vec<String>,
     /// Changes to the environment that the Chrome process inherits, applied
     /// in call order: `(name, Some(value))` sets a variable, and
@@ -847,6 +850,7 @@ impl std::fmt::Debug for BrowserBuilder {
             .field("extensions", &self.extensions)
             .field("expert", &self.expert)
             .field("force_open_shadow_roots", &self.force_open_shadow_roots)
+            .field("improve_chrome_binary", &self.improve_chrome_binary)
             .field("extra_args", &self.extra_args)
             .field(
                 "env",
@@ -1014,6 +1018,49 @@ impl BrowserBuilder {
     #[must_use]
     pub fn executable(mut self, path: impl Into<PathBuf>) -> Self {
         self.executable = Some(path.into());
+        self
+    }
+
+    /// Launch an improved copy of Chrome instead of Chrome itself (default:
+    /// `false`): a copy whose executable zendriver patched, to fix what no
+    /// flag or DevTools command can.
+    ///
+    /// The one improvement so far: in a headless launch, Chrome's own user
+    /// agent says `Chrome/`, not `HeadlessChrome/`. zendriver's user-agent
+    /// override reaches pages, their iframes and their dedicated workers;
+    /// but shared and service workers read Chrome's own user agent, in
+    /// `navigator.userAgent` and in the `User-Agent` header of their
+    /// requests. (Chrome's `--user-agent` switch would also replace it, but
+    /// leaves those workers without the high-entropy client hints:
+    /// `getHighEntropyValues()` then reports no `architecture`,
+    /// `fullVersionList`, and so on.)
+    ///
+    /// The copy is made at the first launch of each Chrome build, in
+    /// `$XDG_CACHE_HOME/zendriver/improved-chrome` (else
+    /// `~/.cache/zendriver/improved-chrome`), and reused after; making it
+    /// deletes the copy of an older build at the same path. It mirrors
+    /// Chrome's installation: the executable is copied (as a reflink where
+    /// the filesystem has them, such as btrfs and XFS, which takes no
+    /// space), a wrapper script that launching Chrome runs first (Chrome's
+    /// own `google-chrome`, and NixOS's wrapper of it) is copied to run the
+    /// copy, and every other file is a symlink to the original.
+    ///
+    /// Only Linux's x86-64 Chrome can be improved so far.
+    ///
+    /// [`launch`](Self::launch) returns
+    /// [`BrowserError::ImproveChromeBinary`] when zendriver can't improve
+    /// the Chrome to launch, e.g. on macOS or Windows, or when it doesn't
+    /// find the place of a patch in a Chrome build exactly once.
+    /// [`connect`](Self::connect) starts no Chrome, so it ignores this.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let builder = zendriver::Browser::builder().improve_chrome_binary(true);
+    /// ```
+    #[must_use]
+    pub fn improve_chrome_binary(mut self, on: bool) -> Self {
+        self.improve_chrome_binary = on;
         self
     }
 
@@ -4081,6 +4128,30 @@ pub(crate) async fn resolve_ws_url(endpoint: &str) -> Result<String, ZendriverEr
     }
 }
 
+/// The improved copy of Chrome to launch in place of `exe`; see
+/// [`BrowserBuilder::improve_chrome_binary`].
+///
+/// # Errors
+/// [`BrowserError::ImproveChromeBinary`] when zendriver can't improve it.
+async fn improved_executable(exe: PathBuf) -> Result<PathBuf, BrowserError> {
+    #[cfg(target_os = "linux")]
+    {
+        // Reading and scanning a 300 MB executable takes a while.
+        let executable = exe.clone();
+        tokio::task::spawn_blocking(move || crate::improve_binary::improved_chrome(&executable))
+            .await
+            .map_err(|e| BrowserError::ImproveChromeBinary {
+                executable: exe,
+                reason: e.to_string(),
+            })?
+    }
+    #[cfg(not(target_os = "linux"))]
+    Err(BrowserError::ImproveChromeBinary {
+        executable: exe,
+        reason: "only Linux's Chrome can be improved so far".into(),
+    })
+}
+
 /// Resolve every entry in `extensions` to an unpacked-extension *directory*,
 /// in place, returning the tempdirs that back any unzipped `.crx` archives.
 ///
@@ -4286,13 +4357,16 @@ impl BrowserBuilder {
         // devs pointing at Canary / a downloaded Chrome-for-Testing build)
         // override the discovery path without code changes. The configured
         // `channel` (default `Auto`) only steers the final discovery step.
-        let exe = match self.executable.clone() {
+        let mut exe = match self.executable.clone() {
             Some(p) => p,
             None => match std::env::var("CHROME_BIN").ok().filter(|s| !s.is_empty()) {
                 Some(p) => PathBuf::from(p),
                 None => find_chrome_executable_for_channel(self.channel)?,
             },
         };
+        if self.improve_chrome_binary {
+            exe = improved_executable(exe).await?;
+        }
 
         // 1b. Resolve extensions: unzip any `.crx` into a tempdir and rewrite
         // `self.extensions` to the resolved unpacked-directory paths so
