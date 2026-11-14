@@ -1,12 +1,13 @@
-//! Raw mouse-click dispatch for the Turnstile checkbox.
+//! Raw mouse-click dispatch for the Turnstile checkbox: this crate's own
+//! click, for a driver without an
+//! [`on_click`](crate::CloudflareBypass::on_click) handler.
 //!
-//! Cloudflare's bot detection wants a quick, observable click on the visible
-//! checkbox — not a realistic Bezier path. The flow is a three-step CDP
-//! sequence: `mouseMoved` to position the pointer, then a `mousePressed` /
-//! `mouseReleased` pair with `button: "left"` and `clickCount: 1`. Anything
-//! more elaborate (multi-segment moves, jitter) is overkill here and risks
-//! introducing latency the challenge container can react to before the click
-//! lands.
+//! The flow is a three-step CDP sequence: `mouseMoved` to position the
+//! pointer, then a `mousePressed` / `mouseReleased` pair with
+//! `button: "left"` and `clickCount: 1`. A person's click would be a curved
+//! approach and a held press, but this crate holds only a session, not
+//! where the tab's pointer is, so it cannot start one from the right place.
+//! `zendriver`'s `Tab::cloudflare` can, and installs one as the handler.
 
 use serde_json::json;
 use zendriver_transport::SessionHandle;

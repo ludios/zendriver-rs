@@ -22,6 +22,8 @@ use zendriver_stealth::InputProfile;
 use crate::input::pointer_state::MouseButtonSet;
 
 pub mod bezier;
+#[cfg(feature = "cloudflare")]
+pub(crate) mod human;
 pub mod keyboard;
 pub mod mouse;
 pub mod pointer_state;

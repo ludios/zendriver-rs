@@ -13,9 +13,11 @@
 //! 1. Find the Turnstile iframe through CDP. Turnstile mounts it in a
 //!    *closed* shadow root, which no script in the page can enter; see
 //!    [`detection`] for how the frame is found instead.
-//! 2. Scroll it into view, re-measure it, and dispatch a raw left-click at
-//!    the 7% × 50% offset inside its box (the default Turnstile checkbox
-//!    location), retrying a swallowed click a few times.
+//! 2. Scroll it into view, re-measure it, and click at the 7% × 50% offset
+//!    inside its box (the default Turnstile checkbox location), retrying a
+//!    swallowed click a few times. This crate's own click is a raw one;
+//!    `zendriver`'s `Tab::cloudflare` installs a person's click instead,
+//!    made with the tab's mouse.
 //! 3. Poll for either the token input gaining a value, or every challenge
 //!    marker being gone from a page that has settled — for Cloudflare's
 //!    full-page challenge, the page it navigates to once passed. See

@@ -43,7 +43,8 @@ const CHALLENGE: &str = r#"<!doctype html>
   frame.style.cssText = "width: 300px; height: 65px; border: 0";
   root.appendChild(frame);
   addEventListener("message", (event) => {
-    if (event.data !== "passed") return;
+    if (!event.data || event.data.passed !== true) return;
+    fetch("/report?moves=" + event.data.moves + "&held_ms=" + Math.round(event.data.heldMs));
     document.getElementById("host").remove();
     setTimeout(() => document.querySelector("[name=cf-turnstile-response]").remove(), 300);
     setTimeout(() => location.replace("/guarded"), 1500);
@@ -52,14 +53,22 @@ const CHALLENGE: &str = r#"<!doctype html>
 
 /// The widget: a 23-pixel checkbox from 9 to 32 pixels in and centred
 /// vertically, where the live widget has it, beside text that does nothing
-/// when clicked. Checking the box tells the challenge page.
+/// when clicked. Checking the box tells the challenge page, along with how
+/// the pointer got there: the `mousemove`s the widget saw, and how long the
+/// button was down.
 const WIDGET: &str = r#"<!doctype html>
 <body style="margin: 0">
 <input type="checkbox" id="box"
   style="position: absolute; left: 9px; top: 21px; width: 23px; height: 23px; margin: 0">
 <span style="position: absolute; left: 44px; top: 22px">Verify you are human</span>
 <script>
-  document.getElementById("box").addEventListener("change", () => parent.postMessage("passed", "*"));
+  let moves = 0;
+  let downAt = 0;
+  addEventListener("mousemove", () => moves++);
+  addEventListener("mousedown", () => downAt = performance.now());
+  document.getElementById("box").addEventListener("change", () => {
+    parent.postMessage({ passed: true, moves, heldMs: performance.now() - downAt }, "*");
+  });
 </script>"#;
 
 /// The page the challenge guards.
@@ -118,6 +127,20 @@ async fn clears_the_challenge(builder: BrowserBuilder, own_process: bool) {
     // No waiting here: the run is meant to end on the page the challenge
     // navigates to, not on the challenge page after its markers are gone.
     assert_eq!(tab.title().await.unwrap(), "Guarded page");
+
+    // The click was a person's, not a teleport: the built-in raw click
+    // brings one move and a press released at once. The jiggle alone
+    // brings two moves, and the end of the approach at least one more.
+    let report = server.requests_to("/report");
+    assert_eq!(report.len(), 1, "the widget reports its one click");
+    let query = report[0].uri.query().unwrap().to_string();
+    let field = |name: &str| -> u64 {
+        let prefix = format!("{name}=");
+        let value = query.split('&').find_map(|pair| pair.strip_prefix(&prefix));
+        value.unwrap().parse().unwrap()
+    };
+    assert!(field("moves") >= 3, "the widget saw {query}");
+    assert!(field("held_ms") >= 50, "the widget saw {query}");
     browser.close().await;
 }
 

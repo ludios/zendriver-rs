@@ -3191,7 +3191,16 @@ impl Tab {
     /// [`click_policy`](zendriver_cloudflare::CloudflareBypass::click_policy)
     /// takes whether / how often / where to click, and
     /// [`on_click`](zendriver_cloudflare::CloudflareBypass::on_click)
-    /// replaces the built-in click outright.
+    /// replaces the click outright.
+    ///
+    /// The click is a person's, made with this tab's mouse: from wherever
+    /// the pointer last went, a curved approach that speeds up and slows
+    /// down, at a 60 Hz pointer's cadence and with a slight tremor; a
+    /// little jiggle on the checkbox; then a press held for about a tenth
+    /// of a second. It takes about a second, and ignores the tab's
+    /// [`InputProfile`](crate::stealth::InputProfile), whose default moves in a
+    /// straight line in a few milliseconds — the motion a bot check looks
+    /// for.
     ///
     /// **Stealth recommended.** Cloudflare Turnstile is somewhat forgiving
     /// of non-stealth Chrome, but `BrowserBuilder::stealth` significantly
@@ -3200,7 +3209,16 @@ impl Tab {
     /// Gated by the `cloudflare` cargo feature.
     #[must_use]
     pub fn cloudflare(&self) -> zendriver_cloudflare::CloudflareBypass<'_> {
-        zendriver_cloudflare::CloudflareBypass::new(self.session())
+        let input = Arc::clone(self.input());
+        zendriver_cloudflare::CloudflareBypass::new(self.session()).on_click(
+            move |session, target| {
+                let input = Arc::clone(&input);
+                async move {
+                    crate::input::human::click(&input, &session, target.x, target.y).await?;
+                    Ok(())
+                }
+            },
+        )
     }
 }
 

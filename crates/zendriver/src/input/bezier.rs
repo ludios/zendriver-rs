@@ -42,7 +42,9 @@ impl BezierPath {
     }
 }
 
-fn cubic_bezier(
+/// The point at parameter `t` (0 at `p0`, 1 at `p3`) of the cubic Bezier
+/// curve with control points `p1` and `p2`.
+pub(crate) fn cubic_bezier(
     p0: (f64, f64),
     p1: (f64, f64),
     p2: (f64, f64),

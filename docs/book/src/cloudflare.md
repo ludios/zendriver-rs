@@ -96,9 +96,15 @@ it, shadow root or not. The tick then resolves in this order:
    click goes to
    `(bbox.x + bbox.width * 0.07, bbox.y + bbox.height * 0.5)` — by
    default the 7%-from-left, 50%-from-top position of the checkbox
-   inside the iframe. No Bezier-path motion; Cloudflare wants a real click on a
-   real checkbox. A widget that is mounted but hidden or zero-sized is
-   never clicked, since there is no meaningful point to click.
+   inside the iframe. Through `Tab::cloudflare`, the click is a person's,
+   made with the tab's mouse: from wherever the pointer last went, a
+   curved approach that speeds up and slows down, at a 60 Hz pointer's
+   cadence with a slight tremor, then a little jiggle on the checkbox
+   (within 1.5 px of that point, where the press then lands) and a press
+   held for about a tenth of a second — about a second in all, whatever
+   the tab's `InputProfile` says. A widget that is mounted but hidden or
+   zero-sized is never clicked, since there is no meaningful point to
+   click.
 3. **Retry, up to a cap.** Cloudflare drops clicks that land while the
    widget is still booting, so one run spends up to three of them, each
    at least four poll ticks after the last (about two seconds at the
@@ -185,8 +191,10 @@ scroll.
 ### Replacing the click entirely
 
 The click is the part most likely to stop working, and a policy struct
-can only describe clicks that look like the built-in one. [`on_click`]
-hands the whole step over: it is called once per attempt with the session
+can only describe where the built-in one aims. [`on_click`]
+hands the whole step over, replacing the person's click that
+`Tab::cloudflare` installs (or, on a driver built from a bare session with
+`CloudflareBypass::new`, the crate's own raw click): it is called once per attempt with the session
 and the widget's post-scroll box, and what happens next is up to you —
 a human-ish pointer path, a solver service, a click through a higher
 level of the library.
