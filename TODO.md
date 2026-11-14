@@ -156,11 +156,8 @@ Also for this round:
 
 ### Stealth
 These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test (`stealth_conformance.rs`), plus `unit` where noted. A fix deletes the bug's row from `KNOWN_DISAGREEMENTS` in `zendriver-testkit`'s `probe.rs` (shared by `stealth_probe.rs` and MCP's `real_chrome.rs`) or `KNOWN_BUGS` in `stealth_conformance.rs`.
-- [ ] **Launch flags: site isolation is never disabled, and one `--disable-features` is lost.** Found 2026-10-31 (Chrome 156).
+- [ ] **Launch flags: site isolation is never disabled.** Found 2026-10-31 (Chrome 156).
   - `--disable-features=site-per-process` does nothing; the feature is called `SitePerProcess`. `--disable-site-isolation-trials` also works.
-  - When `--disable-features` appears twice, Chrome keeps only the last. `build_flags` emits `PasswordManagerOnboarding,AutofillServerCommunication` and then the stealth line, so the first is dropped. The comment there says Chrome takes the union; it doesn't.
-  - Merge every `--disable-features` (and `--enable-features`) into one argument.
-  - The same holds for `--disable-blink-features`: a caller's own (through `BrowserBuilder::arg`) replaces the profile's `--disable-blink-features=AutomationControlled`, which alone hides `navigator.webdriver` since `fc801bb3b` deleted webdriver.js. Merge it too.
   - Decide whether site isolation should really be off. The profile docs say it is, but turning it off now changes behaviour for every user: cross-site iframes would stop being OOPIFs.
   - Test `chrome`: count the `iframe` targets on `/iframe-cross-site`, as `cross_site_iframe_is_out_of_process_under_site_isolation` in the testkit's `fixtures.rs` does.
 - [ ] **JS-visible and HTTP identity come from different sources.** One identity source should feed JS, the UA, UA-CH and headers. *(ST #1, R6)*

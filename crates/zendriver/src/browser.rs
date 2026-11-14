@@ -555,6 +555,54 @@ pub(crate) fn add_blink_settings(mut flags: Vec<String>, ours: &[&str]) -> Vec<S
     flags
 }
 
+/// The switches that turn Chrome's base features on and off: the value of
+/// each is a comma-separated list of features.
+const FEATURE_SWITCHES: [&str; 2] = ["disable-features", "enable-features"];
+
+/// Give Chrome the union of every occurrence of each of [`FEATURE_SWITCHES`]
+/// in the argv `flags`.
+///
+/// Chrome reads only the last occurrence of such a switch (seen with Chrome
+/// 157). So of the `--disable-features` of [`BrowserBuilder::build_flags`],
+/// of the stealth profile and of the caller, only one would take effect.
+/// (Chrome itself takes the union of every `--disable-blink-features` and
+/// `--enable-blink-features`, so those need no merging.)
+///
+/// Returns `flags` with each such switch that occurs more than once (before
+/// any `--`, after which Chrome reads no switches) merged into its first
+/// occurrence: the features of every occurrence, in the order first seen,
+/// each once. A switch that occurs once is left as it is.
+pub(crate) fn merge_feature_switches(mut flags: Vec<String>) -> Vec<String> {
+    let mut switches_end = flags.iter().position(|f| f == "--").unwrap_or(flags.len());
+    for switch in FEATURE_SWITCHES {
+        let mut occurrences = Vec::new();
+        let mut features: Vec<String> = Vec::new();
+        for (i, flag) in flags[..switches_end].iter().enumerate() {
+            let Some((name, value)) = parse_switch(flag) else {
+                continue;
+            };
+            if name != switch {
+                continue;
+            }
+            occurrences.push(i);
+            for feature in value.split(',') {
+                if !feature.is_empty() && !features.iter().any(|seen| seen == feature) {
+                    features.push(feature.to_string());
+                }
+            }
+        }
+        if occurrences.len() < 2 {
+            continue;
+        }
+        flags[occurrences[0]] = format!("--{switch}={}", features.join(","));
+        for &i in occurrences[1..].iter().rev() {
+            flags.remove(i);
+        }
+        switches_end -= occurrences.len() - 1;
+    }
+    flags
+}
+
 /// Load (or first-time generate + persist) the fingerprint [`Seed`] bound to a
 /// `user_data_dir`.
 ///
@@ -1347,6 +1395,12 @@ impl BrowserBuilder {
     /// profile's `arg`, whose flags come after these). Where that switch and
     /// zendriver name the same setting, your value wins.
     ///
+    /// Chrome also reads only the last of several `--disable-features`
+    /// switches, and of several `--enable-features`. zendriver and the
+    /// stealth profile pass a `--disable-features` of their own, so the
+    /// launch merges every occurrence of each of the two switches into one:
+    /// the features that you list are added to the others.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -1849,24 +1903,16 @@ impl BrowserBuilder {
         // See cdpdriver/zendriver#13.
         v.push("--password-store=basic".to_string());
         v.push("--disable-save-password-bubble".to_string());
-        // Base disable-features set. When extensions are requested we MUST also
-        // turn off `DisableLoadExtensionCommandLineSwitch`, or Chrome 136+
-        // silently ignores `--load-extension`. The stealth profiles carry that
-        // feature in their own `--disable-features=IsolateOrigins,…` line, but
-        // an Off profile would otherwise miss it, so merge it into the base
-        // line here — Chrome unions every `--disable-features` occurrence, so
-        // the redundancy under a stealth profile is harmless.
-        if self.extensions.is_empty() {
-            v.push(
-                "--disable-features=PasswordManagerOnboarding,AutofillServerCommunication"
-                    .to_string(),
-            );
-        } else {
-            v.push(
-                "--disable-features=PasswordManagerOnboarding,AutofillServerCommunication,DisableLoadExtensionCommandLineSwitch"
-                    .to_string(),
-            );
+        // The base set of disabled features. `--load-extension` needs
+        // `DisableLoadExtensionCommandLineSwitch` off (Chrome 136+ ignores
+        // the switch otherwise); the stealth profiles also turn that off,
+        // but a launch without one must too. `launch_flags` merges this
+        // switch with the profile's and the caller's.
+        let mut disabled = vec!["PasswordManagerOnboarding", "AutofillServerCommunication"];
+        if !self.extensions.is_empty() {
+            disabled.push("DisableLoadExtensionCommandLineSwitch");
         }
+        v.push(format!("--disable-features={}", disabled.join(",")));
         let gpu_backend = self.effective_gpu_backend();
         if self.headless.unwrap_or(true) {
             v.push("--headless=new".to_string());
@@ -1995,7 +2041,9 @@ impl BrowserBuilder {
     /// additions): [`build_flags`](Self::build_flags), then `profile_flags`
     /// (the stealth profile's own flags plus, for a headless launch, its
     /// screen switches; empty without a profile), then the
-    /// Blink settings of a mouse for a headless launch on Linux.
+    /// Blink settings of a mouse for a headless launch on Linux. Then every
+    /// `--disable-features` is merged into one, and every `--enable-features`
+    /// (see [`merge_feature_switches`]).
     ///
     /// Headless Chrome on Linux has no input devices, so its pages would see
     /// no pointer. Elsewhere, and in a headed launch, Chrome gives pages a
@@ -2017,7 +2065,7 @@ impl BrowserBuilder {
                 pointer = profile.pointer_blink_settings();
             }
         }
-        add_blink_settings(flags, pointer)
+        merge_feature_switches(add_blink_settings(flags, pointer))
     }
 
     /// Build the combined [`HostMatcher`] from all configured sources, or
@@ -6562,6 +6610,71 @@ mod tests {
     fn launch_flags_add_no_blink_settings_off_linux() {
         let flags = launch_flags_of(&Browser::builder());
         assert!(blink_settings_switches(&flags).is_empty(), "{flags:?}");
+    }
+
+    /// The value of each switch named `switch` in `flags`.
+    fn switch_values<'a>(flags: &'a [String], switch: &str) -> Vec<&'a str> {
+        let named = |flag: &'a String| match super::parse_switch(flag) {
+            Some((name, value)) if name == switch => Some(value),
+            _ => None,
+        };
+        flags.iter().filter_map(named).collect()
+    }
+
+    /// Chrome reads only the last `--disable-features`, so the base features,
+    /// the profile's and the caller's must share one switch. It takes the
+    /// union of every `--disable-blink-features` itself.
+    #[test]
+    fn launch_flags_merge_the_features_of_builder_profile_and_caller() {
+        let profile = StealthProfile::native().arg("--enable-features=FromProfile");
+        let builder = Browser::builder()
+            .stealth(profile)
+            .arg("--disable-features=FromCaller,IsolateOrigins")
+            .arg("--disable-blink-features=FromCaller")
+            .arg("--enable-features=FromCaller");
+        let flags = launch_flags_of(&builder);
+        assert_eq!(
+            switch_values(&flags, "disable-features"),
+            [
+                "PasswordManagerOnboarding,AutofillServerCommunication,FromCaller,IsolateOrigins,\
+                 DisableLoadExtensionCommandLineSwitch,site-per-process"
+            ],
+        );
+        assert_eq!(
+            switch_values(&flags, "enable-features"),
+            ["FromCaller,FromProfile"],
+        );
+        assert_eq!(
+            switch_values(&flags, "disable-blink-features"),
+            ["FromCaller", "AutomationControlled"],
+        );
+    }
+
+    #[test]
+    fn merge_feature_switches_merges_into_the_first_occurrence() {
+        let merge = |flags: &[&str]| {
+            super::merge_feature_switches(flags.iter().map(|f| f.to_string()).collect())
+        };
+        assert_eq!(
+            merge(&[
+                "--a",
+                "--disable-features=X,Y",
+                "--enable-features=E",
+                "-disable-features=Y,,Z",
+                "--disable-features",
+                "--b",
+            ]),
+            [
+                "--a",
+                "--disable-features=X,Y,Z",
+                "--enable-features=E",
+                "--b"
+            ]
+        );
+        // After `--`, Chrome reads no switches; and one occurrence stays as
+        // it is.
+        let untouched = ["-enable-features=A,,A", "--", "--enable-features=B"];
+        assert_eq!(merge(&untouched), untouched);
     }
 
     /// `add_blink_settings` of `flags` and the settings `a=1,b=2`.

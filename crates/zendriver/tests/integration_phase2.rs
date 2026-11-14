@@ -149,6 +149,37 @@ async fn native_profile_hides_webdriver_via_flag() {
     browser.close().await.unwrap();
 }
 
+/// A caller's `--disable-features` adds to the stealth profile's instead of
+/// replacing it, or being replaced by it: Chrome reads only the last
+/// occurrence of that switch, so the launch merges them all into one. Here
+/// the profile's switch turns off `PressureObserver`, and the builder's
+/// `WebSocketStream`.
+#[tokio::test]
+#[serial]
+async fn every_disable_features_switch_takes_effect() {
+    let server = FixtureServer::start().await;
+    // 127.0.0.1 is a secure context, which `PressureObserver` needs.
+    let url = server.url("127.0.0.1", "/plain");
+    let seen_js = "['PressureObserver' in window, 'WebSocketStream' in window]";
+    let stock = launch_for_test(Browser::builder()).await;
+    load(&stock.main_tab(), &url).await;
+    assert_eq!(eval(&stock.main_tab(), seen_js).await, json!([true, true]));
+    stock.close().await;
+
+    let profile = StealthProfile::native().arg("--disable-features=ComputePressure");
+    let builder = Browser::builder()
+        .stealth(profile)
+        .arg("--disable-features=WebSocketStream");
+    let browser = launch_for_test(builder).await;
+    load(&browser.main_tab(), &url).await;
+    assert_eq!(
+        eval(&browser.main_tab(), seen_js).await,
+        json!([false, false]),
+        "[has PressureObserver, has WebSocketStream]"
+    );
+    browser.close().await;
+}
+
 #[tokio::test]
 #[serial]
 async fn ua_string_no_longer_contains_headless_under_native() {
