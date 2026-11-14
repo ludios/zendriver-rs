@@ -1703,10 +1703,11 @@ impl BrowserBuilder {
     /// Auto-derive locale/languages/timezone from the exit IP via a proxied
     /// probe to `ip-api.com`. Opt-in; [`launch`](Self::launch) and
     /// [`connect`](Self::connect) make at most ONE outbound request, and only
-    /// when this is set. They make none when an earlier launch in this
+    /// when this is set. They make none when another launch in this
     /// process, with the same proxy and proxy credentials (or with no proxy),
-    /// probed successfully less than a minute ago: its result is reused. See
-    /// [`crate::IpApiResolver::cache_ttl`] to change that minute.
+    /// is probing now or probed successfully less than a minute ago: its
+    /// result is used instead. See [`crate::IpApiResolver::cache_ttl`] to
+    /// change that minute.
     ///
     /// The result has two parts, each filled only if nothing else sets it:
     ///
