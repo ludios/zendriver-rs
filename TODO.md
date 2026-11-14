@@ -212,8 +212,7 @@ These are mostly covered by `probe` (`stealth_probe.rs`) / the conformance test 
 
 Each item needs a test; `unit` is fine where no browser is involved.
 
-- [ ] **Browser:** *(BR #8–#10, #12)*
-  - the geo overlay overrides an explicit persona timezone
+- [ ] **Browser:** *(BR #9, #10, #12)*
   - `BrowserContext` `Drop` panics outside a tokio runtime (`unit`)
   - `connect()` ignores tracker blocking. It honors `proxy_auth` since `bc8a71f74`, but no test covers `proxy_auth` through `connect()`: every test in `proxy_auth.rs` launches Chrome.
   - a target that detaches during the registrar stays registered forever

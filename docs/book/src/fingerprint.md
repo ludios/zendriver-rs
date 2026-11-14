@@ -785,10 +785,19 @@ let browser = Browser::builder()
 browser is routed through a rotating or third-party proxy pool and you want
 the locale to match wherever that proxy happens to exit — use
 [`BrowserBuilder::geo_auto`] instead. It probes the exit IP through a bundled
-[`IpApiResolver`] (a proxied GET against `ip-api.com`) and folds the resulting
-country's locale/languages into the persona overlay, with the exact same
-precedence as `geo_locale`: an explicit `.persona(..)`/`.persona_overlay(..)`
-locale always wins and skips the probe entirely.
+[`IpApiResolver`] (a proxied GET against `ip-api.com`) and folds the result
+into the persona overlay, for the fields that `.persona(..)` /
+`.persona_overlay(..)` / `.geo_locale(..)` left unset. The language (`locale`
++ `languages`) and the `timezone` are filled independently:
+
+- a persona that sets `locale` (or `languages`) keeps it, and still gets the
+  exit IP's timezone — the way to say "English, wherever the proxy exits";
+- a persona that sets `timezone` keeps it, and still gets the exit IP's
+  language;
+- with both set, there is nothing to fill and no request is made.
+
+A locale or timezone pinned on the `StealthProfile` does not count as set
+here: like any persona value, the probe's result outranks it.
 
 **Timezone precision beats `geo_locale` here:** `ip-api.com`'s response
 carries the exit IP's exact IANA `timezone`, not just its country, so

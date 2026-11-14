@@ -154,9 +154,11 @@ present in the schema but only takes effect when the `geo` feature is enabled.
 - `geo_auto: bool` — auto-derive `locale`/`languages` from the exit IP's
   country via a proxied probe to `ip-api.com` (mirrors `proxy` above), instead
   of naming a country explicitly via `geo_country`. Makes at most one outbound
-  request, only at launch, only when `true`. An explicit `persona` locale wins
-  and skips the probe. Requires the opt-in `geo` feature; always present in
-  the schema (ignored with a logged warning on a non-`geo` build).
+  request, only at launch, only when `true`. Fills only what `persona` leaves
+  unset: a `persona` locale is kept and the timezone still comes from the
+  exit IP, and with both set no request is made. Requires the opt-in `geo`
+  feature; always present in the schema (ignored with a logged warning on a
+  non-`geo` build).
 - `geo_endpoint: string` — override the probe endpoint (default
   `http://ip-api.com/json`); only meaningful with `geo_auto: true`. Note this
   bypasses proxy mirroring — only the bundled default endpoint routes through
