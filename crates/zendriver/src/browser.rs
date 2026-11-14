@@ -1862,10 +1862,14 @@ impl BrowserBuilder {
 
     /// Register an additional [`TargetObserver`].
     ///
-    /// Observers fire on each new attached target, which auto-attach limits
-    /// to `page` and `iframe`. Worker targets are excluded, so an observer
-    /// never sees one. The stealth observer (if any) is added before user
-    /// observers; user observers run in the order they were registered.
+    /// Observers fire on each new attached target of type `page` or
+    /// `iframe` (`session.target_info.kind`). An `iframe` target is an
+    /// out-of-process iframe: a cross-site iframe, which Chrome runs in
+    /// another renderer process than its page's, so that what an observer
+    /// sets up on the page's session doesn't reach it. An observer never
+    /// sees a worker or worklet target. The stealth observer (if any) is
+    /// added before user observers; user observers run in the order they
+    /// were registered.
     /// The internal tab-registrar observer
     /// always runs last, after every observer registered here — a ready
     /// barrier that keeps a `Tab` from being handed back until every
@@ -2615,7 +2619,7 @@ async fn per_tab_session(
 /// handshake and the reconnect re-arm so the two can't drift apart.
 ///
 /// The `filter` restricts auto-attach to `page` and `iframe` targets and
-/// excludes everything else — crucially `service_worker`, `worker` and
+/// excludes everything else — crucially `service_worker` and
 /// `shared_worker`. Attaching a debugger session to a service worker keeps
 /// Chrome from terminating it when idle ("keep-alive while inspected"): under a
 /// long-lived browser context the workers then accumulate without bound, one
@@ -2625,6 +2629,10 @@ async fn per_tab_session(
 ///
 /// `TargetFilter` is evaluated in order, first match wins: `page` and `iframe`
 /// are attached, everything else falls through to the catch-all `exclude`.
+///
+/// Chrome reports only top-level targets here: the out-of-process iframes,
+/// dedicated workers and worklets of a page attach through the page's own
+/// session (see [`ChildTargetAutoAttach`]).
 fn auto_attach_params() -> serde_json::Value {
     json!({
         "autoAttach": true,
@@ -2902,9 +2910,98 @@ impl TargetObserver for TabRegistrar {
     }
 }
 
-/// Assemble the canonical observer chain: an optional stealth observer,
-/// then every user-supplied observer (registration order preserved), then
-/// the opt-in force-open-shadow-roots observer, then [`TabRegistrar`] LAST.
+/// [`TargetObserver`] that makes Chrome attach the out-of-process iframes,
+/// the dedicated workers and the worklets of every page, and of every
+/// out-of-process iframe, paused like the page itself, so that the observer
+/// chain runs on each of them before its first script does.
+///
+/// The browser-scoped auto-attach (see [`auto_attach_params`]) attaches
+/// top-level targets only. Chrome reports an out-of-process iframe to the
+/// session of its parent frame's target, and only once that session turns on
+/// auto-attach, which this observer does while the target is paused. Without
+/// it, no `iframe` target is ever attached, so no observer reaches one: a
+/// cross-site iframe runs without the stealth setup (in a headless launch, it
+/// reads `HeadlessChrome` in `navigator.userAgent`), and without what a
+/// caller's observers set up.
+///
+/// The filter has `worker` (dedicated workers) and `worklet` only because
+/// Chrome pauses a target's new dedicated workers and worklets once the
+/// target's session auto-attaches with `waitForDebuggerOnStart`, whether or
+/// not the filter attaches them (seen with Chrome 157). One that the filter
+/// excluded would never start: a page's `audioWorklet.addModule()` would
+/// never settle. So they attach and run the chain too (less the caller's
+/// observers, see [`PagesAndIframesOnly`]), at the end of which the transport
+/// releases them. They end with their page, unlike the service workers that
+/// [`auto_attach_params`] keeps unattached; and Chrome pauses no service
+/// worker or shared worker that this filter excludes.
+///
+/// Runs first in the chain (see [`assemble_observer_chain`]). An error fails
+/// the target's setup, as any observer's does: a page mustn't run while its
+/// iframes can't get theirs.
+pub(crate) struct ChildTargetAutoAttach;
+
+#[async_trait::async_trait]
+impl TargetObserver for ChildTargetAutoAttach {
+    fn name(&self) -> &'static str {
+        "child-auto-attach"
+    }
+
+    async fn on_target_attached(&self, session: PausedSession<'_>) -> Result<(), ObserverError> {
+        if !matches!(session.target_info.kind.as_str(), "page" | "iframe") {
+            return Ok(());
+        }
+        let params = json!({
+            "autoAttach": true,
+            "waitForDebuggerOnStart": true,
+            "flatten": true,
+            "filter": [
+                { "type": "iframe" },
+                { "type": "worker" },
+                { "type": "worklet" },
+                { "exclude": true },
+            ],
+        });
+        session.call("Target.setAutoAttach", params).await?;
+        Ok(())
+    }
+}
+
+/// A caller's observer, kept from the dedicated workers and worklets that
+/// [`ChildTargetAutoAttach`] makes Chrome attach: [`BrowserBuilder::observer`]
+/// promises `page` and `iframe` targets only. An observer that relies on that
+/// may send every target a command that a worker refuses (any of the `Page`
+/// domain), and its error would leave the worker paused for good.
+///
+/// `on_target_detached` still reports the end of every session, so also of
+/// those that the observer never saw attach.
+struct PagesAndIframesOnly(Arc<dyn TargetObserver>);
+
+#[async_trait::async_trait]
+impl TargetObserver for PagesAndIframesOnly {
+    fn name(&self) -> &'static str {
+        self.0.name()
+    }
+
+    fn failure_policy(&self) -> zendriver_transport::ObserverFailurePolicy {
+        self.0.failure_policy()
+    }
+
+    async fn on_target_attached(&self, session: PausedSession<'_>) -> Result<(), ObserverError> {
+        if !matches!(session.target_info.kind.as_str(), "page" | "iframe") {
+            return Ok(());
+        }
+        self.0.on_target_attached(session).await
+    }
+
+    async fn on_target_detached(&self, session_id: &str) {
+        self.0.on_target_detached(session_id).await;
+    }
+}
+
+/// Assemble the canonical observer chain: [`ChildTargetAutoAttach`], then an
+/// optional stealth observer, then every user-supplied observer
+/// (registration order preserved, each as [`PagesAndIframesOnly`]), then the
+/// opt-in force-open-shadow-roots observer, then [`TabRegistrar`] LAST.
 ///
 /// Registering the registrar last makes it a **ready barrier**. Observers
 /// run serially in registration order (the transport actor awaits each
@@ -2936,9 +3033,13 @@ fn assemble_observer_chain(
     registrar: Arc<TabRegistrar>,
 ) -> Vec<Arc<dyn TargetObserver>> {
     let mut obs_vec =
-        Vec::with_capacity(usize::from(stealth_obs.is_some()) + extra_observers.len() + 2);
+        Vec::with_capacity(usize::from(stealth_obs.is_some()) + extra_observers.len() + 3);
+    obs_vec.push(Arc::new(ChildTargetAutoAttach) as Arc<dyn TargetObserver>);
     obs_vec.extend(stealth_obs);
-    obs_vec.extend(extra_observers.iter().cloned());
+    for observer in extra_observers {
+        obs_vec
+            .push(Arc::new(PagesAndIframesOnly(Arc::clone(observer))) as Arc<dyn TargetObserver>);
+    }
     if force_open_shadow_roots {
         obs_vec.push(Arc::new(crate::expert::ShadowRootObserver) as Arc<dyn TargetObserver>);
     }
@@ -5910,6 +6011,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "child-auto-attach",
                 "stealth-stub",
                 "user-1",
                 "user-2",
@@ -5922,12 +6024,120 @@ mod tests {
     #[test]
     fn observer_chain_registrar_last_even_with_no_stealth_or_extras() {
         // Degenerate case: no stealth profile, no user observers, shadow
-        // roots off. The registrar must still be present and last (in this
-        // case, the only entry).
+        // roots off. The registrar must still be present and last.
         let registrar = Arc::new(TabRegistrar::new(zendriver_stealth::InputProfile::native()));
         let chain = assemble_observer_chain(None, &[], false, registrar);
         let names: Vec<&str> = chain.iter().map(|o| o.name()).collect();
-        assert_eq!(names, vec!["tab-registrar"]);
+        assert_eq!(names, vec!["child-auto-attach", "tab-registrar"]);
+    }
+
+    /// [`TargetObserver`] that records the type of each target it is given.
+    struct KindRecorder(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl TargetObserver for KindRecorder {
+        fn name(&self) -> &'static str {
+            "kind-recorder"
+        }
+
+        async fn on_target_attached(
+            &self,
+            session: PausedSession<'_>,
+        ) -> Result<(), ObserverError> {
+            let mut kinds = self.0.lock().expect("kinds");
+            kinds.push(session.target_info.kind.clone());
+            Ok(())
+        }
+    }
+
+    /// `BrowserBuilder::observer` promises `page` and `iframe` targets only,
+    /// so the dedicated workers and worklets that Chrome attaches don't
+    /// reach a caller's observer; they are still released.
+    #[tokio::test]
+    async fn a_callers_observer_sees_only_pages_and_iframes() {
+        use zendriver_transport::testing::MockConnection;
+
+        let recorder = Arc::new(KindRecorder(std::sync::Mutex::new(Vec::new())));
+        let registrar = Arc::new(TabRegistrar::new(zendriver_stealth::InputProfile::native()));
+        let callers = [recorder.clone() as Arc<dyn TargetObserver>];
+        let chain = assemble_observer_chain(None, &callers, false, registrar);
+        let (mut mock, conn) = MockConnection::pair_with_observers(chain);
+        for kind in ["page", "iframe", "worker", "worklet"] {
+            mock.emit_event(
+                "Target.attachedToTarget",
+                json!({
+                    "sessionId": format!("S-{kind}"),
+                    "targetInfo": { "targetId": format!("T-{kind}"), "type": kind, "url": "" },
+                    "waitingForDebugger": true,
+                }),
+            )
+            .await;
+            loop {
+                let (method, id) = mock
+                    .recv_cmd_timeout(Duration::from_secs(2))
+                    .await
+                    .expect("no command");
+                mock.reply(id, json!({})).await;
+                if method == "Runtime.runIfWaitingForDebugger" {
+                    break;
+                }
+            }
+        }
+        conn.shutdown();
+        assert_eq!(*recorder.0.lock().expect("kinds"), ["page", "iframe"]);
+    }
+
+    /// Chrome reports an out-of-process iframe only to the session of its
+    /// parent frame's target, so each page and each such iframe turns on
+    /// auto-attach on its own session, while paused. A worker's own session
+    /// turns none on.
+    #[tokio::test]
+    async fn child_auto_attach_arms_the_session_of_a_page_and_of_an_iframe() {
+        use zendriver_transport::testing::MockConnection;
+
+        let (mut mock, conn) =
+            MockConnection::pair_with_observers(vec![
+                Arc::new(ChildTargetAutoAttach) as Arc<dyn TargetObserver>
+            ]);
+        for (kind, arms) in [("page", true), ("iframe", true), ("worker", false)] {
+            let session_id = format!("S-{kind}");
+            mock.emit_event(
+                "Target.attachedToTarget",
+                json!({
+                    "sessionId": session_id,
+                    "targetInfo": { "targetId": format!("T-{kind}"), "type": kind, "url": "" },
+                    "waitingForDebugger": true,
+                }),
+            )
+            .await;
+            let budget = Duration::from_secs(2);
+            if arms {
+                let (method, id) = mock.recv_cmd_timeout(budget).await.expect("no command");
+                assert_eq!(method, "Target.setAutoAttach");
+                let sent = mock.last_sent().clone();
+                assert_eq!(sent["sessionId"], session_id, "{sent}");
+                assert_eq!(
+                    sent["params"],
+                    json!({
+                        "autoAttach": true,
+                        "waitForDebuggerOnStart": true,
+                        "flatten": true,
+                        "filter": [
+                            { "type": "iframe" },
+                            { "type": "worker" },
+                            { "type": "worklet" },
+                            { "exclude": true },
+                        ],
+                    }),
+                );
+                mock.reply(id, json!({})).await;
+            }
+            let (method, id) = mock.recv_cmd_timeout(budget).await.expect("no command");
+            assert_eq!(method, "Runtime.runIfWaitingForDebugger", "{kind}");
+            assert_eq!(mock.last_sent()["sessionId"], session_id);
+            mock.reply(id, json!({})).await;
+        }
+        conn.shutdown();
     }
 
     #[cfg(feature = "geo")]
