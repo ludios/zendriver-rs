@@ -25,7 +25,7 @@ You can mix any persona source with any per-surface strategy independently.
 | `ClientRects` | Noise | `Seeded` | `getBoundingClientRect` sub-pixel dimensions |
 | `Webgl` | Value | `Value` | Every static device capability `getParameter` reports (WebGL1 + WebGL2), both extension lists, and `getShaderPrecisionFormat` — not just `UNMASKED_VENDOR_WEBGL`/`UNMASKED_RENDERER_WEBGL`. Per-context mutable state stays the backend's |
 | `Webgpu` | Value | `Value` | `GPUAdapterInfo` (vendor/architecture/device/description) + optional `.limits`/`.features` |
-| `Fonts` | Value | `Value` | `measureText` width noise + `FontFaceSet.check` allow-list |
+| `Fonts` | Value | `Value` | `measureText` width noise |
 | `Hardware` | Value | `Value` | Battery level, media-device count, speech voices |
 
 WebRTC isn't a surface, because Chrome handles it itself: every stealth

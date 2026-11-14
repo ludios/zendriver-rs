@@ -20,7 +20,7 @@
 use serde_json::json;
 
 use crate::persona::surface::{Strategy, Surface};
-use crate::persona::{FontSpec, HardwareSpec, SurfaceCfg, WebglSpec, WebgpuSpec};
+use crate::persona::{HardwareSpec, WebglSpec, WebgpuSpec};
 use crate::{Fingerprint, GpuProfile, Persona, Platform, Seed};
 
 // --- Native-function masking prelude (runs first, wraps everything) ------
@@ -103,21 +103,21 @@ fn bootstrap_script_impl(persona: &Persona, identity: &Fingerprint, spoof_webgl:
     push_noise(
         &mut body,
         Surface::Canvas,
-        persona.canvas.as_ref(),
+        persona.canvas.as_ref().and_then(|cfg| cfg.strategy),
         CANVAS,
         seed,
     );
     push_noise(
         &mut body,
         Surface::Audio,
-        persona.audio.as_ref(),
+        persona.audio.as_ref().and_then(|cfg| cfg.strategy),
         AUDIO,
         seed,
     );
     push_noise(
         &mut body,
         Surface::ClientRects,
-        persona.client_rects.as_ref(),
+        persona.client_rects.as_ref().and_then(|cfg| cfg.strategy),
         CLIENT_RECTS,
         seed,
     );
@@ -153,7 +153,15 @@ fn bootstrap_script_impl(persona: &Persona, identity: &Fingerprint, spoof_webgl:
         webgl_spoofed,
         platform,
     );
-    push_fonts(&mut body, persona.fonts.as_ref(), seed);
+    // The noise on `measureText`. The persona's font list isn't used (see
+    // `FontSpec::available`).
+    push_noise(
+        &mut body,
+        Surface::Fonts,
+        persona.fonts.as_ref().and_then(|fonts| fonts.strategy),
+        FONTS,
+        seed,
+    );
     push_hardware(&mut body, persona.hardware.as_ref());
 
     // Single outer IIFE: helpers stay closure-local (no globalThis leak); the
@@ -191,9 +199,16 @@ fn seed_token(strat: Strategy, seed: u64) -> Option<String> {
 }
 
 /// Append a noise-surface patch (`SEED` token), respecting the resolved
-/// strategy. No-op under `Native`.
-fn push_noise(out: &mut String, surface: Surface, cfg: Option<&SurfaceCfg>, js: &str, seed: u64) {
-    let strat = surface.resolve_strategy(cfg.and_then(|c| c.strategy));
+/// strategy. No-op under `Native`. `configured` is the strategy that the
+/// persona names for `surface`, if it names one.
+fn push_noise(
+    out: &mut String,
+    surface: Surface,
+    configured: Option<Strategy>,
+    js: &str,
+    seed: u64,
+) {
+    let strat = surface.resolve_strategy(configured);
     if let Some(tok) = seed_token(strat, seed) {
         out.push('\n');
         out.push_str(&js.replace("SEED", &tok));
@@ -484,30 +499,6 @@ fn push_webgpu(
     );
 }
 
-/// Append the fonts patch (`FONT_ALLOW` + `SEED`). Omitted under `Native`.
-fn push_fonts(out: &mut String, spec: Option<&FontSpec>, seed: u64) {
-    let strat = Surface::Fonts.resolve_strategy(spec.and_then(|s| s.strategy));
-    let seed_tok = match seed_token(strat, seed) {
-        None => return, // Native → omit entirely.
-        Some(t) => t,
-    };
-    // Allow-list only meaningful when the persona supplies one AND we're not
-    // blocking; under Block, hide every font (empty allow-list).
-    let allow = match strat {
-        Strategy::Block => "[]".to_string(),
-        _ => spec.and_then(|s| s.available.as_ref()).map_or_else(
-            || "null".to_string(),
-            |v| serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()),
-        ),
-    };
-    out.push('\n');
-    out.push_str(
-        &FONTS
-            .replace("FONT_ALLOW", &allow)
-            .replace("SEED", &seed_tok),
-    );
-}
-
 /// Append the hardware patch (`HW_BATTERY` / `HW_MEDIA_DEVICES` / `HW_VOICES`).
 /// Omitted under `Native`. Each field independently `null` when unset.
 fn push_hardware(out: &mut String, spec: Option<&HardwareSpec>) {
@@ -545,6 +536,7 @@ fn push_hardware(out: &mut String, spec: Option<&HardwareSpec>) {
 mod tests {
     use super::*;
     use crate::persona::surface::Strategy;
+    use crate::persona::{FontSpec, SurfaceCfg};
     use crate::{Platform, UserAgentMetadata};
 
     fn mock_identity() -> Fingerprint {
@@ -1265,8 +1257,10 @@ mod tests {
         );
     }
 
+    /// The persona's font list reaches no script: Chrome tells a page
+    /// nothing that a list could answer for.
     #[test]
-    fn fonts_value_substitutes_allow_list() {
+    fn fonts_patch_leaves_out_the_font_list() {
         let p = Persona {
             fonts: Some(FontSpec {
                 strategy: Some(Strategy::Value),
@@ -1277,10 +1271,8 @@ mod tests {
         };
         let script = bootstrap_script(&p, &mock_identity());
         assert!(script.contains("measureText"), "fonts patch emitted");
-        assert!(
-            script.contains("[\"Arial\",\"Helvetica\"]"),
-            "allow-list substituted"
-        );
+        assert!(!script.contains("Helvetica"), "the font list isn't used");
+        assert!(!script.contains("fonts.check"));
     }
 
     #[test]
@@ -1914,7 +1906,6 @@ mod tests {
         for tok in [
             "SEED",
             "WEBGL_PROFILE",
-            "FONT_ALLOW",
             "HW_BATTERY",
             "HW_MEDIA_DEVICES",
             "HW_VOICES",

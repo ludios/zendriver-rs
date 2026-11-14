@@ -351,11 +351,17 @@ pub struct WebgpuSpec {
     pub fabricate_when_absent: Option<bool>,
 }
 
-/// Font set + measureText noise.
+/// `measureText` noise, and the device's fonts.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct FontSpec {
     pub strategy: Option<Strategy>,
-    /// Allow-list of font families the page may detect.
+    /// The font families of the device that the persona describes. Kept as
+    /// data only: no patch uses it. It used to make `document.fonts.check()`
+    /// false for every other family, but Chrome's `check()` doesn't tell a
+    /// page which local fonts exist (it is true for a family that isn't
+    /// installed, and for a page's own web font once loaded), so answering
+    /// from a list set the browser apart instead. A page finds the installed
+    /// fonts by measuring text, which no patch here changes.
     pub available: Option<Vec<String>>,
 }
 

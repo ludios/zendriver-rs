@@ -1,4 +1,4 @@
-(function (allow, seed) {
+(function (seed) {
   __zdReplace(CanvasRenderingContext2D.prototype, 'measureText', (orig) => function () {
     const m = orig.apply(this, arguments);
     const width = m.width;
@@ -13,12 +13,4 @@
     catch (e) {}
     return m;
   });
-  // If an allow-list is provided, hide other fonts from FontFaceSet checks.
-  if (Array.isArray(allow) && document.fonts && document.fonts.check) {
-    __zdReplace(document.fonts, 'check', (origCheck) => function (font, text) {
-      const fam = (font || '').split(/\s+/).pop();
-      if (fam && allow.indexOf(fam.replace(/["']/g, '')) === -1) return false;
-      return origCheck.call(document.fonts, font, text);
-    });
-  }
-})(FONT_ALLOW, SEED);
+})(SEED);

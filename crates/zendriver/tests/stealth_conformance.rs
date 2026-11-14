@@ -159,12 +159,13 @@ const INVARIANTS: &[(&str, &str)] = &[
         "#,
     ),
     (
-        // Real Chrome's `check` is true for any local font, even a missing
-        // one. A persona's font allow-list makes the patched `check` false
-        // for unlisted families, but the profile's list has both of these.
-        "fonts_check_finds_listed_families",
+        // Chrome's `check` is true for any local font, even a missing one,
+        // so it tells a page nothing about the installed fonts; a persona's
+        // font list mustn't change that.
+        "fonts_check_is_true_for_local_fonts",
         r#"
-        const missing = ['16px "Segoe UI"', '16px Arial'].filter(font => !document.fonts.check(font));
+        const fonts = ['16px "Segoe UI"', '16px Arial', '16px "No Such Font 123"', '16px serif'];
+        const missing = fonts.filter(font => !document.fonts.check(font));
         return missing.length ? `document.fonts.check is false for ${missing.join(', ')}` : null;
         "#,
     ),
@@ -233,16 +234,6 @@ const KNOWN_BUGS: &[(&str, &[&str], &str)] = &[
         "patched_functions_are_not_constructors",
         SPOOFED,
         "P1 Stealth: masked functions are constructible (ST #12)",
-    ),
-    (
-        "properties_live_on_prototypes",
-        &["spoofed fonts"],
-        "P1 Stealth: own properties on instances (ST #13)",
-    ),
-    (
-        "fonts_check_finds_listed_families",
-        &["spoofed fonts"],
-        "P1 Stealth: fonts.check keeps only the last word of the family name (ST #6)",
     ),
 ];
 
@@ -323,7 +314,8 @@ async fn invariants_hold_under_spoofed_win32() {
     check("spoofed win32", builder).await;
 }
 
-/// The only profile with a font allow-list, which the host persona lacks.
+/// A persona's font list (which the host persona lacks) reaches no patch, so
+/// it breaks nothing more than `spoofed` does.
 #[tokio::test]
 async fn invariants_hold_under_spoofed_with_a_font_list() {
     let fonts: Persona = r#"{"fonts": {"available": ["Segoe UI", "Arial"]}}"#
