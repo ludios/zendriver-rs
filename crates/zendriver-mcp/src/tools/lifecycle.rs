@@ -95,7 +95,13 @@ pub struct OpenInput {
     /// with only a locale set, the locale is kept and the timezone is the
     /// exit IP's; with only a timezone set, the timezone is kept and the
     /// language is the exit IP's country's; with both set, no request is
-    /// made. Always present in the schema so the wire shape is
+    /// made. No request is made either when an earlier launch in this server
+    /// process, with the same `proxy` (or with none) and the same
+    /// `geo_endpoint`, succeeded in its probe less than a minute ago or is
+    /// still probing: this launch then uses that probe's result, which can
+    /// belong to an earlier exit IP if the exit IP changed within that
+    /// minute, and which can be a failure if the probe was still running.
+    /// Always present in the schema so the wire shape is
     /// feature-stable; only takes effect when the server is built with the
     /// `geo` feature (otherwise ignored — a warning is logged).
     #[serde(default)]
