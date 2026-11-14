@@ -141,23 +141,26 @@ fn extract_blocking(
         let mut entry = archive
             .by_index(i)
             .map_err(|e| FetcherError::Extraction(e.to_string()))?;
+        let name = entry
+            .name()
+            .map_err(|e| FetcherError::Extraction(e.to_string()))?
+            .into_owned();
 
         // Refuse an absolute name, or one with a `..` component. Both pass
         // `enclosed_name`, which re-roots the first and resolves the second
         // (so `a/../b` would overwrite an entry `b`). No archive from any of
         // the three indexes ships either.
-        if is_absolute_or_climbs(entry.name()) {
+        if is_absolute_or_climbs(&name) {
             return Err(FetcherError::Extraction(format!(
-                "zip entry {:?} is absolute or has a parent-directory component; refusing",
-                entry.name()
+                "zip entry {name:?} is absolute or has a parent-directory component; refusing"
             )));
         }
-        // What `enclosed_name` still refuses: a NUL byte, or a root or drive
-        // after the first component.
+        // What `enclosed_name` still refuses includes a NUL byte, a root or
+        // drive after the first component, and (on Windows) device names
+        // such as `CON`.
         let Some(rel_path) = entry.enclosed_name() else {
             return Err(FetcherError::Extraction(format!(
-                "zip entry has unsafe path: {}",
-                entry.name()
+                "zip entry has unsafe path: {name}"
             )));
         };
 

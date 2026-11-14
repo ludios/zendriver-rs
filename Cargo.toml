@@ -92,7 +92,7 @@ reqwest            = { version = "0.13", default-features = false, features = ["
 # Direct dep purely to name the ring provider in `install_default_crypto_provider`.
 rustls             = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 # Not `deflate`, which adds the zopfli compressor: outside tests, we only decompress.
-zip                = { version = "7",    default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip                = { version = "9",    default-features = false, features = ["deflate-flate2-zlib-rs"] }
 sha2               = "0.11"
 # `IoWrapper` lets `io::copy` feed a sha2 hasher, which does not implement io::Write.
 digest-io          = "0.1"
