@@ -1505,13 +1505,13 @@ pub(crate) async fn type_text_realistic(
             {
                 0
             } else {
-                rand::Rng::random_range(
+                rand::RngExt::random_range(
                     &mut s.rng,
                     profile.per_char_delay_ms_range.0..=profile.per_char_delay_ms_range.1,
                 )
             };
-            let do_typo =
-                profile.typo_rate > 0.0 && rand::Rng::random::<f32>(&mut s.rng) < profile.typo_rate;
+            let do_typo = profile.typo_rate > 0.0
+                && rand::RngExt::random::<f32>(&mut s.rng) < profile.typo_rate;
             let typo_char = if do_typo {
                 neighbor_key(lead, &mut s.rng)
             } else {
@@ -1519,9 +1519,9 @@ pub(crate) async fn type_text_realistic(
             };
             let thinking = if lead == ' '
                 && profile.thinking_pause_ms_range.0 > 0
-                && rand::Rng::random::<f32>(&mut s.rng) < 0.05
+                && rand::RngExt::random::<f32>(&mut s.rng) < 0.05
             {
-                rand::Rng::random_range(
+                rand::RngExt::random_range(
                     &mut s.rng,
                     profile.thinking_pause_ms_range.0..=profile.thinking_pause_ms_range.1,
                 )

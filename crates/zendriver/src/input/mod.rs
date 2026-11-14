@@ -15,7 +15,6 @@
 
 use std::sync::Arc;
 
-use rand::SeedableRng;
 use tokio::sync::Mutex;
 use zendriver_stealth::InputProfile;
 
@@ -107,7 +106,7 @@ impl InputController {
                 pointer_y: 0.0,
                 buttons_held: MouseButtonSet::empty(),
                 modifiers_held: KeyModifiers::empty(),
-                rng: rand::rngs::SmallRng::from_os_rng(),
+                rng: rand::make_rng(),
             }),
             profile,
         })
@@ -124,7 +123,7 @@ impl InputController {
                 pointer_y: 0.0,
                 buttons_held: MouseButtonSet::empty(),
                 modifiers_held: KeyModifiers::empty(),
-                rng: rand::rngs::SmallRng::seed_from_u64(seed),
+                rng: rand::SeedableRng::seed_from_u64(seed),
             }),
             profile,
         })
@@ -155,11 +154,11 @@ mod tests {
         let b = InputController::new_with_seed(InputProfile::native(), 42);
         let av = {
             let mut s = a.state.lock().await;
-            rand::RngCore::next_u64(&mut s.rng)
+            rand::Rng::next_u64(&mut s.rng)
         };
         let bv = {
             let mut s = b.state.lock().await;
-            rand::RngCore::next_u64(&mut s.rng)
+            rand::Rng::next_u64(&mut s.rng)
         };
         assert_eq!(av, bv);
     }

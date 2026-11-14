@@ -17,11 +17,11 @@ impl BezierPath {
     ) -> Self {
         let dx = end.0 - start.0;
         let dy = end.1 - start.1;
-        let jitter = |rng: &mut dyn rand::RngCore| -> f64 {
+        let jitter = |rng: &mut dyn rand::Rng| -> f64 {
             if jitter_px == 0.0 {
                 return 0.0;
             }
-            rand::Rng::random_range(rng, -jitter_px..jitter_px)
+            rand::RngExt::random_range(rng, -jitter_px..jitter_px)
         };
         let c1 = (
             start.0 + dx * 0.25 + jitter(rng),

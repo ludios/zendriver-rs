@@ -16,7 +16,7 @@
 use std::ops::Range;
 use std::time::Duration;
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 use serde_json::json;
 use tokio::time::Instant;
 use zendriver_transport::{CallError, SessionHandle};
