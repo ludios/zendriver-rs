@@ -157,6 +157,9 @@ pub(crate) async fn run(
     let _stop_enable = enable_cancel.clone().drop_guard();
     tokio::spawn(async move {
         tokio::select! {
+            // Cancellation first: a tab that is being dropped also closes its
+            // session, and the call's error for that mustn't be logged.
+            biased;
             () = enable_cancel.cancelled() => {}
             res = enable_session.call("Page.enable", serde_json::json!({})) => {
                 if let Err(e) = res {
