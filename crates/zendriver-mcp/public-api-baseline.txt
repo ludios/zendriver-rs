@@ -7751,6 +7751,7 @@ impl<V, T> ppv_lite86::types::VZip<V> for zendriver::tab::IdleOptions where V: p
 pub fn zendriver::tab::IdleOptions::vzip(self) -> V
 pub struct zendriver::IpApiResolver
 impl zendriver::IpApiResolver
+pub fn zendriver::IpApiResolver::cache_ttl(self, core::time::Duration) -> Self
 pub fn zendriver::IpApiResolver::endpoint(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn zendriver::IpApiResolver::new() -> Self
 pub fn zendriver::IpApiResolver::timeout(self, core::time::Duration) -> Self

@@ -154,7 +154,10 @@ present in the schema but only takes effect when the `geo` feature is enabled.
 - `geo_auto: bool` — auto-derive the language (`locale` + `languages`) and
   the timezone from the exit IP via a proxied probe to `ip-api.com` (mirrors
   `proxy` above), instead of naming a country explicitly via `geo_country`.
-  Makes at most one outbound request, only at launch, only when `true`. Each
+  Makes at most one outbound request, only at launch, only when `true`; and
+  none when a launch with the same `proxy` (or with none) and the same
+  `geo_endpoint` probed successfully less than a minute ago, whose result
+  is then reused. Each
   of the two parts is filled only if nothing else sets it (`persona`, or
   the `locale` / `geo_country` / `timezone` of `browser_stealth_set`): with
   only a locale set, the locale is kept and the timezone is the exit IP's;

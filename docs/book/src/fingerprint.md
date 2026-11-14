@@ -822,6 +822,33 @@ let browser = Browser::builder()
 authenticated proxy like the one above is probed authenticated — the probe
 would otherwise 407 silently and fail soft with no overlay.
 
+**Reuse:** a successful probe is reused for one minute by every later launch
+in the same process that has the same proxy and proxy credentials (or, like
+the first, no proxy), which keeps a burst of launches under `ip-api.com`'s
+free rate limit of 45 requests a minute per IP. A new proxy, or a new
+sticky-session ID in the proxy's username, probes again; a failed probe is
+never reused. A reused result can belong to an earlier exit IP: a rotating
+proxy can change its exit IP between any two connections, and without a
+proxy, a VPN or a switch of networks changes the machine's own. To shorten
+or turn off the reuse, build the resolver yourself and pass it to
+`geo_resolver(..)`:
+
+```rust,no_run
+use std::time::Duration;
+use zendriver::{Browser, IpApiResolver};
+
+let browser = Browser::builder()
+    .geo_resolver(
+        IpApiResolver::new()
+            .with_proxy(
+                Some("http://residential-proxy.example:8000".into()),
+                Some(("user".into(), "pass".into())),
+            )
+            .cache_ttl(Duration::ZERO), // probe on every launch
+    )
+    .launch().await?;
+```
+
 **Privacy:** the bundled `ip-api.com` probe fires ONLY when `.geo_auto()` (or
 `.geo_resolver()`) is called — it is fully opt-in, never implicit. Failure
 (no network, proxy down, unrecognized country) is fail-soft: a

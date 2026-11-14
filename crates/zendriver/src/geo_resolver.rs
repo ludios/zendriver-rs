@@ -1,7 +1,9 @@
 //! `IpApiResolver`: derive the exit-IP country (and exact timezone, when
 //! available) via a proxied HTTP probe.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use zendriver_stealth::geo::{Country, GeoResolver, ResolvedGeo};
@@ -13,12 +15,39 @@ use zendriver_stealth::geo::{Country, GeoResolver, ResolvedGeo};
 /// service if response integrity matters for your threat model) through the
 /// browser's proxy. Opt-in via `BrowserBuilder::geo_auto`; endpoint
 /// overridable; swap the whole thing out with a custom [`GeoResolver`].
+///
+/// A successful probe is reused for [`Self::cache_ttl`] (default 1 minute)
+/// by every `IpApiResolver` in this process that has the same endpoint,
+/// proxy, and proxy credentials.
 pub struct IpApiResolver {
     endpoint: String,
     proxy: Option<String>,
     proxy_auth: Option<(String, String)>,
     timeout: Duration,
+    cache_ttl: Duration,
 }
+
+/// What one cached probe result answers for: one endpoint, asked through one
+/// proxy (`None`: directly) with one set of proxy credentials.
+#[derive(PartialEq, Eq, Hash)]
+struct CacheKey {
+    endpoint: String,
+    proxy: Option<String>,
+    proxy_auth: Option<(String, String)>,
+}
+
+/// A successful probe, when it finished, and the TTL of the resolver that
+/// made it.
+struct CacheEntry {
+    geo: ResolvedGeo,
+    stored_at: Instant,
+    ttl: Duration,
+}
+
+/// The successful probes, shared by every [`IpApiResolver`] in this
+/// process. Each insert first evicts the entries older than their own TTL,
+/// so the map holds only recent results.
+static CACHE: LazyLock<Mutex<HashMap<CacheKey, CacheEntry>>> = LazyLock::new(Default::default);
 
 impl Default for IpApiResolver {
     fn default() -> Self {
@@ -28,9 +57,10 @@ impl Default for IpApiResolver {
 
 impl IpApiResolver {
     /// A resolver hitting `http://ip-api.com/json` directly (no proxy), with
-    /// a 5-second timeout. Chain [`Self::endpoint`] / [`Self::timeout`] to
+    /// a 5-second timeout and a 1-minute [`Self::cache_ttl`]. Chain
+    /// [`Self::endpoint`] / [`Self::timeout`] / [`Self::cache_ttl`] to
     /// customize; `BrowserBuilder::geo_auto` wires the proxy (and its
-    /// credentials, if any) via the crate-private [`Self::with_proxy`].
+    /// credentials, if any) via [`Self::with_proxy`].
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -38,6 +68,7 @@ impl IpApiResolver {
             proxy: None,
             proxy_auth: None,
             timeout: Duration::from_secs(5),
+            cache_ttl: Duration::from_secs(60),
         }
     }
 
@@ -62,6 +93,30 @@ impl IpApiResolver {
         self
     }
 
+    /// Override how long a successful probe is reused (default 1 minute);
+    /// `Duration::ZERO` turns the reuse off. The reuse keeps a burst of
+    /// launches under the rate limit of `ip-api.com`'s free endpoint (45
+    /// requests a minute per IP).
+    ///
+    /// A probe result is reused by every later [`resolve`](GeoResolver::resolve)
+    /// in this process, of this resolver or of any other `IpApiResolver`,
+    /// that has the same endpoint, the same proxy (or no proxy), and the
+    /// same proxy credentials, until `ttl` has passed since the probe
+    /// finished. So changing the proxy, or the session ID that a
+    /// sticky-session proxy takes in its username, makes the next launch
+    /// probe again. A failed probe is never reused.
+    ///
+    /// The exit IP can change while all of those stay the same, and a
+    /// reused result then belongs to the earlier exit IP until `ttl` has
+    /// passed: without a proxy, a VPN or a switch of networks changes this
+    /// machine's own exit IP, and a rotating proxy can change its exit IP
+    /// between any two connections.
+    #[must_use]
+    pub fn cache_ttl(mut self, ttl: Duration) -> Self {
+        self.cache_ttl = ttl;
+        self
+    }
+
     /// Route the probe through `server` (mirrors the browser's own proxy so
     /// the resolved country matches the exit IP Chrome will actually use),
     /// authenticating with `auth` (`user`, `pass`) when the proxy requires
@@ -81,11 +136,50 @@ impl IpApiResolver {
         self.proxy_auth = auth;
         self
     }
-}
 
-#[async_trait]
-impl GeoResolver for IpApiResolver {
-    async fn resolve(&self) -> Option<ResolvedGeo> {
+    /// The key under which this resolver's results are cached, or `None`
+    /// when the TTL is zero, which turns caching off.
+    fn cache_key(&self) -> Option<CacheKey> {
+        if self.cache_ttl.is_zero() {
+            return None;
+        }
+        Some(CacheKey {
+            endpoint: self.endpoint.clone(),
+            proxy: self.proxy.clone(),
+            proxy_auth: self.proxy_auth.clone(),
+        })
+    }
+
+    /// The result cached under `key`, if it is younger than this resolver's
+    /// TTL.
+    fn cached(&self, key: &CacheKey) -> Option<ResolvedGeo> {
+        let cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = cache.get(key)?;
+        if entry.stored_at.elapsed() >= self.cache_ttl {
+            return None;
+        }
+        Some(entry.geo.clone())
+    }
+
+    /// Cache `geo` under `key`, after evicting every entry older than its
+    /// own TTL.
+    fn store(&self, key: CacheKey, geo: ResolvedGeo) {
+        let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+        cache.retain(|_, entry| entry.stored_at.elapsed() < entry.ttl);
+        cache.insert(
+            key,
+            CacheEntry {
+                geo,
+                stored_at: Instant::now(),
+                ttl: self.cache_ttl,
+            },
+        );
+    }
+
+    /// Ask the endpoint, through the proxy if one is set, for the exit IP's
+    /// country and timezone. `None` means the probe failed; each failure is
+    /// logged with its reason.
+    async fn probe(&self) -> Option<ResolvedGeo> {
         // reqwest 0.13 installs no rustls crypto provider of its own (see the workspace manifest),
         // and the omission surfaces as a runtime panic rather than a build error. Install before
         // the client exists.
@@ -163,25 +257,69 @@ impl GeoResolver for IpApiResolver {
     }
 }
 
+#[async_trait]
+impl GeoResolver for IpApiResolver {
+    /// The cached result for this endpoint, proxy, and proxy credentials if
+    /// one is younger than [`IpApiResolver::cache_ttl`], else a new probe,
+    /// which is cached if it succeeds.
+    async fn resolve(&self) -> Option<ResolvedGeo> {
+        let Some(key) = self.cache_key() else {
+            return self.probe().await;
+        };
+        if let Some(geo) = self.cached(&key) {
+            tracing::debug!(endpoint = %self.endpoint, "geo probe: reusing a cached result");
+            return Some(geo);
+        }
+        let geo = self.probe().await?;
+        self.store(key, geo.clone());
+        Some(geo)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::log_capture::{CapturedLog, sole_warning, warnings, with_captured_logs};
 
-    /// Stand a mock endpoint up answering `status` with `body`, run a
-    /// default [`IpApiResolver`] against it, and return the resolution plus
+    /// Stand a mock endpoint up answering `status` with `body`, run an
+    /// uncached [`IpApiResolver`] against it, and return the resolution plus
     /// everything logged while it ran.
     ///
     /// Every probe test needs the same four lines of wiremock scaffolding;
-    /// this is them, once.
+    /// this is them, once. The cache is off because wiremock hands its
+    /// pooled servers, ports included, from test to test, so the same
+    /// endpoint URL would return another test's cached result.
     async fn probe(status: u16, body: &str) -> (Option<ResolvedGeo>, Vec<CapturedLog>) {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .respond_with(wiremock::ResponseTemplate::new(status).set_body_string(body))
             .mount(&server)
             .await;
-        let resolver = IpApiResolver::new().endpoint(server.uri());
+        let resolver = IpApiResolver::new()
+            .endpoint(server.uri())
+            .cache_ttl(Duration::ZERO);
         with_captured_logs(async move { resolver.resolve().await }).await
+    }
+
+    /// A mock server answering every GET with `{"countryCode":"DE"}`.
+    async fn answering_de() -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_string(r#"{"countryCode":"DE"}"#),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// How many requests `server` has received.
+    async fn requests(server: &wiremock::MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .expect("wiremock records requests by default")
+            .len()
     }
 
     fn country(cc: &str) -> Country {
@@ -365,6 +503,74 @@ mod tests {
         assert!(
             !warning.contains("s3cret") && !warning.contains("bob"),
             "proxy credentials must never reach the log: {warning}",
+        );
+    }
+
+    /// A second resolver with the same endpoint and no proxy reuses the
+    /// first one's probe. A resolver with a zero TTL probes anyway, and so
+    /// does one whose TTL the cached result has outlived.
+    ///
+    /// Each cache test's endpoint is unique to it (here, by its path),
+    /// because wiremock's pooled servers repeat ports across tests.
+    #[tokio::test]
+    async fn a_fresh_result_is_reused_and_an_expired_one_is_not() {
+        let server = answering_de().await;
+        let endpoint = format!("{}/cache-reuse", server.uri());
+        let resolver = || IpApiResolver::new().endpoint(endpoint.clone());
+        let resolvers = [
+            resolver(),
+            resolver(),
+            resolver().cache_ttl(Duration::ZERO),
+            resolver().cache_ttl(Duration::from_nanos(1)),
+        ];
+        for r in resolvers {
+            assert_eq!(r.resolve().await.map(|g| g.country), Some(country("DE")));
+        }
+        assert_eq!(
+            requests(&server).await,
+            3,
+            "only the second resolver may reuse the first one's probe",
+        );
+    }
+
+    /// New proxy credentials (e.g. a new sticky-session ID in the username)
+    /// probe again, and the first credentials still have their own result.
+    #[tokio::test]
+    async fn each_set_of_proxy_credentials_gets_its_own_result() {
+        let proxy = answering_de().await;
+        let resolver = |user: &str| {
+            IpApiResolver::new()
+                .endpoint("http://geo-cache-credentials.invalid/json")
+                .with_proxy(Some(proxy.uri()), Some((user.into(), "pw".into())))
+        };
+        for user in ["session-1", "session-2", "session-1"] {
+            let geo = resolver(user).resolve().await;
+            assert_eq!(geo.map(|g| g.country), Some(country("DE")), "{user}");
+        }
+        assert_eq!(requests(&proxy).await, 2);
+    }
+
+    /// A failed probe leaves nothing in the cache, so the next resolve
+    /// probes again instead of failing again.
+    #[tokio::test]
+    async fn a_failed_probe_is_not_reused() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(502).set_body_string("Bad Gateway"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_string(r#"{"countryCode":"DE"}"#),
+            )
+            .mount(&server)
+            .await;
+        let resolver = IpApiResolver::new().endpoint(format!("{}/cache-failure", server.uri()));
+        assert_eq!(resolver.resolve().await, None);
+        assert_eq!(
+            resolver.resolve().await.map(|g| g.country),
+            Some(country("DE"))
         );
     }
 }

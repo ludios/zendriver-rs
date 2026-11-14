@@ -1244,3 +1244,8 @@ excluded = "bitflags-generated constructor of every named modifier; Rust ergonom
 [[entry]]
 api = "zendriver::input::pointer_state::MouseButtonSet::all_named"
 excluded = "bitflags-generated constructor of every named mouse button; Rust ergonomics, as the set is only read, in InputState::buttons_held"
+
+# ── IpApiResolver::cache_ttl ────────────────────────────────────────────────
+[[entry]]
+api = "zendriver::IpApiResolver::cache_ttl"
+excluded = "browser_open.geo_auto keeps the default 1-minute reuse, which spares ip-api's per-IP rate limit across the server's launches; the result is keyed by proxy, credentials, and endpoint, so an agent that changes any of them gets a new probe"
