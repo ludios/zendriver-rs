@@ -1,8 +1,10 @@
 (function (allow, seed) {
-  const rng = __zdRng(seed);
   __zdReplace(CanvasRenderingContext2D.prototype, 'measureText', (orig) => function (text) {
     const m = orig.call(this, text);
-    // Sub-pixel width noise, deterministic.
+    // Sub-pixel width noise, keyed by the native metrics: the same text in
+    // the same font measures the same in every read, context and page load.
+    const rng = __zdKeyedRng(seed, [m.width, m.actualBoundingBoxLeft,
+      m.actualBoundingBoxRight, m.actualBoundingBoxAscent, m.actualBoundingBoxDescent]);
     try { Object.defineProperty(m, 'width', { value: m.width + (rng() - 0.5) * 1e-3 }); }
     catch (e) {}
     return m;

@@ -240,11 +240,6 @@ const KNOWN_BUGS: &[(&str, &[&str], &str)] = &[
         &["spoofed fonts"],
         "P1 Stealth: fonts.check keeps only the last word of the family name (ST #6)",
     ),
-    (
-        "measure_text_is_stable",
-        SPOOFED,
-        "P1 Stealth: measureText isn't deterministic (ST #5)",
-    ),
 ];
 
 /// Run every invariant in a page of a browser launched from `builder`, and
