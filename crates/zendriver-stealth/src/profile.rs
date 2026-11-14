@@ -468,6 +468,11 @@ impl StealthProfile {
         self
     }
     /// Add a single extra Chrome launch flag (e.g. `"--proxy-server=..."`).
+    ///
+    /// [`build_flags`](Self::build_flags) returns it after the profile's own
+    /// flags, as it is. So a `--disable-features` here is a second such
+    /// switch, of which Chrome reads only the last; a launch through
+    /// zendriver's `BrowserBuilder` merges them into one.
     #[must_use]
     pub fn arg(mut self, flag: impl Into<String>) -> Self {
         self.extra_flags.push(flag.into());

@@ -180,6 +180,27 @@ async fn every_disable_features_switch_takes_effect() {
     browser.close().await;
 }
 
+/// Chrome itself takes the union of every `--disable-blink-features` switch,
+/// so the launch doesn't merge those: a caller's own leaves the profile's
+/// `AutomationControlled` in force, which hides `navigator.webdriver`. Here
+/// the caller's turns off `Notification`.
+#[tokio::test]
+#[serial]
+async fn every_disable_blink_features_switch_takes_effect() {
+    let server = FixtureServer::start().await;
+    let builder = Browser::builder().arg("--disable-blink-features=Notifications");
+    let browser = launch_for_test(builder).await;
+    // 127.0.0.1 is a secure context, which `Notification` needs.
+    load(&browser.main_tab(), &server.url("127.0.0.1", "/plain")).await;
+    let seen = eval(
+        &browser.main_tab(),
+        "[navigator.webdriver, 'Notification' in window]",
+    )
+    .await;
+    browser.close().await;
+    assert_eq!(seen, json!([false, false]), "[webdriver, has Notification]");
+}
+
 #[tokio::test]
 #[serial]
 async fn ua_string_no_longer_contains_headless_under_native() {

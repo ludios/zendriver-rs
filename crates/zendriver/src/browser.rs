@@ -1396,10 +1396,12 @@ impl BrowserBuilder {
     /// zendriver name the same setting, your value wins.
     ///
     /// Chrome also reads only the last of several `--disable-features`
-    /// switches, and of several `--enable-features`. zendriver and the
-    /// stealth profile pass a `--disable-features` of their own, so the
-    /// launch merges every occurrence of each of the two switches into one:
-    /// the features that you list are added to the others.
+    /// switches, and only the last of several `--enable-features`. zendriver
+    /// passes a `--disable-features` of its own, and so does each stealth
+    /// profile but `off`. So the launch merges every `--disable-features`
+    /// into one switch, and every `--enable-features` into another: the
+    /// features that you list are added to the others. (You can't take one
+    /// of the others off the list this way.)
     ///
     /// # Examples
     ///
@@ -2046,9 +2048,9 @@ impl BrowserBuilder {
     /// additions): [`build_flags`](Self::build_flags), then `profile_flags`
     /// (the stealth profile's own flags plus, for a headless launch, its
     /// screen switches; empty without a profile), then the
-    /// Blink settings of a mouse for a headless launch on Linux. Then every
-    /// `--disable-features` is merged into one, and every `--enable-features`
-    /// (see [`merge_feature_switches`]).
+    /// Blink settings of a mouse for a headless launch on Linux. Last, every
+    /// `--disable-features` among those is merged into one switch, and every
+    /// `--enable-features` into another (see [`merge_feature_switches`]).
     ///
     /// Headless Chrome on Linux has no input devices, so its pages would see
     /// no pointer. Elsewhere, and in a headed launch, Chrome gives pages a
@@ -4279,10 +4281,10 @@ impl BrowserBuilder {
         // The ANGLE backend flags are emitted by `build_flags` already, and
         // the stealth profile emits them too when it carries a backend.
         // Chrome would accept both, but two conflicting `--use-angle=` values
-        // in the argv are a debugging trap — `merge_launch_flags` dedups only
-        // that pair, leaving everything else (including the flags every
-        // stealth profile shares with `build_flags`, like `--no-first-run`)
-        // appended unconditionally, matching today's behavior.
+        // in the argv are a debugging trap, so `launch_flags` drops the
+        // repeats of that pair. It also merges the feature switches. Every
+        // other flag of the profile is appended as it is, also one that
+        // `build_flags` passes too, like `--no-first-run`.
         let mut flags = self.launch_flags(&user_data_path, extra_flags);
         // CI-friendly defaults: when running under CI (the runner sets
         // `CI=true`), Chrome's user-namespace sandbox refuses to start

@@ -58,7 +58,13 @@ in the page:
 - **Launch flags** — `--disable-blink-features=AutomationControlled`,
   `--disable-features=IsolateOrigins,site-per-process` (toggleable),
   and a curated list of flags that turn off the "this browser is
-  controlled by automation" infobar plus various leaks.
+  controlled by automation" infobar plus various leaks. Chrome reads
+  only the last of several `--disable-features` switches (and of
+  several `--enable-features`), so if you pass your own with
+  `BrowserBuilder::arg` or `StealthProfile::arg`, the launch merges it
+  with zendriver's into one switch: your features are added to the
+  list. (Chrome takes every `--disable-blink-features` switch as it
+  is.)
 - **A mouse for headless pages on Linux** — headless Chrome on Linux
   has no input devices, so its pages match `(pointer: none)`,
   `(hover: none)`, `(any-pointer: none)` and `(any-hover: none)`: rare
