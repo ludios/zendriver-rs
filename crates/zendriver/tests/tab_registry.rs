@@ -9,7 +9,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use zendriver::{Browser, ObserverError, PausedSession, TargetObserver, ZendriverError};
-use zendriver_testkit::{FixtureServer, SITE_A, eval, launch_for_test, load};
+use zendriver_testkit::axum::Router;
+use zendriver_testkit::axum::response::Html;
+use zendriver_testkit::axum::routing::get;
+use zendriver_testkit::{FixtureServer, SITE_A, assert_eventually, eval, launch_for_test, load};
 
 /// The registry holds one tab per target, and the main tab's is the main
 /// tab itself: when `launch` attached the main target a second time, under
@@ -132,4 +135,40 @@ async fn launch_fails_at_once_when_an_observer_fails_on_the_main_target() {
         elapsed < Duration::from_secs(10),
         "failed only after {elapsed:?}"
     );
+}
+
+/// A `target="_blank"` link opens its tab without an opener (Chrome's
+/// default for such links). Chrome answers no command on the session of such
+/// a tab until the tab is released with `Runtime.runIfWaitingForDebugger`,
+/// so an observer that awaits an answer before the release (the stealth
+/// observer does, of its `Page.enable`) times out; the target is then
+/// detached, never loads, and never becomes a tab. A tab that `window.open`
+/// opens answers at once, and isn't affected.
+#[tokio::test]
+#[ignore = "known bug, TODO P0 'A target=\"_blank\" link opens a dead tab': the stealth \
+            observer awaits an answer that Chrome gives only after the tab is released"]
+async fn known_bug_a_target_blank_link_opens_a_tab() {
+    let opener = Html("<!doctype html><a id='link' href='/plain' target='_blank'>Plain</a>");
+    let routes = Router::new().route("/opener", get(move || async move { opener }));
+    let server = FixtureServer::start_with(routes).await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let main = browser.main_tab();
+    load(&main, &server.url(SITE_A, "/opener")).await;
+    let link = main.find().css("#link").one().await.unwrap();
+    link.click().await.unwrap();
+
+    let opened = || async {
+        let tabs = browser.tabs().await;
+        let Some(tab) = tabs.iter().find(|tab| tab.target_id() != main.target_id()) else {
+            return false;
+        };
+        tab.evaluate_main::<String>("location.pathname").await.ok() == Some("/plain".to_string())
+    };
+    assert_eventually(
+        Duration::from_secs(10),
+        "the link's tab loaded /plain",
+        opened,
+    )
+    .await;
+    browser.close().await;
 }
