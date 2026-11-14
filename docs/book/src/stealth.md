@@ -192,7 +192,7 @@ host's tier. That override needs Chrome 153 or newer; on Chrome 152 the
 page reports the host's tier. (For the host's own count, Chrome's tier is
 left alone: Chrome also weighs the host's CPU model, which a persona
 doesn't name.) A dedicated worker still reports the host's count and
-memory: no override or patch reaches it.
+memory: neither that override nor the bootstrap reaches it.
 
 Everything else comes from Chrome itself, as under `native()`: the
 launch flags hide `navigator.webdriver` and stop WebRTC from gathering

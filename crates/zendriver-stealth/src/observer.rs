@@ -228,9 +228,9 @@ fn headless_screen_switches(screen: &ScreenSpec) -> Result<Vec<String>, StealthE
 /// another renderer process than its page's, where the overrides and the
 /// script of the page's session don't apply. (An iframe in its page's process
 /// isn't a target; the page's setup covers it.) Workers and worklets get no
-/// setup of their own. But a timezone override applies to its whole renderer
-/// process, so a worker reads the timezone that a page or iframe in its
-/// process was given, else the timezone that Chrome started in (see
+/// setup of their own. But a renderer process holds one timezone override
+/// and one locale override (the locale that `Intl` uses), and every worker
+/// and worklet in the process reads them, as the process's targets do (see
 /// [`timezone`](Self::timezone)).
 #[derive(Debug)]
 pub struct StealthObserver {
@@ -421,10 +421,13 @@ impl StealthObserver {
     /// sets). `None` when neither sets one, and for `Off`, which sends no
     /// overrides.
     ///
-    /// A renderer process drops that override when the session that set it
-    /// ends, even while other targets of the process live on. A caller that
-    /// starts Chrome can start it in this timezone as well, which is then
-    /// what such a target falls back to.
+    /// A renderer process holds one such override, which every target,
+    /// worker and worklet in the process reads. The override belongs to the
+    /// session that set it first: the process drops it when that session
+    /// ends, or when that session's target leaves the process, even while
+    /// other targets of the process live on. Without the override, a
+    /// process has Chrome's own timezone, so a caller that starts Chrome can
+    /// start it in this timezone as well.
     #[must_use]
     pub fn timezone(&self) -> Option<&str> {
         if self.profile.kind() == ProfileKind::Off {
