@@ -257,9 +257,10 @@ to the OS.
 
 ## What's the MSRV?
 
-Rust 1.88 (edition 2024 with let chains, which some of our dependencies
-use too). We don't aim to track stable
-bleeding-edge; MSRV bumps follow the same SemVer policy as API changes
+Rust 1.88: our code uses let chains, which Rust 1.88 stabilized for
+edition 2024, and some of our dependencies also require 1.88. We don't
+aim to track stable bleeding-edge; MSRV bumps follow the same SemVer
+policy as API changes
 (see [`SEMVER.md`](https://github.com/TurtIeSocks/zendriver-rs/blob/main/SEMVER.md)).
 
 ## I'm getting `ZendriverError::Cdp` with code -32000. What now?

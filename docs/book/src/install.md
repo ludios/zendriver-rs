@@ -81,7 +81,7 @@ need a type the prelude doesn't surface.
 
 ## MSRV
 
-zendriver targets **Rust 1.75 minimum**. The MSRV bumps follow SemVer —
+zendriver targets **Rust 1.88 minimum**. The MSRV bumps follow SemVer —
 a Rust version bump counts as a minor change in the 0.x series and a
 major change post-1.0. See [SEMVER.md] in the repository for the full
 policy.

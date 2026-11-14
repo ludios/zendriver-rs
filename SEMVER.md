@@ -33,6 +33,7 @@ instead.
 
 ## MSRV
 
-We support Rust 1.88 minimum (edition 2024 with let chains, which some
-of our dependencies use too). MSRV bumps
-follow the same SemVer rules as API changes — minor bump for MSRV bump.
+We support Rust 1.88 minimum: our code uses let chains, which Rust 1.88
+stabilized for edition 2024, and some of our dependencies also require
+1.88. MSRV bumps follow the same SemVer rules as API changes — minor
+bump for MSRV bump.
