@@ -1703,11 +1703,12 @@ impl BrowserBuilder {
     /// Auto-derive locale/languages/timezone from the exit IP via a proxied
     /// probe to `ip-api.com`. Opt-in; [`launch`](Self::launch) and
     /// [`connect`](Self::connect) make at most ONE outbound request, and only
-    /// when this is set. They make none when another launch in this
-    /// process, with the same proxy and proxy credentials (or with no proxy),
-    /// is probing now or probed successfully less than a minute ago: its
-    /// result is used instead. See [`crate::IpApiResolver::cache_ttl`] to
-    /// change that minute.
+    /// when this is set. They make none when an earlier `launch` or `connect`
+    /// in this process, with the same proxy and proxy credentials (or with
+    /// no proxy), succeeded in its probe less than a minute ago or is still
+    /// probing; they then use that probe's result, which can be a failure
+    /// if the probe was still running. See
+    /// [`crate::IpApiResolver::cache_ttl`] to change that minute.
     ///
     /// The result has two parts, each filled only if nothing else sets it:
     ///
@@ -1786,10 +1787,11 @@ impl BrowserBuilder {
         // fill) behind whatever exit IP the proxy actually has, which is
         // exactly the incoherence `geo_auto` exists to prevent. This
         // records the consequence, since nothing downstream can. The
-        // *reason* is one line up in the log only when the resolver is the
+        // *reason* is earlier in the log only when the resolver is the
         // bundled [`crate::geo_resolver::IpApiResolver`], which logs every
-        // one of its own exits; a resolver supplied through
-        // [`Self::geo_resolver`] need not.
+        // failure of its probes, once per probe even when several launches
+        // share the probe; a resolver supplied through
+        // [`Self::geo_resolver`] need not log anything.
         //
         // Prefixed on the function, not on `geo_auto`: this runs for any
         // installed resolver, and naming a builder method the caller never
