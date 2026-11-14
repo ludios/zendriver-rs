@@ -1,19 +1,14 @@
-# zendriver-rs
+(LLM-authored slop README)
+
+# ludios/zendriver-rs
 
 ## About this fork
 
 This is [ludios/zendriver-rs](https://github.com/ludios/zendriver-rs), an LLM-authored fork of [TurtIeSocks/zendriver-rs](https://github.com/TurtIeSocks/zendriver-rs). It began with an AI review of upstream's code and with runs against real sites, and it fixes the bugs that those found, most of them with a test that runs against real Chrome.
 
-The fork branched from upstream in September 2026 and has none of upstream's later changes. The main one that it lacks: upstream now attaches out-of-process iframes and gives them the stealth setup.
+The API here differs from upstream's in places (interception most of all).
 
-The fork isn't published. The crates on crates.io, the docs.rs pages and the book that the rest of this README links to are all upstream's, and the fork's API differs from upstream's in places (interception most of all). To use the fork:
-
-```bash
-cargo add zendriver --git https://github.com/ludios/zendriver-rs
-cargo install zendriver-mcp --git https://github.com/ludios/zendriver-rs
-```
-
-What the fork does better than upstream:
+Changed:
 
 - **Navigation waits wait for the right page.** Upstream's `wait_for_load` ends when any frame stops loading, so an iframe ends it, and so does a navigation that finished earlier. Here it follows the main frame's own navigation, also after `back` / `forward` / `reload` and in a new tab. New: `Tab::expect_navigation` and `Tab::wait_for_url`.
 - **No skipped CDP events.** Upstream's subscribers each filter one lossy broadcast of the whole connection, in which a slow subscriber loses events. Here a subscriber gets its session's events in the order Chrome sent them, and a stream that can't continue ends with its reason (overflow, detach, shutdown) instead of skipping events. The load waits, `wait_for_idle`, `expect_*`, the network monitor and interception all read these streams.
@@ -34,7 +29,7 @@ What the fork does better than upstream:
 - **`BrowserBuilder::env` / `env_remove`** set and remove environment variables for the launched Chrome.
 - **Tests against real Chrome.** `zendriver-testkit` gives every such test a local fixture server (two sites, an authenticating proxy) and checks on close that Chrome's whole process tree exited. A contract test sends every CDP command that the library uses to a real Chrome, to prove that the command exists at the scope where the library sends it. A stealth probe compares the identity that the page, an iframe, a worker and the HTTP headers each report.
 
-The rest of this README is upstream's, updated where the fork changed what it describes.
+The rest of this README is upstream's, updated in some places.
 
 ---
 
