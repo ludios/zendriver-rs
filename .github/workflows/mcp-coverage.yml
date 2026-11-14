@@ -14,7 +14,7 @@ name: MCP Coverage Check
 # To bump the pinned nightly:
 #   1. Change `nightly-YYYY-MM-DD` in both places below.
 #   2. Regenerate the baseline with the SAME toolchain:
-#        cargo +nightly-YYYY-MM-DD public-api -p zendriver --all-features \
+#        cargo +nightly-YYYY-MM-DD public-api -p zendriver --all-features --omit blanket-impls \
 #            > crates/zendriver-mcp/public-api-baseline.txt
 #   3. Commit the new baseline + updated workflow together.
 

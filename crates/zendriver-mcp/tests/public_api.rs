@@ -1,6 +1,7 @@
 //! Enforces that every NEW public `zendriver` API item (present in the current
-//! output of `cargo public-api -p zendriver --all-features` but absent from the
-//! checked-in baseline) has an entry in `mcp-coverage-ledger.toml`.
+//! output of `cargo public-api -p zendriver --all-features --omit blanket-impls`
+//! but absent from the checked-in baseline) has an entry in
+//! `mcp-coverage-ledger.toml`.
 //!
 //! This test ONLY runs in the dedicated nightly CI job
 //! (`cargo test -p zendriver-mcp --features public-api-check --test public_api`).
@@ -21,8 +22,12 @@
 //! When you ADD a new public API item that has a ledger entry, regenerate
 //! the baseline with:
 //!
-//!   cargo +nightly public-api -p zendriver --all-features \
+//!   cargo +nightly public-api -p zendriver --all-features --omit blanket-impls \
 //!       > crates/zendriver-mcp/public-api-baseline.txt
+//!
+//! `--omit blanket-impls` leaves out impls such as `impl<T> Into<U> for T`,
+//! which every type gets from std or a dependency: they would make the
+//! baseline change whenever a dependency comes or goes.
 //!
 //! Then commit both the updated baseline and the new ledger entry together.
 
@@ -55,8 +60,9 @@ fn ledger_path(root: &Path) -> PathBuf {
     root.join("crates/zendriver-mcp/mcp-coverage-ledger.toml")
 }
 
-/// Run `cargo +<toolchain> public-api -p zendriver --all-features` and return
-/// its stdout line-by-line (excluding diagnostics lines on stderr).
+/// Run `cargo +<toolchain> public-api -p zendriver --all-features --omit
+/// blanket-impls` and return its stdout line-by-line (excluding diagnostics
+/// lines on stderr).
 ///
 /// The toolchain is read from `PUBLIC_API_TOOLCHAIN` (default `nightly`). CI
 /// PINS this to a specific dated nightly so rustdoc-JSON drift can't
@@ -71,6 +77,8 @@ fn current_public_api(root: &Path) -> Vec<String> {
             "-p",
             "zendriver",
             "--all-features",
+            "--omit",
+            "blanket-impls",
         ])
         .current_dir(root)
         .output()

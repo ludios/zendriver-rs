@@ -77,7 +77,7 @@ cargo +nightly test -p zendriver-mcp --features public-api-check --test public_a
 If you intentionally changed the public API, regenerate the baseline:
 
 ```bash
-cargo +nightly public-api -p zendriver --all-features > crates/zendriver-mcp/public-api-baseline.txt
+cargo +nightly public-api -p zendriver --all-features --omit blanket-impls > crates/zendriver-mcp/public-api-baseline.txt
 ```
 
 ## Documentation sync (REQUIRED before finishing a PR)
