@@ -25,9 +25,10 @@
 //!   cargo +nightly public-api -p zendriver --all-features --omit blanket-impls \
 //!       > crates/zendriver-mcp/public-api-baseline.txt
 //!
-//! `--omit blanket-impls` leaves out impls such as `impl<T> Into<U> for T`,
-//! which every type gets from std or a dependency: they would make the
-//! baseline change whenever a dependency comes or goes.
+//! `--omit blanket-impls` leaves out generic impls such as
+//! `impl<T, U> Into<U> for T where U: From<T>`, which reach zendriver's types
+//! from std or a dependency: they would make the baseline change whenever a
+//! dependency comes or goes.
 //!
 //! Then commit both the updated baseline and the new ledger entry together.
 
@@ -86,7 +87,7 @@ fn current_public_api(root: &Path) -> Vec<String> {
 
     assert!(
         output.status.success(),
-        "cargo +nightly public-api failed:\n{}",
+        "cargo +{toolchain} public-api failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 

@@ -6,13 +6,13 @@ name: MCP Coverage Check
 #
 # Required tool: cargo-public-api v0.52.0 (needs nightly rustdoc JSON).
 # BOTH the cargo-public-api version AND the nightly toolchain are pinned:
-# rustdoc-JSON format drifts between nightlies, and an unpinned `@nightly`
-# surfaced spurious "new" items (tower_http blanket-impl combinators) on every
-# release — failing this check daily. The pinned nightly + a baseline cut with
-# that same nightly makes the diff deterministic.
+# rustdoc-JSON output drifts between nightlies (a newer nightly renders
+# hundreds of the same items differently), so an unpinned `@nightly` would
+# report spurious "new" items. The pinned nightly + a baseline cut with that
+# same nightly makes the diff deterministic.
 #
 # To bump the pinned nightly:
-#   1. Change `nightly-YYYY-MM-DD` in both places below.
+#   1. Change `nightly-YYYY-MM-DD` in all three places below.
 #   2. Regenerate the baseline with the SAME toolchain:
 #        cargo +nightly-YYYY-MM-DD public-api -p zendriver --all-features --omit blanket-impls \
 #            > crates/zendriver-mcp/public-api-baseline.txt
