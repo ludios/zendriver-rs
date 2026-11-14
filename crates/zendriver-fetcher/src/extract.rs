@@ -20,11 +20,11 @@
 //! write outside `dest_dir`. The extractor defends against those classes
 //! of attack:
 //!
-//! 1. An entry whose RAW name is absolute or has a `..` component is
-//!    refused ([`is_absolute_or_climbs`]). The raw name is what must be
-//!    checked: `zip::read::ZipFile::enclosed_name()` accepts both kinds,
-//!    dropping a leading root and resolving `..` lexically, so `/a/b` would
-//!    come out as `a/b`, and `a/../b` as `b`.
+//! 1. An entry whose name (decoded, but not normalized) is absolute or has
+//!    a `..` component is refused ([`is_absolute_or_climbs`]). The check must
+//!    come before normalization: `zip::read::ZipFile::enclosed_name()`
+//!    accepts both kinds, dropping a leading root and resolving `..`
+//!    lexically, so `/a/b` would come out as `a/b`, and `a/../b` as `b`.
 //! 2. After joining with `dest_dir`, the resolved path is verified to still
 //!    sit under `dest_dir` — defense in depth against any future change
 //!    to `enclosed_name`'s semantics. The probe that finds an existing
@@ -111,9 +111,10 @@ pub(crate) async fn extract(
     .map_err(|e| FetcherError::Extraction(format!("join error: {e}")))?
 }
 
-/// Whether the raw zip entry `name` is absolute (a leading `/` or `\`, or a
-/// drive letter such as `C:`) or has a `..` component. Both separators count,
-/// as they do for `zip`'s `enclosed_name` on every platform.
+/// Whether the zip entry `name` (decoded, not normalized) is absolute (a
+/// leading `/` or `\`, or a drive letter such as `C:`) or has a `..`
+/// component. Both separators count, as they do for `zip`'s `enclosed_name`
+/// on every platform.
 fn is_absolute_or_climbs(name: &str) -> bool {
     let has_drive = matches!(name.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic());
     name.starts_with(['/', '\\'])
@@ -143,8 +144,7 @@ fn extract_blocking(
             .map_err(|e| FetcherError::Extraction(e.to_string()))?;
         let name = entry
             .name()
-            .map_err(|e| FetcherError::Extraction(e.to_string()))?
-            .into_owned();
+            .map_err(|e| FetcherError::Extraction(e.to_string()))?;
 
         // Refuse an absolute name, or one with a `..` component. Both pass
         // `enclosed_name`, which re-roots the first and resolves the second
@@ -160,7 +160,7 @@ fn extract_blocking(
         // such as `CON`.
         let Some(rel_path) = entry.enclosed_name() else {
             return Err(FetcherError::Extraction(format!(
-                "zip entry has unsafe path: {name}"
+                "zip entry has unsafe path: {name:?}"
             )));
         };
 

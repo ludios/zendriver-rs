@@ -459,13 +459,48 @@ pub fn build_catalogue(network_json: &str, pci_ids: &str) -> BuildReport {
 /// If the archive cannot be read or holds no `.json` member.
 pub fn unzip_network_json(zipped: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zipped))?;
-    let name = (0..archive.len())
-        .filter_map(|i| Some(archive.by_index(i).ok()?.name().ok()?.into_owned()))
+    let name = archive
+        .file_names()
+        .filter_map(Result::ok)
         .find(|n| n.ends_with(".json"))
-        .ok_or("corpus archive holds no .json member")?;
+        .ok_or("corpus archive holds no .json member")?
+        .into_owned();
     let mut out = String::new();
     std::io::Read::read_to_string(&mut archive.by_name(&name)?, &mut out)?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod unzip_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    /// A zip holding `members`, each `(name, contents)`.
+    fn zip_of(members: &[(&str, &str)]) -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(&mut buf);
+        for (name, contents) in members {
+            writer
+                .start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(contents.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn returns_the_json_member() {
+        let zipped = zip_of(&[("README.md", "not this"), ("network.json", "{}")]);
+        assert_eq!(unzip_network_json(&zipped).unwrap(), "{}");
+    }
+
+    #[test]
+    fn refuses_an_archive_without_json() {
+        let zipped = zip_of(&[("README.md", "not this")]);
+        let err = unzip_network_json(&zipped).unwrap_err().to_string();
+        assert!(err.contains("no .json member"), "{err}");
+    }
 }
 
 /// Render the committed catalogue module.
