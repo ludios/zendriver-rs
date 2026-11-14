@@ -94,7 +94,7 @@ fn scan_blocking() -> System {
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
-        ProcessRefreshKind::new()
+        ProcessRefreshKind::nothing()
             .with_cmd(UpdateKind::Always)
             .with_exe(UpdateKind::Always),
     );

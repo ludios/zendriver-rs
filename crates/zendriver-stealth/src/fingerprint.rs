@@ -547,9 +547,8 @@ pub(crate) fn clamp_cpu_count(n: u32) -> u32 {
 pub(crate) fn detect_memory_gb() -> Result<u32, StealthError> {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
-    // sysinfo 0.32: total_memory() returns BYTES, not KiB. Verified against
-    // sysinfo-0.32.1/src/common/system.rs::total_memory doc comment
-    // ("Returns the RAM size in bytes.").
+    // total_memory() returns BYTES, not KiB: in sysinfo 0.36, its doc comment
+    // says "Returns the RAM size in bytes."
     let total_bytes = sys.total_memory();
     if total_bytes == 0 {
         return Err(StealthError::SystemInfo("total_memory returned 0".into()));
