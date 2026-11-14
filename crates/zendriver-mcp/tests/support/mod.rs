@@ -71,12 +71,11 @@ async fn drain(
     {
         let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
         bytes.clear();
-        if line.contains(LISTENING_LINE) {
-            if let Some(addr) = loopback_address(&line) {
-                if let Some(tx) = listening.take() {
-                    let _ = tx.send(addr);
-                }
-            }
+        if line.contains(LISTENING_LINE)
+            && let Some(addr) = loopback_address(&line)
+            && let Some(tx) = listening.take()
+        {
+            let _ = tx.send(addr);
         }
         lines.lock().expect("stderr lines").push(line);
     }

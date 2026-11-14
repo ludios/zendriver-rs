@@ -25,13 +25,13 @@ pub(super) async fn fetch_or_cached_bytes(
     cache: &Path,
     policy: CachePolicy,
 ) -> Result<Vec<u8>, GenError> {
-    if !policy.force_refresh && !crate::cache::path_is_stale(cache, policy.ttl) {
-        if let Ok(bytes) = fs::read(cache) {
-            if !bytes.is_empty() {
-                tracing::debug!(path = %cache.display(), "fp network cache hit");
-                return Ok(bytes);
-            }
-        }
+    if !policy.force_refresh
+        && !crate::cache::path_is_stale(cache, policy.ttl)
+        && let Ok(bytes) = fs::read(cache)
+        && !bytes.is_empty()
+    {
+        tracing::debug!(path = %cache.display(), "fp network cache hit");
+        return Ok(bytes);
     }
     tracing::debug!(url, "fp network cache miss — downloading");
     crate::tls::install_default_crypto_provider();

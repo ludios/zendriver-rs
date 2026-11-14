@@ -186,7 +186,7 @@ fn headless_screen_switches(screen: &ScreenSpec) -> Result<Vec<String>, StealthE
     // which `chrome_axis` may make 1 less for `--screen-info`.
     let physical = |name: &str, css: u32| -> Result<u32, StealthError> {
         let quarter_pixels = u64::from(css) * quarters;
-        if css == 0 || quarter_pixels % 4 != 0 || quarter_pixels / 4 > MAX_PHYSICAL {
+        if css == 0 || !quarter_pixels.is_multiple_of(4) || quarter_pixels / 4 > MAX_PHYSICAL {
             return Err(StealthError::InvalidOverride(format!(
                 "the screen's {name} of {css}, times its device_pixel_ratio of {ratio}, must be \
                  a whole number of physical pixels from 1 to {MAX_PHYSICAL}"

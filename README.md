@@ -46,7 +46,7 @@ Async-first browser automation via the Chrome DevTools Protocol, with a coherent
 [![docs.rs](https://docs.rs/zendriver/badge.svg)](https://docs.rs/zendriver)
 [![Book](https://img.shields.io/badge/book-mdBook-blue)](https://turtiesocks.github.io/zendriver-rs/)
 [![MCP](https://img.shields.io/badge/MCP-server-blue)](https://turtiesocks.github.io/zendriver-rs/mcp.html)
-[![MSRV 1.85](https://img.shields.io/badge/rustc-1.85+-lightgray.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0/)
+[![MSRV 1.88](https://img.shields.io/badge/rustc-1.88+-lightgray.svg)](https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![CI](https://github.com/TurtIeSocks/zendriver-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/TurtIeSocks/zendriver-rs/actions/workflows/ci.yml)
 

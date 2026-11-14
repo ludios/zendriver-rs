@@ -257,7 +257,8 @@ to the OS.
 
 ## What's the MSRV?
 
-Rust 1.85 (required for edition 2024). We don't aim to track stable
+Rust 1.88 (edition 2024 with let chains, which some of our dependencies
+use too). We don't aim to track stable
 bleeding-edge; MSRV bumps follow the same SemVer policy as API changes
 (see [`SEMVER.md`](https://github.com/TurtIeSocks/zendriver-rs/blob/main/SEMVER.md)).
 

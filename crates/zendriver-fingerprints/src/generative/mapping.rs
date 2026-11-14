@@ -49,34 +49,34 @@ pub(super) fn persona_from_assignment(a: &HashMap<String, String>) -> Persona {
     if let Some(v) = a.get("hardwareConcurrency") {
         p.hardware_concurrency = destringify_scalar(v).parse().ok();
     }
-    if let Some(v) = a.get("videoCard") {
-        if let Some(obj) = destringify_json(v) {
-            let vendor = obj.get("vendor").and_then(Value::as_str).map(String::from);
-            let renderer = obj
-                .get("renderer")
-                .and_then(Value::as_str)
-                .map(String::from);
-            if vendor.is_some() || renderer.is_some() {
-                p.webgl = Some(WebglSpec {
-                    unmasked_vendor: vendor,
-                    unmasked_renderer: renderer,
-                    ..Default::default()
-                });
-            }
+    if let Some(v) = a.get("videoCard")
+        && let Some(obj) = destringify_json(v)
+    {
+        let vendor = obj.get("vendor").and_then(Value::as_str).map(String::from);
+        let renderer = obj
+            .get("renderer")
+            .and_then(Value::as_str)
+            .map(String::from);
+        if vendor.is_some() || renderer.is_some() {
+            p.webgl = Some(WebglSpec {
+                unmasked_vendor: vendor,
+                unmasked_renderer: renderer,
+                ..Default::default()
+            });
         }
     }
-    if let Some(v) = a.get("fonts") {
-        if let Some(Value::Array(arr)) = destringify_json(v) {
-            let list: Vec<String> = arr
-                .iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect();
-            if !list.is_empty() {
-                p.fonts = Some(FontSpec {
-                    available: Some(list),
-                    ..Default::default()
-                });
-            }
+    if let Some(v) = a.get("fonts")
+        && let Some(Value::Array(arr)) = destringify_json(v)
+    {
+        let list: Vec<String> = arr
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect();
+        if !list.is_empty() {
+            p.fonts = Some(FontSpec {
+                available: Some(list),
+                ..Default::default()
+            });
         }
     }
     p

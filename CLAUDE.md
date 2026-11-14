@@ -106,7 +106,7 @@ check above.
 
 ## Workspace layout
 
-9-crate workspace (`edition = 2024`, MSRV 1.85). Roles:
+9-crate workspace (`edition = 2024`, MSRV 1.88). Roles:
 
 | Crate | Role |
 |-------|------|

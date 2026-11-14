@@ -964,10 +964,11 @@ impl Mux {
             }
             Command::Answered(hold) => {
                 let released = self.held.remove(&hold).is_some();
-                if released && self.is_idle() {
-                    if let Err(e) = self.apply().await {
-                        debug!(error = %e, "interception: Fetch.disable after the last held pause failed");
-                    }
+                if released
+                    && self.is_idle()
+                    && let Err(e) = self.apply().await
+                {
+                    debug!(error = %e, "interception: Fetch.disable after the last held pause failed");
                 }
             }
         }
@@ -1179,10 +1180,10 @@ impl Mux {
     /// could change or answer the interception: turn `Fetch` off if it is
     /// on (the credentials outlive every handle).
     async fn close(&mut self) {
-        if self.events.is_some() {
-            if let Err(e) = self.session.call("Fetch.disable", json!({})).await {
-                debug!(error = %e, "interception: Fetch.disable at the end failed");
-            }
+        if self.events.is_some()
+            && let Err(e) = self.session.call("Fetch.disable", json!({})).await
+        {
+            debug!(error = %e, "interception: Fetch.disable at the end failed");
         }
     }
 

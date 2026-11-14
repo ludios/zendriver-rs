@@ -120,13 +120,13 @@ async fn download_blocklist(
 
     // Cheap rejection when the server declares its size, before a byte of body
     // is read.
-    if let Some(len) = resp.content_length() {
-        if len > max_bytes as u64 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("blocklist at {url} advertises {len} bytes, over the {max_bytes} cap"),
-            ));
-        }
+    if let Some(len) = resp.content_length()
+        && len > max_bytes as u64
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("blocklist at {url} advertises {len} bytes, over the {max_bytes} cap"),
+        ));
     }
 
     let mut body: Vec<u8> = Vec::new();

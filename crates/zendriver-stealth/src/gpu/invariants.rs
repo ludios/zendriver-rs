@@ -65,24 +65,23 @@ fn pair_min(p: &GpuProfile, k: &str) -> Option<i64> {
 ///   this check guarding the one place the pair can still be set
 ///   incoherently: a caller-supplied [`GpuProfile`] overlay.
 pub(crate) fn check_coherence(p: &GpuProfile) -> Result<(), String> {
-    if let (Some(tex), Some(vp)) = (int(p, "MAX_TEXTURE_SIZE"), pair_min(p, "MAX_VIEWPORT_DIMS")) {
-        if vp < tex {
-            return Err(format!(
-                "MAX_VIEWPORT_DIMS ({vp}) is below MAX_TEXTURE_SIZE ({tex}); no real GPU reports this"
-            ));
-        }
+    if let (Some(tex), Some(vp)) = (int(p, "MAX_TEXTURE_SIZE"), pair_min(p, "MAX_VIEWPORT_DIMS"))
+        && vp < tex
+    {
+        return Err(format!(
+            "MAX_VIEWPORT_DIMS ({vp}) is below MAX_TEXTURE_SIZE ({tex}); no real GPU reports this"
+        ));
     }
     if let (Some(combined), Some(frag), Some(vert)) = (
         int(p, "MAX_COMBINED_TEXTURE_IMAGE_UNITS"),
         int(p, "MAX_TEXTURE_IMAGE_UNITS"),
         int(p, "MAX_VERTEX_TEXTURE_IMAGE_UNITS"),
-    ) {
-        if combined < frag + vert {
-            return Err(format!(
-                "MAX_COMBINED_TEXTURE_IMAGE_UNITS ({combined}) is below \
+    ) && combined < frag + vert
+    {
+        return Err(format!(
+            "MAX_COMBINED_TEXTURE_IMAGE_UNITS ({combined}) is below \
                  MAX_TEXTURE_IMAGE_UNITS ({frag}) + MAX_VERTEX_TEXTURE_IMAGE_UNITS ({vert})"
-            ));
-        }
+        ));
     }
     if let Some(max_draw) = int(p, "MAX_DRAW_BUFFERS") {
         for i in 0..32 {

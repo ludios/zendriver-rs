@@ -707,13 +707,12 @@ async fn run_monitor(
                         track_order(&mut order, &urls, p.request_id.clone());
                         if urls.len() > MAX_TRACKED {
                             let evicted = evict_oldest(&mut urls, &mut partial, &mut order);
-                            if let Some(url) = evicted {
-                                if emit_boundary(&tx, NetworkDeliveryBoundary::CorrelationEvicted { url })
+                            if let Some(url) = evicted
+                                && emit_boundary(&tx, NetworkDeliveryBoundary::CorrelationEvicted { url })
                                     .await
                                 {
                                     return;
                                 }
-                            }
                         }
                         // Enable streaming as early as possible — right
                         // when the request is first observed, before
@@ -826,8 +825,8 @@ async fn run_monitor(
                             }
                             continue;
                         };
-                        if let Some((req, resp)) = partial.remove(&p.request_id) {
-                            if filter_allows(filter.as_ref(), Some(&req.url)) {
+                        if let Some((req, resp)) = partial.remove(&p.request_id)
+                            && filter_allows(filter.as_ref(), Some(&req.url)) {
                                 let exchange = NetworkExchange {
                                     request: req,
                                     response: resp,
@@ -839,7 +838,6 @@ async fn run_monitor(
                                     return;
                                 }
                             }
-                        }
                         urls.remove(&p.request_id);
                         streaming.remove(&p.request_id);
                     }
@@ -850,8 +848,8 @@ async fn run_monitor(
                             }
                             continue;
                         };
-                        if let Some((req, resp)) = partial.remove(&p.request_id) {
-                            if filter_allows(filter.as_ref(), Some(&req.url)) {
+                        if let Some((req, resp)) = partial.remove(&p.request_id)
+                            && filter_allows(filter.as_ref(), Some(&req.url)) {
                                 let exchange = NetworkExchange {
                                     request: req,
                                     response: resp,
@@ -863,7 +861,6 @@ async fn run_monitor(
                                     return;
                                 }
                             }
-                        }
                         urls.remove(&p.request_id);
                         streaming.remove(&p.request_id);
                     }
@@ -878,13 +875,12 @@ async fn run_monitor(
                         track_order(&mut order, &urls, p.request_id.clone());
                         if urls.len() > MAX_TRACKED {
                             let evicted = evict_oldest(&mut urls, &mut partial, &mut order);
-                            if let Some(url) = evicted {
-                                if emit_boundary(&tx, NetworkDeliveryBoundary::CorrelationEvicted { url })
+                            if let Some(url) = evicted
+                                && emit_boundary(&tx, NetworkDeliveryBoundary::CorrelationEvicted { url })
                                     .await
                                 {
                                     return;
                                 }
-                            }
                         }
                         if filter_allows(filter.as_ref(), Some(&p.url))
                             && tx
@@ -1076,10 +1072,10 @@ fn spawn_stream_resource_content(
                 if buffered.is_empty() {
                     return;
                 }
-                if let Ok(chunk) = BASE64.decode(buffered) {
-                    if !chunk.is_empty() {
-                        let _ = tx.send(NetworkEvent::HttpData { request_id, chunk }).await;
-                    }
+                if let Ok(chunk) = BASE64.decode(buffered)
+                    && !chunk.is_empty()
+                {
+                    let _ = tx.send(NetworkEvent::HttpData { request_id, chunk }).await;
                 }
             }
             Err(e) => {

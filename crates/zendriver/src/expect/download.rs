@@ -185,11 +185,11 @@ impl Records {
     /// last [`FINISHED_KEPT`].
     fn finish(&mut self, guid: &str) {
         self.finished.push_back(guid.to_owned());
-        if self.finished.len() > FINISHED_KEPT {
-            if let Some(oldest) = self.finished.pop_front() {
-                self.by_guid.remove(&oldest);
-                self.losses += 1;
-            }
+        if self.finished.len() > FINISHED_KEPT
+            && let Some(oldest) = self.finished.pop_front()
+        {
+            self.by_guid.remove(&oldest);
+            self.losses += 1;
         }
     }
 
@@ -260,10 +260,10 @@ impl Downloads {
     /// every event that Chrome sends after this returns.
     fn records(&self, conn: &Connection) -> Arc<Mutex<Records>> {
         let mut follower = lock(&self.follower);
-        if let Some(follower) = follower.as_ref() {
-            if !lock(&follower.records).ended {
-                return follower.records.clone();
-            }
+        if let Some(follower) = follower.as_ref()
+            && !lock(&follower.records).ended
+        {
+            return follower.records.clone();
         }
         let records = Arc::new(Mutex::new(Records::default()));
         let stop = CancellationToken::new();

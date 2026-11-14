@@ -354,10 +354,10 @@ pub(crate) fn parse_devtools_active_port(contents: &str) -> Option<String> {
 pub(crate) async fn poll_devtools_active_port(user_data_dir: &Path) -> String {
     let path = user_data_dir.join(DEVTOOLS_ACTIVE_PORT_FILE);
     loop {
-        if let Ok(contents) = tokio::fs::read_to_string(&path).await {
-            if let Some(url) = parse_devtools_active_port(&contents) {
-                return url;
-            }
+        if let Ok(contents) = tokio::fs::read_to_string(&path).await
+            && let Some(url) = parse_devtools_active_port(&contents)
+        {
+            return url;
         }
         tokio::time::sleep(DEVTOOLS_PORT_POLL_INTERVAL).await;
     }
@@ -1093,10 +1093,10 @@ impl BrowserBuilder {
                 // auto-reply actor at launch).
                 #[cfg(feature = "interception")]
                 {
-                    if self.proxy_auth.is_none() {
-                        if let Some((u, p)) = parsed.credentials.clone() {
-                            self.proxy_auth = Some((u, p));
-                        }
+                    if self.proxy_auth.is_none()
+                        && let Some((u, p)) = parsed.credentials.clone()
+                    {
+                        self.proxy_auth = Some((u, p));
                     }
                 }
                 self.proxy = Some(parsed);
@@ -1875,10 +1875,10 @@ impl BrowserBuilder {
         // across runs. Without a `user_data_dir`, the seed stays unset, and
         // the stealth bootstrap draws a random one (fresh identity per
         // launch).
-        if explicit_seed.is_none() {
-            if let Some(dir) = &self.user_data_dir {
-                persona.seed = Some(persisted_seed(dir)?);
-            }
+        if explicit_seed.is_none()
+            && let Some(dir) = &self.user_data_dir
+        {
+            persona.seed = Some(persisted_seed(dir)?);
         }
 
         Ok(persona)
@@ -2153,10 +2153,11 @@ impl BrowserBuilder {
             self.effective_gpu_backend(),
         );
         let mut pointer: &[&str] = &[];
-        if self.headless.unwrap_or(true) && cfg!(target_os = "linux") {
-            if let Some(profile) = &self.stealth {
-                pointer = profile.pointer_blink_settings();
-            }
+        if self.headless.unwrap_or(true)
+            && cfg!(target_os = "linux")
+            && let Some(profile) = &self.stealth
+        {
+            pointer = profile.pointer_blink_settings();
         }
         merge_feature_switches(add_blink_settings(flags, pointer))
     }

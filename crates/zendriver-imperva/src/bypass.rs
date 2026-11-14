@@ -387,24 +387,24 @@ impl<'tab> ImpervaBypass<'tab> {
                     // on every tick — up to ~120 paid solves and twice that in
                     // main-world evaluates, on exactly the pages that are
                     // watching for them.
-                    if let crate::detection::ImpervaSurface::Captcha(kind) = snap.surface {
-                        if token.is_none() && !captcha_attempted {
-                            captcha_attempted = true;
-                            // The solver is caller-supplied and carries no bound
-                            // of its own. Only the loop-top probe was raced
-                            // against the deadline, so a solve entered just under
-                            // it ran to completion and overran the caller's
-                            // timeout by a full solver latency. Losing this race
-                            // drops the in-flight solve: the stated timeout is
-                            // the contract.
-                            match tokio::time::timeout_at(deadline, self.solve_captcha(kind)).await
-                            {
-                                Ok(res) => res?,
-                                Err(_) => {
-                                    return Ok(ClearanceOutcome::TimedOut {
-                                        last_surface: Some(snap.surface),
-                                    });
-                                }
+                    if let crate::detection::ImpervaSurface::Captcha(kind) = snap.surface
+                        && token.is_none()
+                        && !captcha_attempted
+                    {
+                        captcha_attempted = true;
+                        // The solver is caller-supplied and carries no bound
+                        // of its own. Only the loop-top probe was raced
+                        // against the deadline, so a solve entered just under
+                        // it ran to completion and overran the caller's
+                        // timeout by a full solver latency. Losing this race
+                        // drops the in-flight solve: the stated timeout is
+                        // the contract.
+                        match tokio::time::timeout_at(deadline, self.solve_captcha(kind)).await {
+                            Ok(res) => res?,
+                            Err(_) => {
+                                return Ok(ClearanceOutcome::TimedOut {
+                                    last_surface: Some(snap.surface),
+                                });
                             }
                         }
                     }

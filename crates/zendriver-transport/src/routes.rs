@@ -312,10 +312,10 @@ impl Routes {
         if generation != self.generation {
             return descendants;
         }
-        if let Some(parent) = self.parents.remove(session_id) {
-            if let Some(siblings) = self.children.get_mut(&parent) {
-                siblings.retain(|sibling| sibling != session_id);
-            }
+        if let Some(parent) = self.parents.remove(session_id)
+            && let Some(siblings) = self.children.get_mut(&parent)
+        {
+            siblings.retain(|sibling| sibling != session_id);
         }
         let mut ending = vec![session_id.to_owned()];
         while let Some(id) = ending.pop() {

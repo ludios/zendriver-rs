@@ -41,7 +41,7 @@ fn border_box(quad: &Value) -> Option<BoundingBox> {
     let mut top = f64::INFINITY;
     let mut right = f64::NEG_INFINITY;
     let mut bottom = f64::NEG_INFINITY;
-    for corner in coords.chunks_exact(2) {
+    for corner in coords.as_chunks::<2>().0 {
         left = left.min(corner[0]);
         right = right.max(corner[0]);
         top = top.min(corner[1]);

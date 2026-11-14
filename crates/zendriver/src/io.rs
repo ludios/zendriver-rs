@@ -414,11 +414,11 @@ mod tests {
         while !writer.is_finished() {
             for entry in std::fs::read_dir(dir.path()).unwrap().flatten() {
                 let path = entry.path();
-                if path.extension().and_then(std::ffi::OsStr::to_str) == Some("tmp") {
-                    if let Ok(meta) = entry.metadata() {
-                        use std::os::unix::fs::PermissionsExt;
-                        samples.push(meta.permissions().mode() & 0o7777);
-                    }
+                if path.extension().and_then(std::ffi::OsStr::to_str) == Some("tmp")
+                    && let Ok(meta) = entry.metadata()
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    samples.push(meta.permissions().mode() & 0o7777);
                 }
             }
             tokio::task::yield_now().await;

@@ -267,10 +267,8 @@ async fn wait(
 ) -> Result<Navigation> {
     let asks_page = matches!(target, Target::Url(_));
     let mut frame = Frame::default();
-    if asks_page {
-        if let Some(found) = consult_page(&session, &target, &mut frame).await? {
-            return Ok(found);
-        }
+    if asks_page && let Some(found) = consult_page(&session, &target, &mut frame).await? {
+        return Ok(found);
     }
     while let Some(change) = changes.next().await {
         match change {

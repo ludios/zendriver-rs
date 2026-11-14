@@ -1016,11 +1016,11 @@ impl Tab {
         let tracker = LoadTracker::before_navigating(&self.inner.session, self.target_id());
         let res = self.call(method, params).await?;
         let mut pending = self.inner.pending_load.lock().await;
-        if let Some(err) = res.get("errorText").and_then(|v| v.as_str()) {
-            if !err.is_empty() {
-                *pending = None;
-                return Err(ZendriverError::Navigation(err.to_string()));
-            }
+        if let Some(err) = res.get("errorText").and_then(|v| v.as_str())
+            && !err.is_empty()
+        {
+            *pending = None;
+            return Err(ZendriverError::Navigation(err.to_string()));
         }
         *pending = Some(tracker);
         Ok(res)
@@ -1275,10 +1275,10 @@ impl Tab {
         let deadline = tokio::time::Instant::now() + DEFAULT_LOAD_TIMEOUT;
         loop {
             let state: String = self.evaluate_main("document.readyState").await?;
-            if let Some(observed) = ReadyState::from_dom_str(&state) {
-                if observed.rank() >= until.rank() {
-                    return Ok(());
-                }
+            if let Some(observed) = ReadyState::from_dom_str(&state)
+                && observed.rank() >= until.rank()
+            {
+                return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(ZendriverError::Timeout(DEFAULT_LOAD_TIMEOUT));
@@ -5206,10 +5206,10 @@ mod tests {
             match next {
                 Ok(id) => {
                     let sent = mock.last_sent();
-                    if sent["params"]["type"] == "keyDown" {
-                        if let Some(k) = sent["params"]["key"].as_str() {
-                            typed.push_str(k);
-                        }
+                    if sent["params"]["type"] == "keyDown"
+                        && let Some(k) = sent["params"]["key"].as_str()
+                    {
+                        typed.push_str(k);
                     }
                     mock.reply(id, json!({})).await;
                 }

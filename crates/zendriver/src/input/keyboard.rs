@@ -270,17 +270,15 @@ pub(crate) fn char_descriptor(c: char) -> Option<CharDescriptor> {
     if let Some(base) = SPECIAL_CHAR_SHIFT_MAP
         .iter()
         .find_map(|(k, base)| (*k == c).then_some(*base))
-    {
-        if let Some(&(code, vk)) = SPECIAL_CHAR_MAP
+        && let Some(&(code, vk)) = SPECIAL_CHAR_MAP
             .iter()
             .find_map(|(k, v)| (*k == base).then_some(v))
-        {
-            return Some(CharDescriptor {
-                code,
-                windows_vk: vk,
-                shift: true,
-            });
-        }
+    {
+        return Some(CharDescriptor {
+            code,
+            windows_vk: vk,
+            shift: true,
+        });
     }
     // Whitespace handled by callers as SpecialKey; everything else (non-ASCII,
     // accents, emoji, multi-codepoint) routes to a `char`-type event.
@@ -1536,12 +1534,10 @@ pub(crate) async fn type_text_realistic(
         if thinking_pause_ms > 0 {
             tokio::time::sleep(Duration::from_millis(thinking_pause_ms as u64)).await;
         }
-        if do_typo {
-            if let Some(wrong) = typo_char {
-                dispatch_char(tab, wrong, held_mods.cdp_bits()).await?;
-                tokio::time::sleep(Duration::from_millis(80)).await;
-                dispatch_special(tab, SpecialKey::Backspace, held_mods.cdp_bits()).await?;
-            }
+        if do_typo && let Some(wrong) = typo_char {
+            dispatch_char(tab, wrong, held_mods.cdp_bits()).await?;
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            dispatch_special(tab, SpecialKey::Backspace, held_mods.cdp_bits()).await?;
         }
         dispatch_key_events(tab, &cluster_events(cluster, held_mods)).await?;
     }

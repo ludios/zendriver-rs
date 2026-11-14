@@ -218,10 +218,9 @@ fn widget_frames(tree: &Value, targets: &Value, main: &str, marker: &str) -> Vec
         if frame["url"]
             .as_str()
             .is_some_and(|url| url.contains(marker))
+            && let Some(id) = frame["id"].as_str()
         {
-            if let Some(id) = frame["id"].as_str() {
-                frames.push(id.to_string());
-            }
+            frames.push(id.to_string());
         }
     }
     for target in targets["targetInfos"].as_array().into_iter().flatten() {
@@ -230,10 +229,9 @@ fn widget_frames(tree: &Value, targets: &Value, main: &str, marker: &str) -> Vec
             && target["url"]
                 .as_str()
                 .is_some_and(|url| url.contains(marker))
+            && let Some(id) = target["targetId"].as_str()
         {
-            if let Some(id) = target["targetId"].as_str() {
-                frames.push(id.to_string());
-            }
+            frames.push(id.to_string());
         }
     }
     frames

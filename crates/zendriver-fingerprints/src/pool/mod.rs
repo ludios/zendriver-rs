@@ -100,13 +100,13 @@ pub async fn load_or_download(url: &str, policy: CachePolicy) -> Result<PoolSet,
     let cache = cache_path();
 
     // Fast path: cache hit (only when not force-refreshing and not stale).
-    if !policy.force_refresh && !crate::cache::path_is_stale(&cache, policy.ttl) {
-        if let Ok(bytes) = std::fs::read_to_string(&cache) {
-            if let Ok(set) = PoolSet::from_json(&bytes) {
-                tracing::debug!(path = %cache.display(), "pool cache hit");
-                return Ok(set);
-            }
-        }
+    if !policy.force_refresh
+        && !crate::cache::path_is_stale(&cache, policy.ttl)
+        && let Ok(bytes) = std::fs::read_to_string(&cache)
+        && let Ok(set) = PoolSet::from_json(&bytes)
+    {
+        tracing::debug!(path = %cache.display(), "pool cache hit");
+        return Ok(set);
     }
 
     tracing::debug!(url, "pool cache miss — downloading");

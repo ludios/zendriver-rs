@@ -1268,10 +1268,10 @@ pub(crate) async fn shut_down_session(state: &Arc<Mutex<SessionState>>) {
         s.shutting_down = true;
         s.browser.take()
     };
-    if let Some(browser) = browser {
-        if let Err(e) = browser.close().await {
-            tracing::warn!("error closing browser during shutdown: {e}");
-        }
+    if let Some(browser) = browser
+        && let Err(e) = browser.close().await
+    {
+        tracing::warn!("error closing browser during shutdown: {e}");
     }
 }
 
