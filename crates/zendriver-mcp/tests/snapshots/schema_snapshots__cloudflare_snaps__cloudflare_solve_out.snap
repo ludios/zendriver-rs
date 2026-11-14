@@ -24,10 +24,10 @@ $defs:
       - description: "The page showed no challenge marker when the solver looked at it\nparsed, and none before. By default, the solver decides this on its\nfirst look at the parsed page, so the call returns at once; with\n`wait_for_challenge_ms`, it decides when that wait ends. It says only\nthat no Turnstile challenge was found: a widget a script mounts after\nthe decision is not waited for, and Cloudflare's block pages (\"Sorry,\nyou have been blocked\") carry no marker either. `token` will be\n`None`."
         type: string
         const: already_clear
-      - description: "Turnstile produced a token — the first non-empty value of an element\nmatching `selectors.token_inputs`, tried in order;\n`cf-turnstile-response` by default.\nThe token is available in [`SolveOutput::token`]."
+      - description: "Turnstile produced a token — the first non-empty value of an element\nmatching `selectors.token_inputs`, tried in order\n(`cf-turnstile-response` by default), other than a token this tool\nalready returned, if `ignore_returned_tokens` is set.\nThe token is available in [`SolveOutput::token`]."
         type: string
         const: solved
-      - description: "Every challenge marker seen earlier is gone without a token, and the\npage has settled: a navigation replaced it with a parsed document\n(how Cloudflare's full-page challenge ends, on the page it guards),\nor it stayed without markers for three seconds. `token` will be\n`None`.\n\nNot proof the gate was passed: a replacement page whose every marker\nis added by script after it is parsed lands here too, so verify the\npage before treating what you read next as post-challenge content."
+      - description: "Every challenge marker seen earlier is gone without a token (other\nthan an ignored one), and the page has settled: a navigation replaced it with a parsed document\n(how Cloudflare's full-page challenge ends, on the page it guards),\nor it stayed without markers for three seconds. `token` will be\n`None`.\n\nNot proof the gate was passed: a replacement page whose every marker\nis added by script after it is parsed lands here too, so verify the\npage before treating what you read next as post-challenge content."
         type: string
         const: challenge_gone
       - description: "`timeout_ms` elapsed without reaching another outcome. `token`\nwill be `None`. Not a hard error — agents can retry or give up."

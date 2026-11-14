@@ -12,6 +12,10 @@ properties:
     anyOf:
       - $ref: "#/$defs/ClickPolicyInput"
       - type: "null"
+  ignore_returned_tokens:
+    description: "Ignore every token that this tool has already returned in this MCP\nsession, and wait for a new one. Set it when calling again on a page\nthat asks for Turnstile again, e.g. because its server refused the\ntoken: until the page resets its widget, the page still holds the\nold token, which the call would otherwise return at once as\n`solved`. While every token input holds an old token, the widget is\nnot clicked. A page that asks for no new token then ends in\n`timeout`, or in `challenge_gone` if it removes every marker; never\nin `already_clear`. Defaults to false."
+    type: boolean
+    default: false
   poll_interval_ms:
     description: "Override the bypass driver's internal poll cadence, in milliseconds.\nDefaults to the lib's own default (500ms). Lowering speeds up\ndetection at the cost of more CDP round-trips (a handful per tick);\nraising is a safe knob for slow / sandboxed environments."
     type:

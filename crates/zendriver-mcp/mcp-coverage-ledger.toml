@@ -1116,6 +1116,12 @@ excluded = "callback API; no request/response tool shape"
 api = "zendriver::CloudflareBypass::wait_for_challenge"
 covered = "browser_solve_turnstile.wait_for_challenge_ms"
 
+# Not baseline-visible either. The tool keeps the tokens it returned, so an
+# agent sets a flag instead of copying ~1 KB tokens back into a request.
+[[entry]]
+api = "zendriver::CloudflareBypass::ignore_tokens"
+covered = "browser_solve_turnstile.ignore_returned_tokens"
+
 # ── connect endpoint errors (2026-11-01) ────────────────────────────────────
 [[entry]]
 api = "zendriver::error::BrowserError::ConnectEndpoint"

@@ -170,6 +170,13 @@ pub struct SessionState {
 
     #[cfg(feature = "monitor")]
     pub monitors: HashMap<MonitorId, std::sync::Arc<tokio::sync::Mutex<MonitorState>>>,
+
+    /// Every token that `browser_solve_turnstile` returned in this session,
+    /// in every tab and every browser: the tokens its
+    /// `ignore_returned_tokens` ignores. Tokens are unique, so one list
+    /// serves every page.
+    #[cfg(feature = "cloudflare")]
+    pub turnstile_tokens: Vec<String>,
 }
 
 /// Live handle to a pending `expect_*` expectation.
@@ -418,6 +425,8 @@ impl SessionState {
             rules: HashMap::new(),
             #[cfg(feature = "monitor")]
             monitors: HashMap::new(),
+            #[cfg(feature = "cloudflare")]
+            turnstile_tokens: Vec::new(),
         }
     }
 }

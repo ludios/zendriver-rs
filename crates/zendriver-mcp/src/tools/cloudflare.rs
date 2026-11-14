@@ -71,6 +71,17 @@ pub struct SolveInput {
     /// ends, or at `timeout_ms` if the wait would end after it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_for_challenge_ms: Option<u64>,
+    /// Ignore every token that this tool has already returned in this MCP
+    /// session, and wait for a new one. Set it when calling again on a page
+    /// that asks for Turnstile again, e.g. because its server refused the
+    /// token: until the page resets its widget, the page still holds the
+    /// old token, which the call would otherwise return at once as
+    /// `solved`. While every token input holds an old token, the widget is
+    /// not clicked. A page that asks for no new token then ends in
+    /// `timeout`, or in `challenge_gone` if it removes every marker; never
+    /// in `already_clear`. Defaults to false.
+    #[serde(default)]
+    pub ignore_returned_tokens: bool,
     /// Override the page markers that identify the Turnstile widget. Omit to
     /// use the lib's defaults, which track Cloudflare's current markup.
     /// Cloudflare owns this markup and changes it without notice, so an
@@ -167,14 +178,23 @@ fn default_timeout() -> u64 {
 }
 
 /// Apply a request's overrides to a bypass driver, leaving anything the
-/// request omitted at the lib's own default.
+/// request omitted at the lib's own default. `returned_tokens` holds the
+/// tokens this tool returned earlier in the session, which the driver
+/// ignores if the request says so.
 ///
 /// Split out of [`solve_turnstile`] purely so it can be tested: the tool
 /// needs a live tab to get a driver at all, this needs only a session, and a
 /// `MockConnection` supplies one. Without the split, the request fields
 /// converting correctly and the request fields ever being *read* were two
 /// different claims and only the first had a test.
-fn configure<'a>(mut bypass: CloudflareBypass<'a>, input: SolveInput) -> CloudflareBypass<'a> {
+fn configure<'a>(
+    mut bypass: CloudflareBypass<'a>,
+    input: SolveInput,
+    returned_tokens: &[String],
+) -> CloudflareBypass<'a> {
+    if input.ignore_returned_tokens {
+        bypass = bypass.ignore_tokens(returned_tokens);
+    }
     if let Some(p) = input.poll_interval_ms {
         bypass = bypass.poll_interval(Duration::from_millis(p));
     }
@@ -210,12 +230,13 @@ pub enum Outcome {
     /// `None`.
     AlreadyClear,
     /// Turnstile produced a token — the first non-empty value of an element
-    /// matching `selectors.token_inputs`, tried in order;
-    /// `cf-turnstile-response` by default.
+    /// matching `selectors.token_inputs`, tried in order
+    /// (`cf-turnstile-response` by default), other than a token this tool
+    /// already returned, if `ignore_returned_tokens` is set.
     /// The token is available in [`SolveOutput::token`].
     Solved,
-    /// Every challenge marker seen earlier is gone without a token, and the
-    /// page has settled: a navigation replaced it with a parsed document
+    /// Every challenge marker seen earlier is gone without a token (other
+    /// than an ignored one), and the page has settled: a navigation replaced it with a parsed document
     /// (how Cloudflare's full-page challenge ends, on the page it guards),
     /// or it stayed without markers for three seconds. `token` will be
     /// `None`.
@@ -252,6 +273,7 @@ pub async fn solve_turnstile(
 ) -> Result<SolveOutput, ErrorData> {
     let s = state.lock().await;
     let tab = current_tab(&s).await?;
+    let returned_tokens = s.turnstile_tokens.clone();
     // Other tools go on while the solver waits, which with
     // `wait_for_challenge_ms` it does even on a page without a challenge.
     drop(s);
@@ -259,7 +281,7 @@ pub async fn solve_turnstile(
     // bypass's `'_` lifetime, but `wait_for_clearance` consumes `self`, so
     // the bypass lives only for the single await we're about to do.
     let timeout = Duration::from_millis(input.timeout_ms);
-    match configure(tab.cloudflare(), input)
+    match configure(tab.cloudflare(), input, &returned_tokens)
         .wait_for_clearance(timeout)
         .await
     {
@@ -267,10 +289,13 @@ pub async fn solve_turnstile(
             outcome: Outcome::AlreadyClear,
             token: None,
         }),
-        Ok(ClearanceOutcome::TokenAcquired(t)) => Ok(SolveOutput {
-            outcome: Outcome::Solved,
-            token: Some(t),
-        }),
+        Ok(ClearanceOutcome::TokenAcquired(t)) => {
+            state.lock().await.turnstile_tokens.push(t.clone());
+            Ok(SolveOutput {
+                outcome: Outcome::Solved,
+                token: Some(t),
+            })
+        }
         Ok(ClearanceOutcome::ChallengeGone) => Ok(SolveOutput {
             outcome: Outcome::ChallengeGone,
             token: None,
@@ -311,6 +336,7 @@ mod tests {
                 timeout_ms: 100,
                 poll_interval_ms: None,
                 wait_for_challenge_ms: None,
+                ignore_returned_tokens: false,
                 selectors: None,
                 click_policy: None,
             },
@@ -335,7 +361,9 @@ mod tests {
     /// frame lookup; and the click must land where the request's fractions
     /// put it — 7% / 50% of the same box would be (105.6, 220), so neither
     /// coordinate can be produced by a driver that quietly kept its
-    /// defaults.
+    /// defaults. The page also holds an old token, which the run must wait
+    /// past (rather than returning it, unclicked, on the second tick) only
+    /// if `ignore_returned_tokens` passed the returned tokens on.
     #[tokio::test]
     async fn request_overrides_reach_the_driver() {
         use serde_json::{Value, json};
@@ -345,8 +373,9 @@ mod tests {
         /// The fake page's answer to each command the driver sends on its
         /// `tick`th tick (counting from 1): a parsed page without any marker
         /// on the first, then a challenge page whose widget, an 80×40 box at
-        /// (100, 200), is held by a frame at the request's host. Its token
-        /// shows from the third tick on.
+        /// (100, 200), is held by a frame at the request's host. An earlier
+        /// widget's input holds the old token `OLD` before the input of this
+        /// widget, whose token `T` shows from the third tick on.
         fn answer(method: &str, tick: usize) -> Value {
             let widget = json!({ "x": 100.0, "y": 200.0, "width": 80.0, "height": 40.0 });
             let mut frames = json!([]);
@@ -355,7 +384,12 @@ mod tests {
             }
             match method {
                 "Runtime.evaluate" => {
-                    let tokens = if tick > 2 { json!(["T"]) } else { json!([]) };
+                    let mut tokens = json!([]);
+                    if tick == 2 {
+                        tokens = json!(["OLD", ""]);
+                    } else if tick > 2 {
+                        tokens = json!(["OLD", "T"]);
+                    }
                     json!({ "result": { "type": "object", "value": {
                         "tokens": tokens, "markers": tick > 1, "loading": false,
                     } } })
@@ -382,6 +416,7 @@ mod tests {
             timeout_ms: 5_000,
             poll_interval_ms: Some(1),
             wait_for_challenge_ms: Some(5_000),
+            ignore_returned_tokens: true,
             selectors: Some(SelectorsInput {
                 iframe_src_contains: Some("gate.alien.invalid".into()),
                 ..SelectorsInput::default()
@@ -396,7 +431,7 @@ mod tests {
         // Borrowed, not spawned: the bypass borrows the session, so its
         // future is not `'static`. Driver and mock server share a task.
         let driver = async {
-            configure(CloudflareBypass::new(&sess), input)
+            configure(CloudflareBypass::new(&sess), input, &["OLD".to_string()])
                 .wait_for_clearance(Duration::from_millis(5_000))
                 .await
         };
@@ -427,7 +462,7 @@ mod tests {
         );
         assert!(matches!(
             outcome.unwrap(),
-            zendriver::ClearanceOutcome::TokenAcquired(_)
+            zendriver::ClearanceOutcome::TokenAcquired(token) if token == "T"
         ));
         conn.shutdown();
     }
