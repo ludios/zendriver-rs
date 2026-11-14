@@ -57,11 +57,13 @@ ordinary terminals, the last one included:
   The other way round, another provider's widget matching the default
   `[data-sitekey]` reads as a challenge, and the run goes on to its
   timeout.
-- **`TokenAcquired(token)`** — the `cf-turnstile-response` input picked
-  up a non-empty value, other than one of the old tokens that the run
-  was told to ignore (see [A page that asks for Turnstile
-  again](#a-page-that-asks-for-turnstile-again)). The page can now proceed; the token is also
-  forwarded to Cloudflare server-side on the next request.
+- **`TokenAcquired(token)`** — a token input (`cf-turnstile-response`
+  by default) picked up a non-empty value, other than one of the old
+  tokens that the run was told to ignore (see [A page that asks for
+  Turnstile again](#a-page-that-asks-for-turnstile-again)). The token
+  is what the page submits to its site, whose server checks it with
+  Cloudflare; the run neither submits it nor knows whether the server
+  accepts it.
 - **`ChallengeGone`** — every challenge marker seen on an earlier tick
   is gone without a token (other than an ignored one) having shown, and
   the page has settled. This
@@ -101,8 +103,8 @@ and the second is `ClearanceOutcome::TimedOut { saw_challenge: true }`.
 ## How it works
 
 The driver runs a single poll loop. Each tick, one evaluator reads the
-light DOM: the value of every `cf-turnstile-response` token input, and
-whether a marker (the container, the token input, or one of Cloudflare's
+light DOM: the value of every token input (`cf-turnstile-response` by
+default), and whether a marker (the container, the token input, or one of Cloudflare's
 own page scripts) is there. It runs in an isolated world, where
 Cloudflare's script in the page's main world cannot see the calls it
 makes: with the evaluator in the main world, Cloudflare took every click
@@ -224,10 +226,11 @@ The defaults:
 | `ClickPolicy::y_fraction` | `0.5` |
 
 The token is the first non-empty value of an element matching
-`token_inputs`, trying the selectors in order and skipping the ignored
-tokens, so a page whose modern
-and legacy inputs both hold one is read the modern way. An empty value turns a marker
-off rather than widening it: an empty `container` drops the container
+`token_inputs` that the run was not told to ignore, trying the selectors
+in order, and the elements matching each selector in document order. So
+of a page's modern and legacy inputs, both holding a token that is not
+ignored, the modern one is read. An empty value turns a marker off
+rather than widening it: an empty `container` drops the container
 signal, an empty `iframe_src_contains` matches no iframe (rather than
 every iframe, which is what a bare substring test would otherwise do),
 and an empty `token_inputs` leaves the no-marker, marker-vanished and deadline
@@ -400,7 +403,8 @@ marker seen, the run returns `AlreadyClear` on a look that it starts
 when the window has ended, or at the clearance timeout if the window
 would end after it.
 
-One run handles one challenge: it ends at the first token. A page that
+One run handles one challenge: it ends at the first token that it was
+not told to ignore. A page that
 can show its widget again later needs another run then; see the next
 section.
 

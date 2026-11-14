@@ -25,8 +25,8 @@
 //!    on the first look at each parsed document.
 //! 3. If a click is due and the widget is mounted, scrolls it into view
 //!    and measures it (no click is due while every token input holds one
-//!    of the ignored tokens: their widget is still solved); if it is a click target (non-zero size and visible),
-//!    clicks the point the [`ClickPolicy`] chose inside it — by default
+//!    of the ignored tokens: their widget is still solved); if it is a
+//!    click target (non-zero size and visible), clicks the point the [`ClickPolicy`] chose inside it — by default
 //!    `bbox.x + bbox.width * 0.07, bbox.y + bbox.height * 0.50`. Up to
 //!    [`ClickPolicy::max_attempts`] clicks are spent, spaced
 //!    [`ClickPolicy::retry_ticks`] ticks apart, so a swallowed first click
@@ -68,9 +68,10 @@ use crate::options::{ClickPolicy, ClickTarget, TurnstileSelectors};
 pub enum ClearanceOutcome {
     /// Turnstile produced a token — the first non-empty value of an
     /// element matching the configured
-    /// [`token_inputs`](TurnstileSelectors::token_inputs), tried in order
-    /// (`[name="cf-turnstile-response"]` by default), that is not one of the
-    /// [`ignore_tokens`](CloudflareBypass::ignore_tokens).
+    /// [`token_inputs`](TurnstileSelectors::token_inputs) that is not one
+    /// of the [`ignore_tokens`](CloudflareBypass::ignore_tokens), trying
+    /// the selectors in order, and the elements matching each selector in
+    /// document order.
     TokenAcquired(String),
     /// Every challenge marker seen earlier in the run is gone without a
     /// token (other than an ignored one) having shown, and the page has

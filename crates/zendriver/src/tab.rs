@@ -3175,8 +3175,10 @@ impl Tab {
     /// to tune the polling cadence, then call
     /// [`wait_for_clearance`](zendriver_cloudflare::CloudflareBypass::wait_for_clearance)
     /// to find the Turnstile checkbox (closed shadow roots included), click
-    /// it at the default point (7% across, 50% down), and poll until either a configured
-    /// token input picks up a value, every challenge marker is gone from a
+    /// it at the default point (7% across, 50% down), and poll until either a
+    /// configured token input holds a non-empty value that is not one of the
+    /// [`ignore_tokens`](zendriver_cloudflare::CloudflareBypass::ignore_tokens),
+    /// every challenge marker is gone from a
     /// page that has settled — for Cloudflare's full-page challenge, the
     /// page it navigates to after it is passed (see
     /// [`ClearanceOutcome::ChallengeGone`](zendriver_cloudflare::ClearanceOutcome::ChallengeGone)

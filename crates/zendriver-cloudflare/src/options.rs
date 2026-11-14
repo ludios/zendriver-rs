@@ -71,9 +71,12 @@ pub struct TurnstileSelectors {
     pub container: String,
     /// CSS selectors for the hidden input that receives the clearance
     /// token, in **preference order**: the token is the first non-empty
-    /// value of an element matching one of them, trying them in order, so a
-    /// page whose modern and legacy inputs both hold one is read the modern
-    /// way. Defaults to
+    /// value of an element matching one of them, other than a value that
+    /// the run was told to ignore
+    /// ([`ignore_tokens`](crate::CloudflareBypass::ignore_tokens)), trying
+    /// the selectors in order, and the elements matching each selector in
+    /// document order. So of a page's modern and legacy inputs, both holding
+    /// a token that is not ignored, the modern one is read. Defaults to
     /// `["[name=\"cf-turnstile-response\"]", "[name=\"cf_challenge_response\"]"]`.
     /// Empty entries are skipped; an empty list disables token detection,
     /// leaving the no-marker, marker-vanished and deadline terminals.
