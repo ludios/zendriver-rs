@@ -710,9 +710,9 @@ async fn run_monitor(
                             if let Some(url) = evicted
                                 && emit_boundary(&tx, NetworkDeliveryBoundary::CorrelationEvicted { url })
                                     .await
-                                {
-                                    return;
-                                }
+                            {
+                                return;
+                            }
                         }
                         // Enable streaming as early as possible — right
                         // when the request is first observed, before
@@ -826,18 +826,19 @@ async fn run_monitor(
                             continue;
                         };
                         if let Some((req, resp)) = partial.remove(&p.request_id)
-                            && filter_allows(filter.as_ref(), Some(&req.url)) {
-                                let exchange = NetworkExchange {
-                                    request: req,
-                                    response: resp,
-                                    error: None,
-                                    request_id: p.request_id.clone(),
-                                    session: session.clone(),
-                                };
-                                if tx.send(NetworkEvent::Http(exchange)).await.is_err() {
-                                    return;
-                                }
+                            && filter_allows(filter.as_ref(), Some(&req.url))
+                        {
+                            let exchange = NetworkExchange {
+                                request: req,
+                                response: resp,
+                                error: None,
+                                request_id: p.request_id.clone(),
+                                session: session.clone(),
+                            };
+                            if tx.send(NetworkEvent::Http(exchange)).await.is_err() {
+                                return;
                             }
+                        }
                         urls.remove(&p.request_id);
                         streaming.remove(&p.request_id);
                     }
@@ -849,18 +850,19 @@ async fn run_monitor(
                             continue;
                         };
                         if let Some((req, resp)) = partial.remove(&p.request_id)
-                            && filter_allows(filter.as_ref(), Some(&req.url)) {
-                                let exchange = NetworkExchange {
-                                    request: req,
-                                    response: resp,
-                                    error: Some(p.error_text),
-                                    request_id: p.request_id.clone(),
-                                    session: session.clone(),
-                                };
-                                if tx.send(NetworkEvent::Http(exchange)).await.is_err() {
-                                    return;
-                                }
+                            && filter_allows(filter.as_ref(), Some(&req.url))
+                        {
+                            let exchange = NetworkExchange {
+                                request: req,
+                                response: resp,
+                                error: Some(p.error_text),
+                                request_id: p.request_id.clone(),
+                                session: session.clone(),
+                            };
+                            if tx.send(NetworkEvent::Http(exchange)).await.is_err() {
+                                return;
                             }
+                        }
                         urls.remove(&p.request_id);
                         streaming.remove(&p.request_id);
                     }
@@ -878,9 +880,9 @@ async fn run_monitor(
                             if let Some(url) = evicted
                                 && emit_boundary(&tx, NetworkDeliveryBoundary::CorrelationEvicted { url })
                                     .await
-                                {
-                                    return;
-                                }
+                            {
+                                return;
+                            }
                         }
                         if filter_allows(filter.as_ref(), Some(&p.url))
                             && tx
