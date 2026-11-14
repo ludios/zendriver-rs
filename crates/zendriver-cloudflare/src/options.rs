@@ -70,9 +70,10 @@ pub struct TurnstileSelectors {
     /// in-page.
     pub container: String,
     /// CSS selectors for the hidden input that receives the clearance
-    /// token, in **preference order**: the first one that matches an
-    /// element wins, so a page carrying both the modern and the legacy
-    /// input is read the modern way. Defaults to
+    /// token, in **preference order**: the token is the first non-empty
+    /// value of an element matching one of them, trying them in order, so a
+    /// page whose modern and legacy inputs both hold one is read the modern
+    /// way. Defaults to
     /// `["[name=\"cf-turnstile-response\"]", "[name=\"cf_challenge_response\"]"]`.
     /// Empty entries are skipped; an empty list disables token detection,
     /// leaving only the marker-vanished and deadline terminals.

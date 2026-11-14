@@ -6,7 +6,7 @@
 //!
 //! - the widget's iframe is cross-site to the page, as
 //!   `challenges.cloudflare.com` is, and sits in a *closed* shadow root,
-//!   which no script in the page can enter;
+//!   which no path through the DOM leads into;
 //! - a hidden `cf-turnstile-response` input sits beside the shadow host, in
 //!   the light DOM;
 //! - once the checkbox is clicked, the page removes the widget, then the

@@ -56,9 +56,10 @@ use crate::options::{ClickPolicy, ClickTarget, TurnstileSelectors};
 /// Result of a clearance attempt.
 #[derive(Debug, Clone)]
 pub enum ClearanceOutcome {
-    /// Turnstile produced a token — the value held by the first of the
-    /// configured [`token_inputs`](TurnstileSelectors::token_inputs) to
-    /// match, `[name="cf-turnstile-response"]` by default.
+    /// Turnstile produced a token — the first non-empty value of an
+    /// element matching the configured
+    /// [`token_inputs`](TurnstileSelectors::token_inputs), tried in order;
+    /// `[name="cf-turnstile-response"]` by default.
     TokenAcquired(String),
     /// Every challenge marker seen earlier in the run is gone without a
     /// token having shown, and the page has settled. Either a navigation

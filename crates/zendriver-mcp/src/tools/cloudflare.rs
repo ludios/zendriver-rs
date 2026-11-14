@@ -182,8 +182,9 @@ fn configure<'a>(mut bypass: CloudflareBypass<'a>, input: SolveInput) -> Cloudfl
 #[derive(Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
-    /// Turnstile produced a token — the value held by the first matching
-    /// `selectors.token_inputs` entry, `cf-turnstile-response` by default.
+    /// Turnstile produced a token — the first non-empty value of an element
+    /// matching `selectors.token_inputs`, tried in order;
+    /// `cf-turnstile-response` by default.
     /// The token is available in [`SolveOutput::token`].
     Solved,
     /// Every challenge marker seen earlier is gone without a token, and the

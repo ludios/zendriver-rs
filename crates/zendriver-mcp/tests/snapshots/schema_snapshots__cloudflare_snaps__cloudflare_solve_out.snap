@@ -21,7 +21,7 @@ $defs:
   Outcome:
     description: "Terminal outcome of a turnstile bypass attempt.\n\n`Solved` and `ChallengeGone` mirror the lib's `ClearanceOutcome`\nvariants. `Timeout` mirrors the lib's `ClearanceOutcome::TimedOut` — a\ndeadline in a turnstile flow is a normal outcome, not an error —\nsurfacing it on the success channel so agents can branch on `outcome`\nwithout try/catch around a timeout."
     oneOf:
-      - description: "Turnstile produced a token — the value held by the first matching\n`selectors.token_inputs` entry, `cf-turnstile-response` by default.\nThe token is available in [`SolveOutput::token`]."
+      - description: "Turnstile produced a token — the first non-empty value of an element\nmatching `selectors.token_inputs`, tried in order;\n`cf-turnstile-response` by default.\nThe token is available in [`SolveOutput::token`]."
         type: string
         const: solved
       - description: "Every challenge marker seen earlier is gone without a token, and the\npage has settled: a navigation replaced it with a parsed document\n(how Cloudflare's full-page challenge ends, on the page it guards),\nor it stayed without markers for three seconds. `token` will be\n`None`.\n\nNot proof the gate was passed: a replacement page whose every marker\nis added by script after it is parsed lands here too, so verify the\npage before treating what you read next as post-challenge content."

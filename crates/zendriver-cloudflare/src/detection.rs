@@ -31,7 +31,9 @@
 //! passed, and a widget can be removed between two calls. Chrome then
 //! answers the call with a server error rather than a result, and an
 //! observation that gets one reports nothing, to be made again on the next
-//! tick, instead of failing the run.
+//! tick, instead of failing the run. `Target.getTargets` is the exception:
+//! its list is the browser's, which no navigation changes under it, so a
+//! server error from it is a refusal, and fails the run.
 
 use serde::Deserialize;
 use serde_json::{Value, json};

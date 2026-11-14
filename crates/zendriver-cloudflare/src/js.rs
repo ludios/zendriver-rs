@@ -10,7 +10,8 @@
 //!   its shadow root. The widget's `<iframe>` is not looked for here: it
 //!   sits in a closed shadow root, which no path through the DOM leads
 //!   into, so the driver finds it through CDP instead (see `detection`).
-//! - [`MEASURE_FN`], called on that `<iframe>` element right before a click.
+//! - [`MEASURE_FN`], called on that `<iframe>` element on a tick that may
+//!   click, before and after scrolling it into view.
 //!
 //! [`poll_expr`] is one IIFE, so that its `var`s stay locals rather than
 //! piling up on the world's global object, tick after tick.

@@ -10,7 +10,7 @@
 //!      the clearance token, any challenge marker on the page, and the
 //!      Turnstile iframe — through CDP, since Turnstile mounts it in a
 //!      closed shadow root. When the iframe is a click target, the driver
-//!      scrolls it into view, measures it, and clicks its default point
+//!      scrolls it into view, measures it again, and clicks its default point
 //!      (7% across, 50% down: the Turnstile checkbox) in a human-like way —
 //!      a curved, eased approach, a little jiggle, a held press — retrying
 //!      up to three times in case the widget swallowed the first one.

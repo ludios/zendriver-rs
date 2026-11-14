@@ -11,9 +11,10 @@
 //! Drives the Turnstile checkbox click flow:
 //!
 //! 1. Find the Turnstile iframe through CDP. Turnstile mounts it in a
-//!    *closed* shadow root, which no script in the page can enter; see
+//!    *closed* shadow root, which no path through the DOM leads into; see
 //!    [`detection`] for how the frame is found instead.
-//! 2. Scroll it into view, re-measure it, and click at the 7% × 50% offset
+//! 2. Measure it; if it is a click target, scroll it into view, measure it
+//!    again, and click at the 7% × 50% offset
 //!    inside its box (the default Turnstile checkbox location), retrying a
 //!    swallowed click a few times. This crate's own click is a raw one;
 //!    `zendriver`'s `Tab::cloudflare` installs a human-like click instead,

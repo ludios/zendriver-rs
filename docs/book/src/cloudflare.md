@@ -75,13 +75,16 @@ and the second is `TimedOut { saw_challenge: true }`.
 
 ## How it works
 
-The driver runs a single poll loop. Each tick, one evaluator in the
-page's main world reads the light DOM: the `cf-turnstile-response` token
-if one is present, and whether the container or the token input is
-there. The widget's iframe is found differently. Turnstile mounts it
-inside a *closed* shadow root — Cloudflare's full-page challenge does —
-and no script in the page can enter one, so the driver asks Chrome
-instead. Chrome lists the frames in a process of their own in
+The driver runs a single poll loop. Each tick, one evaluator reads the
+light DOM: the `cf-turnstile-response` token if one is present, and
+whether a marker (the container, the token input, or one of Cloudflare's
+own page scripts) is there. It runs in an isolated world, where
+Cloudflare's script in the page's main world cannot see the calls it
+makes: with the evaluator in the main world, Cloudflare took every click
+and then served its challenge again. The widget's iframe is found
+differently. Turnstile mounts it inside a *closed* shadow root —
+Cloudflare's full-page challenge does — which no path through the DOM
+leads into, so the driver asks Chrome instead. Chrome lists the frames in a process of their own in
 `Target.getTargets` (where the cross-site widget runs under Chrome's
 default site isolation) and the frames in the page's own process in
 `Page.getFrameTree` (where it runs when site isolation is off, as with
@@ -94,10 +97,13 @@ it, shadow root or not. The tick then resolves in this order:
    immediately. This is also the invisible-Turnstile path, where no
    iframe mounts and Cloudflare's loader script fills the field in
    without anything to click.
-2. **Scroll, re-measure, click.** Raw mouse events carry viewport
-   coordinates, so a widget below the fold has to be scrolled in and
-   re-measured before a click can land on it. The scroll is CDP's
-   `DOM.scrollIntoViewIfNeeded`, which no script in the page sees. The
+2. **Measure, scroll, measure, click.** On a tick that may click, the
+   widget is measured first, so one that is no click target never
+   scrolls the page. Raw mouse events carry viewport coordinates, so a
+   widget below the fold then has to be scrolled in and measured again
+   before a click can land on it. The scroll is CDP's
+   `DOM.scrollIntoViewIfNeeded`, which calls no method that the page
+   could override, though the page still sees a `scroll` event. The
    click goes to
    `(bbox.x + bbox.width * 0.07, bbox.y + bbox.height * 0.5)` — by
    default the 7%-from-left, 50%-from-top position of the checkbox
@@ -125,7 +131,8 @@ it, shadow root or not. The tick then resolves in this order:
    [`poll_interval`](https://docs.rs/zendriver/latest/zendriver/struct.CloudflareBypass.html#method.poll_interval)
    — until a terminal fires or the deadline passes.
 
-After ten consecutive ticks with no progress the driver logs a warning
+After ten ticks with a widget mounted and no click landed since the
+last one, the driver logs a warning
 asking whether `BrowserBuilder::stealth` is on, which is the answer most
 of the time. See [Pairing with stealth](#pairing-with-stealth) below. A
 run configured never to click (`max_attempts: 0`, below) is exempt —
@@ -182,8 +189,9 @@ The defaults:
 | `ClickPolicy::x_fraction` | `0.07` |
 | `ClickPolicy::y_fraction` | `0.5` |
 
-`token_inputs` is tried in order, so a page carrying both the modern and
-the legacy input is read the modern way. An empty value turns a marker
+The token is the first non-empty value of an element matching
+`token_inputs`, trying the selectors in order, so a page whose modern
+and legacy inputs both hold one is read the modern way. An empty value turns a marker
 off rather than widening it: an empty `container` drops the container
 signal, an empty `iframe_src_contains` matches no iframe (rather than
 every iframe, which is what a bare substring test would otherwise do),
