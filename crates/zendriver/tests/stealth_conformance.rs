@@ -174,9 +174,13 @@ const INVARIANTS: &[(&str, &str)] = &[
         const text = 'The quick brown fox jumps over the lazy dog';
         const context = () => document.createElement('canvas').getContext('2d');
         const first = context();
+        const alignedRight = context();
+        alignedRight.textAlign = 'right';
         const widths = [first.measureText(text).width, first.measureText(text).width,
-          context().measureText(text).width];
-        return widths.every(w => w === widths[0]) ? null : `widths ${widths.join(', ')}`;
+          context().measureText(text).width, alignedRight.measureText(text).width];
+        if (!widths.every(w => w === widths[0])) return `widths ${widths.join(', ')}`;
+        const empty = first.measureText('').width;
+        return empty === 0 ? null : `no text is ${empty} wide`;
         "#,
     ),
     (
