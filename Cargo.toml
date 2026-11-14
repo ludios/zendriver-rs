@@ -91,7 +91,7 @@ base64             = "0.23"
 reqwest            = { version = "0.13", default-features = false, features = ["rustls-no-provider", "gzip", "deflate", "stream"] }
 # Direct dep purely to name the ring provider in `install_default_crypto_provider`.
 rustls             = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
-zip                = { version = "2",    default-features = false, features = ["deflate"] }
+zip                = { version = "7",    default-features = false, features = ["deflate"] }
 sha2               = "0.11"
 # `IoWrapper` lets `io::copy` feed a sha2 hasher, which does not implement io::Write.
 digest-io          = "0.1"
