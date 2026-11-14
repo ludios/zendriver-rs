@@ -29,5 +29,5 @@ tracing.workspace             = true
 
 [dev-dependencies]
 # `test-util` for the unit tests that pause and advance tokio's clock.
-tokio = { workspace = true, features = ["test-util"] }
+tokio               = { workspace = true, features = ["test-util"] }
 zendriver-transport = { workspace = true, features = ["testing"] }

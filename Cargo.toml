@@ -96,12 +96,10 @@ sha2               = "0.11"
 # `IoWrapper` lets `io::copy` feed a sha2 hasher, which does not implement io::Write.
 digest-io          = "0.1"
 dirs               = "7"
-glob               = "0.3"
 uuid               = { version = "1",     features = ["v4"] }
 psl                = "2"
 
 # Dev-deps
-tokio-test         = { version = "0.4" }
 wiremock           = { version = "0.6" }
 insta              = { version = "1",     features = ["yaml", "json"] }
 serial_test        = { version = "3" }
