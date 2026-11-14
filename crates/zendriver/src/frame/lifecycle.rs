@@ -53,7 +53,9 @@ use serde::de::DeserializeOwned;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{trace, warn};
-use zendriver_transport::{RawEvent, SessionEnd, SessionEvents, SessionHandle};
+use zendriver_transport::{
+    CallError, RawEvent, SessionEnd, SessionEvents, SessionHandle, TransportError,
+};
 
 use crate::frame::Frame;
 use crate::tab::TabInner;
@@ -157,12 +159,17 @@ pub(crate) async fn run(
     let _stop_enable = enable_cancel.clone().drop_guard();
     tokio::spawn(async move {
         tokio::select! {
-            // Cancellation first: a tab that is being dropped also closes its
-            // session, and the call's error for that mustn't be logged.
-            biased;
             () = enable_cancel.cancelled() => {}
-            res = enable_session.call("Page.enable", serde_json::json!({})) => {
-                if let Err(e) = res {
+            res = enable_session.call("Page.enable", serde_json::json!({})) => match res {
+                Ok(_) => {}
+                // The tab's session or socket ended (the tab was closed or
+                // dropped, or Chrome went away): no failure of the command.
+                Err(CallError::Transport(
+                    TransportError::Disconnected
+                    | TransportError::Shutdown
+                    | TransportError::SessionDetached,
+                )) => {}
+                Err(e) => {
                     warn!(error = %e, "frame::lifecycle: Page.enable failed; frame events may be inactive");
                 }
             }
