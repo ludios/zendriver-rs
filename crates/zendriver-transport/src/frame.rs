@@ -1,5 +1,7 @@
-//! CDP frame envelope types: the id / method / session_id envelope that CDP
-//! requires on the wire, around JSON parameters.
+//! CDP frame types: the outbound command (`id`, `method`, `params`, and an
+//! optional `sessionId`), the inbound response or event, and the events as
+//! the actor passes them on. Parameters, results, and event payloads all stay
+//! `serde_json::Value`s.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

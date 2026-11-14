@@ -40,7 +40,7 @@ The durations mix the model with how it's played back. ghost-cursor's are 16.7 m
 ### cursorflow 0.3.0: the best model, but orphaned
 
 - **Status:** MIT. The crate exists only on crates.io: its GitHub repo and the author's account return 404, and the publisher (`waterflow256`) has no public repos. Four versions came out between 2026-05-29 and 2026-09-24, with 85 downloads in total and no dependents.
-- **Dependencies:** rand 0.10 and rand_distr 0.6. zendriver's core uses rand 0.9; in this workspace only `rmcp`, in zendriver-mcp, pulls in rand 0.10. There's no `unsafe` and no build script.
+- **Dependencies:** rand 0.10 and rand_distr 0.6. zendriver's core has used rand 0.10 since 2026-11-14 (it used 0.9 when this section was written). There's no `unsafe` and no build script.
 - **Timing:** the primary movement's duration follows Fitts' law (0.16 s + 0.15 s per bit of `log2(distance / width + 1)`), with a log-normal spread.
 - **Landing:** the landing error grows with speed (Meyer's optimized-submovement model). It is shifted so that `overshoot_tendency` is the chance that the primary movement lands past the aim point, with the setting clamped to 0.1–99.9%; a test checks this. That differs from how often the whole path passes the target, which corrections and blending also affect.
 - **Corrections:** while the cursor rests outside the target, up to three corrections follow. Each one either blends into the end of the one before (half the time) or starts after a log-normal pause (median 85 ms, halved when the correction reverses direction). The last allowed one always lands inside the target.
@@ -102,12 +102,12 @@ The durations mix the model with how it's played back. ghost-cursor's are 16.7 m
 
 ## Decisions (settled 2026-11-07)
 
-1. **Port cursorflow's model** to `crates/zendriver/src/input/motion.rs`, on rand 0.9.
+1. **Port cursorflow's model** to `crates/zendriver/src/input/motion.rs`, on rand 0.10.
    - **Drop what we don't use:** the multi-target `generate` and `merge`, and the `Trajectory` column type. Keep clamping, but clamp to the viewport.
    - **Keep its statistical tests.**
    - **Licence:** keep cursorflow's whole MIT notice ("Copyright (c) 2026 xth24" plus the permission text) with the ported code, in the header of each ported file. Its upstream repo is gone, so take the text from the crates.io tarball of 0.3.0.
-   - **Normal draws:** cursorflow draws normals through rand_distr 0.6, which needs rand 0.10. On rand 0.9, write a Box-Muller normal (about five lines, as veilus does) instead of adding rand_distr 0.5 to the core crate. Log-normal draws are `exp(normal)`. The Beta draw is used only by `merge`, which we drop.
-   - **Rejected:** depending on `cursorflow = "=0.3.0"`, which would add rand 0.10 to the core crate with nobody upstream to fix bugs. Also rejected: a smaller generator of our own, which would leave out the corrections and tremor.
+   - **Normal draws (open again):** cursorflow draws normals through rand_distr 0.6, which needs rand 0.10. While the core crate was on rand 0.9, the choice was a Box-Muller normal (about five lines, as veilus does) instead of adding rand_distr 0.5. Now that the core is on rand 0.10, rand_distr 0.6 would fit it too, so choose again between the two. Log-normal draws are `exp(normal)`. The Beta draw is used only by `merge`, which we drop.
+   - **Rejected:** depending on `cursorflow = "=0.3.0"`, which has nobody upstream to fix bugs. (The other reason given on 2026-11-07, that it would add rand 0.10 to the core crate, no longer holds.) Also rejected: a smaller generator of our own, which would leave out the corrections and tremor.
 2. **Replace `InputProfile`'s mouse fields.** `mouse_speed_px_per_ms`, `jitter_amplitude_px` and `overshoot_rate` give way to the model's own settings: speed factor, precision, nervousness, overshoot tendency, maximum phases, jerk smoothness and arc direction. This is a breaking change to a public type.
 3. **`click` and `hover` end where the cursor comes to rest.** That's a random point inside the element's box, like a person's, so the actionability gate hit-tests that point instead of the center.
 4. **Move the mouse while the page is idle, with real CDP moves,** under `spoofed` stealth (the condition the deleted `mouse.js` had). Moves through the new model produce trusted events. Real moves reach real page handlers, unlike `mouse.js`'s direct calls to listeners, so item 7 sets the limits.

@@ -223,11 +223,12 @@ fn emit_tier(
         .as_str()
         .and_then(chrome_version)
         .unwrap_or("unknown");
-    // `long_os_version` is the human-facing one ("Windows 11 Pro", "MacOS
-    // 15.2"); the kernel/build number beside it is what distinguishes two
-    // machines running the same marketing version. An earlier revision used
-    // `kernel_version` alone, which on Windows is the bare build number and
-    // reads as "Windows 21996" — true, but it drops which Windows that is.
+    // `long_os_version` is the human-facing one ("Windows 11 Pro", "macOS
+    // 15.2 Sequoia"); the kernel/build number beside it is what
+    // distinguishes two machines running the same marketing version. An
+    // earlier revision used `kernel_version` alone, which on Windows is the
+    // bare build number and reads as "Windows 21996" — true, but it drops
+    // which Windows that is.
     let os = match (
         sysinfo::System::long_os_version(),
         sysinfo::System::kernel_version(),
