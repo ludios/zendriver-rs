@@ -58,6 +58,15 @@ pub struct SolveInput {
     /// raising is a safe knob for slow / sandboxed environments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_interval_ms: Option<u64>,
+    /// Keep looking for a challenge marker until this many milliseconds
+    /// have passed since the call started, before returning
+    /// `already_clear`. Defaults to 0: the solver decides on its first look
+    /// at the parsed page. Set it when a script adds the widget after the
+    /// page has loaded, e.g. right after a click that brings up a
+    /// Turnstile. A marker seen in time makes the solve go on as usual until
+    /// `timeout_ms`; a value above `timeout_ms` counts as equal to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_for_challenge_ms: Option<u64>,
     /// Override the page markers that identify the Turnstile widget. Omit to
     /// use the lib's defaults, which track Cloudflare's current markup.
     /// Cloudflare owns this markup and changes it without notice, so an
@@ -165,6 +174,9 @@ fn configure<'a>(mut bypass: CloudflareBypass<'a>, input: SolveInput) -> Cloudfl
     if let Some(p) = input.poll_interval_ms {
         bypass = bypass.poll_interval(Duration::from_millis(p));
     }
+    if let Some(w) = input.wait_for_challenge_ms {
+        bypass = bypass.wait_for_challenge(Duration::from_millis(w));
+    }
     if let Some(selectors) = input.selectors {
         bypass = bypass.selectors(selectors.into_lib());
     }
@@ -185,9 +197,10 @@ fn configure<'a>(mut bypass: CloudflareBypass<'a>, input: SolveInput) -> Cloudfl
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     /// The page showed no challenge marker when the solver first saw it
-    /// parsed, and none before; the call returns at once. It says only that
-    /// no Turnstile challenge was found: a widget a script mounts after that
-    /// first look is not waited for, and Cloudflare's block pages ("Sorry,
+    /// parsed after `wait_for_challenge_ms` (0 by default), and none
+    /// before; without that window, the call returns at once. It says only
+    /// that no Turnstile challenge was found: a widget a script mounts after
+    /// that look is not waited for, and Cloudflare's block pages ("Sorry,
     /// you have been blocked") carry no marker either. `token` will be
     /// `None`.
     AlreadyClear,
@@ -289,6 +302,7 @@ mod tests {
             SolveInput {
                 timeout_ms: 100,
                 poll_interval_ms: None,
+                wait_for_challenge_ms: None,
                 selectors: None,
                 click_policy: None,
             },
@@ -305,7 +319,9 @@ mod tests {
     /// wiring branches from the tool left this module green.
     ///
     /// So drive a real bypass over a mock CDP connection and read the wire.
-    /// The fake page puts the widget's frame at the request's host, so the
+    /// The fake page shows no marker on the first look, so the driver gets
+    /// past it only if the request's `wait_for_challenge_ms` reached it;
+    /// it then puts the widget's frame at the request's host, so the
     /// driver finds the widget only if the request's marker reached the
     /// frame lookup; and the click must land where the request's fractions
     /// put it — 7% / 50% of the same box would be (105.6, 220), so neither
@@ -317,22 +333,27 @@ mod tests {
         use zendriver::{CloudflareBypass, SessionHandle};
         use zendriver_transport::testing::MockConnection;
 
-        /// The fake page's answer to each command the driver sends: a
-        /// challenge page whose widget, an 80×40 box at (100, 200), is held
-        /// by a frame at the request's host. Its token shows from the
-        /// second poll on.
-        fn answer(method: &str, polls: usize) -> Value {
+        /// The fake page's answer to each command the driver sends on its
+        /// `tick`th tick (counting from 1): a parsed page without any marker
+        /// on the first, then a challenge page whose widget, an 80×40 box at
+        /// (100, 200), is held by a frame at the request's host. Its token
+        /// shows from the third tick on.
+        fn answer(method: &str, tick: usize) -> Value {
             let widget = json!({ "x": 100.0, "y": 200.0, "width": 80.0, "height": 40.0 });
+            let mut frames = json!([]);
+            if tick > 1 {
+                frames = json!([{ "frame": { "id": "W", "url": "https://gate.alien.invalid/w" } }]);
+            }
             match method {
                 "Runtime.evaluate" => {
-                    let token = if polls > 1 { json!("T") } else { Value::Null };
+                    let token = if tick > 2 { json!("T") } else { Value::Null };
                     json!({ "result": { "type": "object", "value": {
-                        "token": token, "markers": true, "loading": false,
+                        "token": token, "markers": tick > 1, "loading": false,
                     } } })
                 }
                 "Page.getFrameTree" => json!({ "frameTree": {
                     "frame": { "id": "MAIN", "loaderId": "D1" },
-                    "childFrames": [{ "frame": { "id": "W", "url": "https://gate.alien.invalid/w" } }],
+                    "childFrames": frames,
                 } }),
                 "Page.createIsolatedWorld" => json!({ "executionContextId": 1 }),
                 "Target.getTargets" => json!({ "targetInfos": [] }),
@@ -351,6 +372,7 @@ mod tests {
         let input = SolveInput {
             timeout_ms: 5_000,
             poll_interval_ms: Some(1),
+            wait_for_challenge_ms: Some(5_000),
             selectors: Some(SelectorsInput {
                 iframe_src_contains: Some("gate.alien.invalid".into()),
                 ..SelectorsInput::default()
@@ -371,17 +393,18 @@ mod tests {
         };
 
         let serving = async {
-            let mut polls = 0;
+            // Each tick starts with the driver's one `Page.getFrameTree`.
+            let mut tick = 0;
             let mut point = None;
             while let Some((method, id)) = mock.recv_cmd_timeout(Duration::from_millis(300)).await {
                 let params = mock.last_sent()["params"].clone();
-                if method == "Runtime.evaluate" {
-                    polls += 1;
+                if method == "Page.getFrameTree" {
+                    tick += 1;
                 }
                 if params["type"] == "mousePressed" {
                     point = Some((params["x"].as_f64().unwrap(), params["y"].as_f64().unwrap()));
                 }
-                mock.reply(id, answer(&method, polls)).await;
+                mock.reply(id, answer(&method, tick)).await;
             }
             point
         };
@@ -390,7 +413,8 @@ mod tests {
         assert_eq!(
             point,
             Some((140.0, 210.0)),
-            "the click missed the widget at the request's host, or ignored the request's fractions"
+            "the run ended on its bare first look, or the click missed the widget at the \
+             request's host, or ignored the request's fractions"
         );
         assert!(matches!(
             outcome.unwrap(),

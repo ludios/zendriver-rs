@@ -1111,6 +1111,11 @@ excluded = "geometry carried by ClickTarget into the on_click callback; callback
 api = "zendriver::CloudflareBypass::on_click"
 excluded = "callback API; no request/response tool shape"
 
+# Not baseline-visible either, for the same reason as `on_click` above.
+[[entry]]
+api = "zendriver::CloudflareBypass::wait_for_challenge"
+covered = "browser_solve_turnstile.wait_for_challenge_ms"
+
 # ── connect endpoint errors (2026-11-01) ────────────────────────────────────
 [[entry]]
 api = "zendriver::error::BrowserError::ConnectEndpoint"
