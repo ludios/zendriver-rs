@@ -119,9 +119,9 @@ runs in another renderer process than its page's (an out-of-process
 iframe), as a target of its own, which Chrome reports only to the
 session of its parent frame's target. So the first observer in the chain
 turns on auto-attach on the session of every page, and of every
-out-of-process iframe, while it is paused. Each out-of-process iframe is
-then paused before its first script too, and the same observer chain
-runs on it: that is how the stealth setup, and what your own observers
+out-of-process iframe, while it is paused. Each new out-of-process
+iframe is then paused before its first script too, and the same observer
+chain runs on it: that is how the stealth setup, and what your own observers
 set up, reaches the cross-site iframes of a page. A page's dedicated
 workers and worklets attach the same way, only because Chrome wouldn't
 start them otherwise; zendriver sets nothing up in them, keeps them from

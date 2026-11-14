@@ -6,7 +6,7 @@
 
 This is [ludios/zendriver-rs](https://github.com/ludios/zendriver-rs), an LLM-authored fork of [TurtIeSocks/zendriver-rs](https://github.com/TurtIeSocks/zendriver-rs). It began with an AI review of upstream's code and with runs against real sites, and it has fixed many of the bugs that those found, most of them with a test that runs against real Chrome. [TODO.md](TODO.md) lists what is still open.
 
-The fork branched from upstream in September 2026. Of upstream's changes since then (up to its `main` of 2026-11-08, `26c4f09c2`), the fork has its own versions of those that applied to it: out-of-process iframes attach and get the stealth setup, every `--disable-features` switch is merged into one, and the noise on `measureText` is the same in every read.
+The fork branched from upstream in September 2026. Of upstream's changes since then (up to its `main` of 2026-11-08, `26c4f09c2`), the fork has its own versions of those that applied to it, among them: out-of-process iframes attach and get the stealth setup, every `--disable-features` switch is merged into one, and the noise on `measureText` is the same in every read.
 
 The fork isn't on crates.io. The crates there, the docs.rs pages and the hosted book that the rest of this README links to are all upstream's, and the fork's API differs from upstream's in places (interception most of all). The fork's own book is in [docs/book/src/](docs/book/src/). To use the fork:
 

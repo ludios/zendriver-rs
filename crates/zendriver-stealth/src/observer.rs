@@ -225,9 +225,10 @@ fn headless_screen_switches(screen: &ScreenSpec) -> Result<Vec<String>, StealthE
 
 /// Observer that applies a [`StealthProfile`] + [`Fingerprint`] to every page
 /// target, and to every out-of-process iframe target: such an iframe runs in
-/// another renderer process than its page's, so nothing set on the page's
-/// session reaches it. (An iframe in its page's process isn't a target; the
-/// page's setup covers it.) Workers and worklets get no setup.
+/// another renderer process than its page's, where the overrides and the
+/// script of the page's session don't apply. (An iframe in its page's process
+/// isn't a target; the page's setup covers it.) Workers and worklets get no
+/// setup.
 #[derive(Debug)]
 pub struct StealthObserver {
     profile: StealthProfile,
@@ -420,12 +421,15 @@ impl TargetObserver for StealthObserver {
 
     async fn on_target_attached(&self, session: PausedSession<'_>) -> Result<(), ObserverError> {
         // An out-of-process iframe is a target of its own, in another
-        // renderer process than its page's, so no override or script of the
-        // page's session reaches it: it gets the page's whole setup. Workers
-        // and worklets get none.
-        if !matches!(session.target_info.kind.as_str(), "page" | "iframe") {
-            return Ok(());
-        }
+        // renderer process than its page's, where the overrides and the
+        // script of the page's session don't apply: it gets the page's
+        // setup, less the geolocation (see below). Workers and worklets get
+        // none.
+        let is_page = match session.target_info.kind.as_str() {
+            "page" => true,
+            "iframe" => false,
+            _ => return Ok(()),
+        };
         if self.profile.kind() == ProfileKind::Off {
             return Ok(());
         }
@@ -580,7 +584,10 @@ impl TargetObserver for StealthObserver {
                 Err(e) => return Err(e.into()),
             }
         }
-        if let Some(ref geo) = self.geolocation {
+        // Only on the page's session: Chrome keeps one geolocation override
+        // for the whole tab, and clears it when the session that set it ends,
+        // so an iframe's session would take the tab's override with it.
+        if let Some(geo) = self.geolocation.as_ref().filter(|_| is_page) {
             // Sets the value the Geolocation API *would* return — it does
             // NOT grant the `geolocation` permission. Chrome still gates the
             // API behind a permission prompt/grant; auto-granting it here
@@ -1461,20 +1468,14 @@ mod persona_reaches_cdp_tests {
     /// `missing`: it answers them `-32601`, as Chrome answers a command it
     /// doesn't have.
     async fn drive_attach_without(observer: StealthObserver, missing: &[&str]) -> Vec<Value> {
-        let refused: Vec<_> = missing
-            .iter()
-            .map(|method| (*method, -32601, "wasn't found"))
-            .collect();
-        drive_attach_of("page", observer, &refused).await
+        drive_attach_of("page", observer, missing).await
     }
 
-    /// [`drive_attach`] for a target of type `kind`, against a Chrome that
-    /// answers each command in `refused` (`(method, code, message)`) with
-    /// that error.
+    /// [`drive_attach_without`] for a target of type `kind`.
     async fn drive_attach_of(
         kind: &str,
         observer: StealthObserver,
-        refused: &[(&str, i32, &str)],
+        missing: &[&str],
     ) -> Vec<Value> {
         const FRAME_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -1499,9 +1500,11 @@ mod persona_reaches_cdp_tests {
         let mut frames = Vec::new();
         while let Some((method, id)) = mock.recv_cmd_timeout(FRAME_BUDGET).await {
             frames.push(mock.last_sent().clone());
-            match refused.iter().find(|(refused, ..)| *refused == method) {
-                Some((_, code, message)) => mock.reply_err(id, *code, message).await,
-                None => mock.reply(id, json!({})).await,
+            if missing.contains(&method.as_str()) {
+                mock.reply_err(id, -32601, &format!("'{method}' wasn't found"))
+                    .await;
+            } else {
+                mock.reply(id, json!({})).await;
             }
             if method == "Runtime.runIfWaitingForDebugger" || method == "Target.detachFromTarget" {
                 break;
@@ -1560,35 +1563,36 @@ mod persona_reaches_cdp_tests {
         StealthObserver::with_persona(StealthProfile::spoofed(), fingerprint, persona)
     }
 
-    /// An out-of-process iframe gets its page's whole setup.
+    /// An out-of-process iframe gets its page's setup, less the geolocation
+    /// override, which is the tab's: Chrome clears it when the session that
+    /// set it ends.
     #[tokio::test]
-    async fn an_out_of_process_iframe_gets_its_pages_setup() {
+    async fn an_out_of_process_iframe_gets_its_pages_setup_less_the_geolocation() {
         let page = method_names(&drive_attach(observer_with_every_override()).await);
         let iframe =
             method_names(&drive_attach_of("iframe", observer_with_every_override(), &[]).await);
-        assert_eq!(
-            page,
-            [
-                "Page.enable",
-                "Emulation.setUserAgentOverride",
-                "Emulation.setHardwareConcurrencyOverride",
-                "Emulation.setCPUPerformanceOverride",
-                "Emulation.setFocusEmulationEnabled",
-                "Emulation.setTimezoneOverride",
-                "Emulation.setLocaleOverride",
-                "Emulation.setGeolocationOverride",
-                "Page.addScriptToEvaluateOnNewDocument",
-                "Runtime.runIfWaitingForDebugger",
-            ]
-        );
-        assert_eq!(iframe, page);
+        for method in [
+            "Emulation.setUserAgentOverride",
+            "Emulation.setFocusEmulationEnabled",
+            "Emulation.setTimezoneOverride",
+            "Emulation.setLocaleOverride",
+            "Emulation.setGeolocationOverride",
+            "Page.addScriptToEvaluateOnNewDocument",
+        ] {
+            assert!(page.iter().any(|m| m == method), "{method}: {page:?}");
+        }
+        let mut expected = page;
+        expected.retain(|m| m != "Emulation.setGeolocationOverride");
+        assert_eq!(iframe, expected);
     }
 
-    /// A worker is released without any setup.
+    /// A worker or worklet is released without any setup.
     #[tokio::test]
-    async fn a_worker_gets_no_setup() {
-        let frames = drive_attach_of("worker", observer_with_every_override(), &[]).await;
-        assert_eq!(method_names(&frames), ["Runtime.runIfWaitingForDebugger"]);
+    async fn a_worker_or_worklet_gets_no_setup() {
+        for kind in ["worker", "worklet"] {
+            let frames = drive_attach_of(kind, observer_with_every_override(), &[]).await;
+            assert_eq!(method_names(&frames), ["Runtime.runIfWaitingForDebugger"]);
+        }
     }
 
     /// A persona's platform reaches the UA, the UA client hints and

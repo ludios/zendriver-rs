@@ -204,8 +204,8 @@ pub struct TargetInfo {
     /// CDP target id (stable across `attach` / `detach` cycles).
     #[serde(rename = "targetId")]
     pub target_id: String,
-    /// Target kind (`"page"`, `"iframe"`, `"worker"`, ...). The stealth
-    /// observer keys off this to skip workers + iframes.
+    /// Target kind (`"page"`, `"iframe"`, `"worker"`, ...). Observers key off
+    /// this: the stealth observer sets up `page` and `iframe` targets only.
     #[serde(rename = "type")]
     pub kind: String,
     /// Initial URL the target is at — typically `about:blank` at attach time.

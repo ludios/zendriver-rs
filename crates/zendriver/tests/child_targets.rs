@@ -2,13 +2,14 @@
 //! its cross-site iframes, its dedicated workers and its worklets.
 //!
 //! A cross-site iframe runs in another renderer process (it is an
-//! out-of-process iframe), where no override or script of the page's session
-//! reaches: zendriver has to attach it and set it up like the page, so that
-//! the identity it reads is its page's. Without that, a headless launch's
-//! cross-site iframes report `HeadlessChrome`, and the host's locale and
-//! timezone. Those tests serve the page from `127.0.0.1` and its iframes from
-//! `localhost`: two sites, and both secure contexts, which
-//! `navigator.userAgentData` and `navigator.deviceMemory` need.
+//! out-of-process iframe), where the overrides and the script of the page's
+//! session don't apply: zendriver has to attach it and set it up like the
+//! page, so that the identity it reads is its page's. Without that, a
+//! headless launch's cross-site iframes report `HeadlessChrome`, and the
+//! host's locale and timezone. These tests serve the page from `127.0.0.1`
+//! and its iframes from `localhost`: two sites, and both secure contexts,
+//! which `navigator.userAgentData`, `navigator.deviceMemory` and
+//! `navigator.geolocation` need.
 //!
 //! Attaching those iframes makes Chrome hold back the page's dedicated
 //! workers and worklets until zendriver attaches and releases them too.
@@ -20,97 +21,93 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tracing::Level;
 use zendriver::stealth::StealthProfile;
-use zendriver::{Browser, BrowserBuilder, Persona};
+use zendriver::{Browser, BrowserBuilder, Persona, Tab};
 use zendriver_testkit::axum::Router;
 use zendriver_testkit::axum::extract::Host;
 use zendriver_testkit::axum::http::header::CONTENT_TYPE;
 use zendriver_testkit::axum::response::Html;
 use zendriver_testkit::axum::routing::get;
 use zendriver_testkit::{
-    FixtureServer, PINNED_HARDWARE, assert_eventually, eval, launch_for_test, load,
+    FixtureServer, PINNED_HARDWARE, TestBrowser, assert_eventually, eval, launch_for_test, load,
 };
 
-/// JS that evaluates to a promise of what a document reads of the browser's
-/// identity, including the user agent that a dedicated worker of the
-/// document reads (so the promise settles only if that worker runs).
-const IDENTITY_JS: &str = r#"(async () => {
-  const worker = new Worker(URL.createObjectURL(new Blob(['postMessage(navigator.userAgent)'])));
-  const uaData = navigator.userAgentData;
-  const hints = await uaData.getHighEntropyValues(
-    ['architecture', 'fullVersionList', 'platformVersion', 'uaFullVersion']);
-  return {
-    userAgent: navigator.userAgent,
-    workerUserAgent: await new Promise(resolve => worker.onmessage = e => resolve(e.data)),
-    platform: navigator.platform,
-    brands: uaData.brands,
-    hints,
-    languages: navigator.languages,
-    locale: Intl.DateTimeFormat().resolvedOptions().locale,
-    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    hardwareConcurrency: navigator.hardwareConcurrency,
-    deviceMemory: navigator.deviceMemory,
-    webdriver: navigator.webdriver,
-  };
-})()"#;
+/// How long a page's iframes get to post what a test waits for.
+const WITHIN: Duration = Duration::from_secs(10);
 
-/// A fixture server with `/identity-page`, which has two iframes of
-/// `/identity-frame` on `localhost`, and collects in `window.frameIdentities`
-/// the [`IDENTITY_JS`] that each one posts to it.
-async fn server() -> FixtureServer {
-    let frame = format!(
-        "<!doctype html><script>{IDENTITY_JS}.then(identity => parent.postMessage(identity, '*'))</script>"
-    );
-    let page = |Host(host): Host| async move {
-        let frame_url = format!(
-            "http://{}/identity-frame",
-            host.replace("127.0.0.1", "localhost")
-        );
+/// A fixture server with `/page`, which has `frames` iframes of `/frame` on
+/// `localhost`, and collects in `window.fromFrames` what they post to it.
+/// `frame_script` is the script of `/frame`. Both documents have the
+/// testkit's `zdIdentity()`.
+async fn server(frame_script: &'static str, frames: usize) -> FixtureServer {
+    const IDENTITY: &str = "<script src='/probe/identity.js'></script>";
+    let page = move |Host(host): Host| async move {
+        let frame_url = format!("http://{}/frame", host.replace("127.0.0.1", "localhost"));
+        let iframes = format!("<iframe src='{frame_url}'></iframe>").repeat(frames);
         Html(format!(
-            "<!doctype html>\
-             <script>window.frameIdentities = [];\
-             onmessage = e => window.frameIdentities.push(e.data)</script>\
-             <iframe src='{frame_url}'></iframe><iframe src='{frame_url}'></iframe>"
+            "<!doctype html>{IDENTITY}\
+             <script>window.fromFrames = [];\
+             onmessage = e => window.fromFrames.push(e.data)</script>{iframes}"
         ))
     };
+    let frame = Html(format!(
+        "<!doctype html>{IDENTITY}<script>{frame_script}</script>"
+    ));
     let routes = Router::new()
-        .route("/identity-page", get(page))
-        .route("/identity-frame", get(move || async move { Html(frame) }));
+        .route("/page", get(page))
+        .route("/frame", get(move || async move { frame }));
     FixtureServer::start_with(routes).await
 }
 
-/// Load `/identity-page` in a browser launched from `builder`, check that
-/// both of its cross-site iframes read the identity that the page reads, and
-/// return that identity.
-async fn identity_shared_with_cross_site_iframes(builder: BrowserBuilder) -> Value {
-    let server = server().await;
-    let browser = launch_for_test(builder).await;
+/// Load `server`'s `/page` in `browser`'s main tab, and return the tab.
+async fn load_page(browser: &TestBrowser, server: &FixtureServer) -> Tab {
     let tab = browser.main_tab();
-    load(&tab, &server.url("127.0.0.1", "/identity-page")).await;
-    let posted = || async { eval(&tab, "window.frameIdentities.length").await == json!(2) };
-    assert_eventually(
-        Duration::from_secs(10),
-        "both iframes posted their identity",
-        posted,
-    )
-    .await;
-    let page = eval(&tab, IDENTITY_JS).await;
-    let frames = eval(&tab, "window.frameIdentities").await;
-    let iframe_targets = browser
+    load(&tab, &server.url("127.0.0.1", "/page")).await;
+    tab
+}
+
+/// What the iframes of `tab`'s page have posted to it, once there are
+/// `count` such messages.
+async fn posted(tab: &Tab, count: usize) -> Value {
+    let all_posted = || async { eval(tab, "window.fromFrames.length").await == json!(count) };
+    assert_eventually(WITHIN, "the iframes posted to their page", all_posted).await;
+    eval(tab, "window.fromFrames").await
+}
+
+/// The number of `iframe` targets in `browser`: its out-of-process iframes.
+async fn iframe_targets(browser: &TestBrowser) -> usize {
+    let targets = browser
         .cdp()
         .call_raw("Target.getTargets", json!({}), None)
         .await
-        .expect("Target.getTargets")["targetInfos"]
-        .as_array()
-        .expect("targetInfos")
-        .iter()
-        .filter(|target| target["type"] == "iframe")
-        .count();
+        .expect("Target.getTargets");
+    let targets = targets["targetInfos"].as_array().expect("targetInfos");
+    targets.iter().filter(|t| t["type"] == "iframe").count()
+}
+
+/// JS that evaluates to a promise of what a document reads of the browser's
+/// identity.
+const IDENTITY_JS: &str = "(async () => ({
+  identity: await zdIdentity(),
+  locale: Intl.DateTimeFormat().resolvedOptions().locale,
+}))()";
+
+/// Check that the two cross-site iframes of a page, in a browser launched
+/// from `builder`, read the identity that the page reads ([`IDENTITY_JS`]),
+/// and return that identity.
+async fn identity_shared_with_cross_site_iframes(builder: BrowserBuilder) -> Value {
+    const FRAME_SCRIPT: &str = "(async () => ({
+        identity: await zdIdentity(),
+        locale: Intl.DateTimeFormat().resolvedOptions().locale,
+      }))().then(identity => parent.postMessage(identity, '*'))";
+    let server = server(FRAME_SCRIPT, 2).await;
+    let browser = launch_for_test(builder).await;
+    let tab = load_page(&browser, &server).await;
+    let frames = posted(&tab, 2).await;
+    let page = eval(&tab, IDENTITY_JS).await;
+    let out_of_process = iframe_targets(&browser).await;
     browser.logs().assert_none_at_least(Level::WARN);
     browser.close().await;
-    assert_eq!(
-        iframe_targets, 2,
-        "the iframes must be out-of-process, or this test checks nothing"
-    );
+    assert_eq!(out_of_process, 2, "the iframes must be out-of-process");
     assert_eq!(frames, json!([page, page]), "the iframes' identities");
     page
 }
@@ -124,13 +121,12 @@ fn german() -> Persona {
 
 #[tokio::test]
 async fn cross_site_iframes_read_the_pages_identity_under_native() {
-    let identity =
-        identity_shared_with_cross_site_iframes(Browser::builder().persona_overlay(german())).await;
-    let user_agent = identity["userAgent"].as_str().expect("userAgent");
+    let builder = Browser::builder().persona_overlay(german());
+    let seen = identity_shared_with_cross_site_iframes(builder).await;
+    let user_agent = seen["identity"]["userAgent"].as_str().expect("userAgent");
     assert!(!user_agent.contains("Headless"), "{user_agent}");
-    assert_eq!(identity["workerUserAgent"], identity["userAgent"]);
-    assert_eq!(identity["locale"], "de-DE");
-    assert_eq!(identity["timeZone"], "Europe/Berlin");
+    assert_eq!(seen["locale"], "de-DE");
+    assert_eq!(seen["identity"]["timeZone"], "Europe/Berlin");
 }
 
 /// Under `spoofed`, the bootstrap script reaches the iframes too: it is what
@@ -141,16 +137,84 @@ async fn cross_site_iframes_read_the_pages_identity_under_spoofed() {
     let builder = Browser::builder()
         .stealth(StealthProfile::spoofed())
         .persona_overlay(german().overlay(pinned));
-    let identity = identity_shared_with_cross_site_iframes(builder).await;
-    assert_eq!(identity["hardwareConcurrency"], 1);
-    assert_eq!(identity["deviceMemory"], 1);
-    assert_eq!(identity["timeZone"], "Europe/Berlin");
+    let seen = identity_shared_with_cross_site_iframes(builder).await;
+    assert_eq!(seen["identity"]["hardwareConcurrency"], 1);
+    assert_eq!(seen["identity"]["deviceMemory"], 1);
+    assert_eq!(seen["identity"]["timeZone"], "Europe/Berlin");
+}
+
+/// Focus emulation reaches the iframes too: once its page focuses a
+/// cross-site iframe, the iframe's document has focus, as in a browser
+/// window that has the user's focus. Before that, only the page has.
+#[tokio::test]
+async fn a_focused_cross_site_iframe_has_focus() {
+    const FRAME_SCRIPT: &str = "const report = () => parent.postMessage(document.hasFocus(), '*');
+        onfocus = report;
+        report()";
+    let server = server(FRAME_SCRIPT, 1).await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = load_page(&browser, &server).await;
+    assert_eq!(posted(&tab, 1).await, json!([false]));
+    assert_eq!(eval(&tab, "document.hasFocus()").await, json!(true));
+    assert_eq!(iframe_targets(&browser).await, 1);
+
+    eval(&tab, "document.querySelector('iframe').focus()").await;
+    assert_eq!(posted(&tab, 2).await, json!([false, true]));
+    browser.close().await;
+}
+
+/// The geolocation override is the tab's, and Chrome clears it when the
+/// session that set it ends. So only the page's session may set it: the end
+/// of a cross-site iframe must leave it in place.
+#[tokio::test]
+async fn removing_a_cross_site_iframe_keeps_the_tabs_geolocation() {
+    const POSITION_JS: &str = "new Promise(resolve => navigator.geolocation.getCurrentPosition(
+        position => resolve([position.coords.latitude, position.coords.longitude]),
+        error => resolve(error.message),
+        {timeout: 5000}))";
+    let berlin: Persona =
+        r#"{"geolocation": {"latitude": 52.52, "longitude": 13.405, "accuracy": 10.0}}"#
+            .parse()
+            .expect("persona JSON");
+    let server = server("parent.postMessage('loaded', '*')", 1).await;
+    let browser = launch_for_test(Browser::builder().persona_overlay(berlin)).await;
+    let granted = json!({ "permissions": ["geolocation"] });
+    browser
+        .cdp()
+        .call_raw("Browser.grantPermissions", granted, None)
+        .await
+        .expect("Browser.grantPermissions");
+    let tab = load_page(&browser, &server).await;
+    posted(&tab, 1).await;
+    assert_eq!(eval(&tab, POSITION_JS).await, json!([52.52, 13.405]));
+
+    eval(&tab, "document.querySelector('iframe').remove()").await;
+    let gone = || async { iframe_targets(&browser).await == 0 };
+    assert_eventually(WITHIN, "the iframe's target is gone", gone).await;
+    assert_eq!(eval(&tab, POSITION_JS).await, json!([52.52, 13.405]));
+    browser.close().await;
+}
+
+/// `force_open_shadow_roots` reaches a cross-site iframe: the shadow root
+/// that its script asks to be closed is open.
+#[tokio::test]
+async fn force_open_shadow_roots_reaches_cross_site_iframes() {
+    const FRAME_SCRIPT: &str = "const host = document.createElement('div');
+        host.attachShadow({mode: 'closed'});
+        parent.postMessage(host.shadowRoot !== null, '*')";
+    let server = server(FRAME_SCRIPT, 1).await;
+    let browser = launch_for_test(Browser::builder().force_open_shadow_roots(true)).await;
+    let tab = load_page(&browser, &server).await;
+    let opened = posted(&tab, 1).await;
+    let out_of_process = iframe_targets(&browser).await;
+    browser.close().await;
+    assert_eq!(out_of_process, 1, "the iframe must be out-of-process");
+    assert_eq!(opened, json!([true]));
 }
 
 /// JS that evaluates to a promise of `{kind: "ran"}` for each kind of worker
 /// and worklet that a page can start, or `{kind: why}` for one that didn't
-/// run within 5 seconds. `/shared-worker.js` and `/service-worker.js` are
-/// [`worker_routes`]'.
+/// run within 5 seconds. It loads the scripts of [`worker_routes`].
 const START_WORKERS_JS: &str = r#"(async () => {
   const blob = source => URL.createObjectURL(new Blob([source], {type: 'text/javascript'}));
   const answer = worker => new Promise(resolve => worker.onmessage = e => resolve(e.data));
@@ -235,54 +299,4 @@ async fn a_pages_workers_and_worklets_start() {
             "serviceWorker": "ran",
         })
     );
-}
-
-/// Focus emulation reaches the iframes too: once its page focuses a
-/// cross-site iframe, the iframe's document has focus, as in a browser
-/// window that has the user's focus. Before that, only the page has.
-#[tokio::test]
-async fn a_focused_cross_site_iframe_has_focus() {
-    let frame = "<!doctype html><script>\
-        const report = () => parent.postMessage(document.hasFocus(), '*');\
-        onfocus = report;\
-        report()</script>";
-    let page = |Host(host): Host| async move {
-        let frame_url = format!(
-            "http://{}/focus-frame",
-            host.replace("127.0.0.1", "localhost")
-        );
-        Html(format!(
-            "<!doctype html>\
-             <script>window.frameHasFocus = [];\
-             onmessage = e => window.frameHasFocus.push(e.data)</script>\
-             <iframe src='{frame_url}'></iframe>"
-        ))
-    };
-    let routes = Router::new()
-        .route("/focus-page", get(page))
-        .route("/focus-frame", get(move || async move { Html(frame) }));
-    let server = FixtureServer::start_with(routes).await;
-    let browser = launch_for_test(Browser::builder()).await;
-    let tab = browser.main_tab();
-    load(&tab, &server.url("127.0.0.1", "/focus-page")).await;
-    let reported = |expected: Value| {
-        let tab = &tab;
-        move || {
-            let expected = expected.clone();
-            async move { eval(tab, "window.frameHasFocus").await == expected }
-        }
-    };
-    let within = Duration::from_secs(10);
-    assert_eventually(
-        within,
-        "the unfocused iframe reported",
-        reported(json!([false])),
-    )
-    .await;
-    assert_eq!(eval(&tab, "document.hasFocus()").await, json!(true));
-
-    eval(&tab, "document.querySelector('iframe').focus()").await;
-    let focused = reported(json!([false, true]));
-    assert_eventually(within, "the focused iframe reported", focused).await;
-    browser.close().await;
 }
