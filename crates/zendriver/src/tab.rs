@@ -3184,7 +3184,9 @@ impl Tab {
     /// call after any navigation: a page with no challenge marker when the
     /// run first sees it parsed returns
     /// [`ClearanceOutcome::AlreadyClear`](zendriver_cloudflare::ClearanceOutcome::AlreadyClear)
-    /// at once, with nothing clicked. Use
+    /// at once, with nothing clicked. Chain
+    /// [`wait_for_challenge`](zendriver_cloudflare::CloudflareBypass::wait_for_challenge)
+    /// for a page whose script adds the widget later. Use
     /// [`is_challenge_present`](zendriver_cloudflare::CloudflareBypass::is_challenge_present)
     /// for a one-shot probe of the widget alone.
     ///

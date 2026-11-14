@@ -17,7 +17,9 @@
 //!    Resolves to [`ClearanceOutcome::AlreadyClear`] when the first
 //!    observation of a parsed document shows no marker, and no earlier tick
 //!    saw one: a page with no challenge costs the ticks it takes to parse,
-//!    not the timeout.
+//!    not the timeout. With a
+//!    [`wait_for_challenge`](CloudflareBypass::wait_for_challenge) window,
+//!    the run first keeps looking until the window is over.
 //! 3. If a click is due and the widget is mounted, scrolls it into view
 //!    and measures it; if it is a click target (non-zero size and visible),
 //!    clicks the point the [`ClickPolicy`] chose inside it — by default
@@ -38,9 +40,9 @@
 //!    page of Cloudflare's.
 //! 5. Resolves to [`ClearanceOutcome::TimedOut`] on deadline, carrying
 //!    `saw_challenge` — `true` when challenge markers were seen but never
-//!    resolved, `false` when the page was never seen parsed and without
-//!    markers before the deadline (it was still loading, or changing under
-//!    every observation).
+//!    resolved, `false` when no marker was seen and the last observation
+//!    did not find the page parsed (it was still loading, or changing under
+//!    the observation).
 //!
 //! Every marker the evaluators look for is caller data — see
 //! [`TurnstileSelectors`] for why none of it is a literal in this crate.
@@ -79,18 +81,22 @@ pub enum ClearanceOutcome {
     /// the page before treating what you scrape next as clean.
     ChallengeGone,
     /// No challenge marker was on the page when the run first saw it
-    /// parsed, nor on any tick before: no container, no token input, no
-    /// widget, and (with the default selectors) none of the scripts that
-    /// the pages of Cloudflare's full-page challenge load. Fast path: the
-    /// run ends on that first look, so calling `wait_for_clearance` after a
-    /// navigation that met no challenge costs one poll tick, or a few while
-    /// the page is still parsing.
+    /// parsed after the
+    /// [`wait_for_challenge`](CloudflareBypass::wait_for_challenge) window
+    /// (none by default), nor on any tick before: no container, no token
+    /// input, no widget, and (with the default selectors) none of the
+    /// scripts that the pages of Cloudflare's full-page challenge load. Fast
+    /// path: without a window, the run ends on its first look at the parsed
+    /// page, so calling `wait_for_clearance` after a navigation that met no
+    /// challenge costs one poll tick, or a few while the page is still
+    /// parsing.
     ///
     /// It says only that no Turnstile challenge was found:
-    /// - It is decided once, on that first look. A widget that a page's
-    ///   script mounts later is missed, and so is a challenge whose
-    ///   navigation has not committed yet: call it after the navigation that
-    ///   may lead to a challenge has loaded (`goto`, then `wait_for_load`).
+    /// - It is decided once, on that look. A widget that a page's script
+    ///   mounts later is missed (set a `wait_for_challenge` window for a
+    ///   page that mounts one late), and so is a challenge whose navigation
+    ///   has not committed yet: call it after the navigation that may lead
+    ///   to a challenge has loaded (`goto`, then `wait_for_load`).
     /// - Cloudflare's block pages ("Sorry, you have been blocked", rate
     ///   limits) carry no Turnstile marker, so they land here too.
     /// - With a [`container`](TurnstileSelectors::container) that leaves
@@ -104,9 +110,9 @@ pub enum ClearanceOutcome {
     AlreadyClear,
     /// Deadline elapsed without a terminal clearance state. `saw_challenge`
     /// is `true` if any challenge marker (container, hidden input, or live
-    /// iframe) was ever observed. `false` means the run never saw the page
-    /// parsed and without markers either: it was still loading, or changing
-    /// under every observation, until the deadline.
+    /// iframe) was ever observed. `false` means no marker was observed, and
+    /// the last observation did not find the page parsed either: it was
+    /// still loading, or changing under the observation, at the deadline.
     /// Not a fault: a deadline in a bot-management flow is a normal "didn't
     /// finish, retry or give up" terminal.
     TimedOut { saw_challenge: bool },
@@ -147,6 +153,10 @@ type ClickHandler = Box<
 pub struct CloudflareBypass<'a> {
     pub(crate) session: &'a SessionHandle,
     pub(crate) poll_interval: Duration,
+    /// How long from the start of a run a page without markers is not yet
+    /// taken as [`ClearanceOutcome::AlreadyClear`] (see
+    /// [`wait_for_challenge`](Self::wait_for_challenge)).
+    pub(crate) challenge_wait: Duration,
     pub(crate) selectors: TurnstileSelectors,
     pub(crate) click_policy: ClickPolicy,
     pub(crate) on_click: Option<ClickHandler>,
@@ -160,6 +170,7 @@ impl std::fmt::Debug for CloudflareBypass<'_> {
         f.debug_struct("CloudflareBypass")
             .field("session", &self.session)
             .field("poll_interval", &self.poll_interval)
+            .field("challenge_wait", &self.challenge_wait)
             .field("selectors", &self.selectors)
             .field("click_policy", &self.click_policy)
             .field("on_click", &self.on_click.is_some())
@@ -169,12 +180,14 @@ impl std::fmt::Debug for CloudflareBypass<'_> {
 
 impl<'a> CloudflareBypass<'a> {
     /// Create a new bypass driver bound to `session` with a default 500ms
-    /// poll interval, the default [`TurnstileSelectors`] and the default
+    /// poll interval, no [`wait_for_challenge`](Self::wait_for_challenge)
+    /// window, the default [`TurnstileSelectors`] and the default
     /// [`ClickPolicy`].
     pub fn new(session: &'a SessionHandle) -> Self {
         Self {
             session,
             poll_interval: DEFAULT_POLL_INTERVAL,
+            challenge_wait: Duration::ZERO,
             selectors: TurnstileSelectors::default(),
             click_policy: ClickPolicy::default(),
             on_click: None,
@@ -186,6 +199,40 @@ impl<'a> CloudflareBypass<'a> {
     #[must_use]
     pub fn poll_interval(mut self, dur: Duration) -> Self {
         self.poll_interval = dur;
+        self
+    }
+
+    /// Make [`wait_for_clearance`](Self::wait_for_clearance) keep looking
+    /// for a challenge marker until `dur` has passed since the run started,
+    /// before it decides that the page has none. Defaults to zero: the run
+    /// decides on its first look at the parsed page.
+    ///
+    /// Set it for a page whose script adds the widget after the page is
+    /// parsed, e.g. a single-page app, a form that renders Turnstile when
+    /// it is submitted, or a page that asks its server first. When the run
+    /// sees a marker within `dur`, it carries on as without this option,
+    /// until a terminal or the clearance `timeout`. When it sees none, it
+    /// returns [`ClearanceOutcome::AlreadyClear`] once `dur` has passed, on
+    /// a look that finds the page parsed. A `dur` longer than the clearance
+    /// `timeout` counts as equal to it.
+    ///
+    /// ```no_run
+    /// # async fn ex(tab: &zendriver_transport::SessionHandle)
+    /// #   -> Result<(), zendriver_cloudflare::CloudflareError> {
+    /// use std::time::Duration;
+    /// use zendriver_cloudflare::CloudflareBypass;
+    ///
+    /// // This page renders its widget only after its form is submitted.
+    /// let outcome = CloudflareBypass::new(tab)
+    ///     .wait_for_challenge(Duration::from_secs(10))
+    ///     .wait_for_clearance(Duration::from_secs(30))
+    ///     .await?;
+    /// # let _ = outcome;
+    /// # Ok(()) }
+    /// ```
+    #[must_use]
+    pub fn wait_for_challenge(mut self, dur: Duration) -> Self {
+        self.challenge_wait = dur;
         self
     }
 
@@ -277,7 +324,9 @@ impl<'a> CloudflareBypass<'a> {
     /// Safe to call after any navigation has loaded: a page without a
     /// challenge marker returns [`ClearanceOutcome::AlreadyClear`] on the
     /// first look at it parsed, with nothing clicked or scrolled. Read that
-    /// variant's docs for what it does not establish.
+    /// variant's docs for what it does not establish, and
+    /// [`wait_for_challenge`](Self::wait_for_challenge) for a page whose
+    /// script adds the widget later.
     ///
     /// Handles both the **interactive** flow (challenge iframe mounts → we
     /// click it → token appears) and the **invisible** flow (no iframe;
@@ -286,7 +335,8 @@ impl<'a> CloudflareBypass<'a> {
     ///
     /// # Returns
     /// - `Ok(ClearanceOutcome::AlreadyClear)` — the first observation of the
-    ///   parsed page showed no challenge marker, and no earlier one did.
+    ///   parsed page after the `wait_for_challenge` window (none by default)
+    ///   showed no challenge marker, and no earlier one did.
     /// - `Ok(ClearanceOutcome::TokenAcquired(token))` — a configured token
     ///   input picked up a non-empty value, either after we clicked the
     ///   interactive iframe or because the page uses invisible Turnstile.
@@ -299,9 +349,10 @@ impl<'a> CloudflareBypass<'a> {
     /// - `Ok(ClearanceOutcome::TimedOut { saw_challenge })` — `timeout`
     ///   elapsed without a terminal clearance state. `saw_challenge` is
     ///   `true` if challenge markers were observed (markers present but
-    ///   never resolved); `false` if the page was still loading, or changing
-    ///   under every observation, until the deadline. Not a fault — a
-    ///   deadline here is a normal "retry or give up" signal.
+    ///   never resolved); `false` if no marker was observed and the page was
+    ///   still loading, or changing under the observation, at the deadline.
+    ///   Not a fault — a deadline here is a normal "retry or give up"
+    ///   signal.
     ///
     /// # Errors
     /// - [`CloudflareError::Call`] / [`CloudflareError::JsError`] — CDP or
@@ -323,7 +374,10 @@ impl<'a> CloudflareBypass<'a> {
         self,
         timeout: Duration,
     ) -> Result<ClearanceOutcome, CloudflareError> {
-        let deadline = Instant::now() + timeout;
+        let start = Instant::now();
+        let deadline = start + timeout;
+        // Until then, a page without markers may still be about to get one.
+        let challenge_wait_end = start + self.challenge_wait.min(timeout);
         let mut clicks: u32 = 0;
         let mut ticks_since_click: u32 = 0;
         // The document the markers were last seen on (`None` while no marker
@@ -339,6 +393,9 @@ impl<'a> CloudflareBypass<'a> {
         loop {
             let mut clicked = false;
             let mut stalled = false;
+            // This tick saw the page parsed and without markers, and no tick
+            // before it saw a marker.
+            let mut looked_clear = false;
             // `None` is a tick on which the page changed under the
             // observation. It says nothing about the challenge, so it decides
             // nothing either.
@@ -346,11 +403,13 @@ impl<'a> CloudflareBypass<'a> {
                 if let Some(token) = seen.token {
                     return Ok(ClearanceOutcome::TokenAcquired(token));
                 }
-                // The first look at a parsed document with no marker, before
-                // any tick saw one: `challenge_document` is never reset, so a
-                // marker on that look (or a loading one before it) rules this
-                // out for the rest of the run.
-                if !seen.loading && !seen.has_markers() && challenge_document.is_none() {
+                // The first look at a parsed document with no marker, once the
+                // `wait_for_challenge` window is over, before any tick saw a
+                // marker: `challenge_document` is never reset, so a marker on
+                // any earlier look (a loading one included) rules this out
+                // for the rest of the run.
+                looked_clear = !seen.loading && !seen.has_markers() && challenge_document.is_none();
+                if looked_clear && Instant::now() >= challenge_wait_end {
                     return Ok(ClearanceOutcome::AlreadyClear);
                 }
 
@@ -460,6 +519,12 @@ impl<'a> CloudflareBypass<'a> {
                 // the challenge, if not yet read: not one that never resolved.
                 if replacement_loading {
                     return Ok(ClearanceOutcome::ChallengeGone);
+                }
+                // The `wait_for_challenge` window is no longer than the run,
+                // so a look this close to the deadline decides the run as one
+                // after the window would.
+                if looked_clear {
+                    return Ok(ClearanceOutcome::AlreadyClear);
                 }
                 return Ok(ClearanceOutcome::TimedOut {
                     saw_challenge: challenge_document.is_some(),
@@ -955,6 +1020,79 @@ mod tests {
         );
         assert_eq!(polls(&calls), 2, "decided on the first parsed look");
         assert!(!saw(&calls, MOUSE) && !saw(&calls, SCROLL));
+    }
+
+    /// With a `wait_for_challenge` window, a page without markers is not
+    /// yet clear: a widget that its script mounts a few ticks later is
+    /// found, and clicked.
+    #[tokio::test]
+    async fn wait_for_challenge_finds_a_widget_mounted_after_the_first_look() {
+        /// Ticks that show the parsed page without any marker.
+        const BARE_TICKS: usize = 3;
+
+        let (outcome, calls) = run(
+            |b| b.wait_for_challenge(Duration::from_secs(5)),
+            |tick| match tick {
+                t if t < BARE_TICKS => Page::challenge().no_light_markers(),
+                BARE_TICKS => Page::challenge().widget_at(widget_rect()),
+                _ => Page::challenge().token(END_TOKEN),
+            },
+        )
+        .await;
+
+        assert_eq!(token_of(outcome), END_TOKEN);
+        assert_eq!(presses(&calls), vec![(BARE_TICKS, (DEFAULT_X, 220.0))]);
+    }
+
+    /// Run a driver with a 250ms poll interval, the `wait_for_challenge`
+    /// window `wait` and the clearance timeout `timeout`, against a parsed
+    /// page that never shows a marker, in paused time. Returns the outcome
+    /// and how long the run took.
+    async fn run_on_a_bare_page(
+        wait: Duration,
+        timeout: Duration,
+    ) -> (Result<ClearanceOutcome, CloudflareError>, Duration) {
+        let (mut mock, conn) = MockConnection::pair();
+        let sess = SessionHandle::new(conn.clone(), "S1");
+        let fut = tokio::spawn(async move {
+            let start = Instant::now();
+            let outcome = CloudflareBypass::new(&sess)
+                .poll_interval(Duration::from_millis(250))
+                .wait_for_challenge(wait)
+                .wait_for_clearance(timeout)
+                .await;
+            (outcome, start.elapsed())
+        });
+        serve(&mut mock, |_| Page::challenge().no_light_markers()).await;
+        let finished = fut.await.unwrap();
+        conn.shutdown();
+        finished
+    }
+
+    /// A window that passes without a marker ends the run in
+    /// `AlreadyClear` on the first look after it, not at the timeout.
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_challenge_ends_in_already_clear_once_its_window_is_over() {
+        let wait = Duration::from_secs(2);
+        let (outcome, took) = run_on_a_bare_page(wait, Duration::from_secs(60)).await;
+
+        assert!(matches!(outcome.unwrap(), ClearanceOutcome::AlreadyClear));
+        assert!(
+            took >= wait && took < wait + Duration::from_millis(250),
+            "returned {took:?} into the run, not on the first look after {wait:?}"
+        );
+    }
+
+    /// A window longer than the run counts as one as long as the run: a page
+    /// that never showed a marker is clear at the deadline, rather than a
+    /// run that timed out.
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_challenge_longer_than_the_run_ends_in_already_clear() {
+        let timeout = Duration::from_secs(2);
+        let (outcome, took) = run_on_a_bare_page(Duration::from_secs(120), timeout).await;
+
+        assert!(matches!(outcome.unwrap(), ClearanceOutcome::AlreadyClear));
+        assert_eq!(took, timeout);
     }
 
     /// Markers seen while the page was still loading rule `AlreadyClear`

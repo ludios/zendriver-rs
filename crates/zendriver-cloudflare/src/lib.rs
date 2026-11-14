@@ -11,7 +11,9 @@
 //! Drives the Turnstile checkbox click flow:
 //!
 //! 0. Return [`ClearanceOutcome::AlreadyClear`] if the page shows no
-//!    challenge marker when first seen parsed.
+//!    challenge marker when first seen parsed, or, with a
+//!    [`wait_for_challenge`](CloudflareBypass::wait_for_challenge) window,
+//!    when first seen parsed after the window.
 //! 1. Find the Turnstile iframe through CDP. Turnstile mounts it in a
 //!    *closed* shadow root, which no path through the DOM leads into; see
 //!    [`detection`] for how the frame is found instead.

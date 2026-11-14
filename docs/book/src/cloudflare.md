@@ -35,15 +35,17 @@ The driver returns a [`ClearanceOutcome`] on success. All four are
 ordinary terminals, the last one included:
 
 - **`AlreadyClear`** — the page showed no challenge marker when the run
-  first saw it parsed, nor on any tick before: no challenge was served,
-  or a clearance cookie skipped it. The run returns on that first look,
-  so calling `wait_for_clearance` after a navigation that met no
+  first saw it parsed (after the `wait_for_challenge` window, if one is
+  set), nor on any tick before: no challenge was served, or a clearance
+  cookie skipped it. Without a window, the run returns on that first
+  look, so calling `wait_for_clearance` after a navigation that met no
   challenge costs one poll tick, or a few while the page is still
   parsing. It says only that no Turnstile challenge was found:
-  - It is decided once, on that first look. A widget that a page's
-    script mounts later is missed, and so is a challenge whose
-    navigation has not committed yet, so call it after the navigation
-    has loaded.
+  - It is decided once, on that look. A widget that a page's script
+    mounts later is missed (see [Widgets that a script adds
+    later](#widgets-that-a-script-adds-later)), and so is a challenge
+    whose navigation has not committed yet, so call it after the
+    navigation has loaded.
   - Cloudflare's block pages ("Sorry, you have been blocked", rate
     limits) carry no Turnstile marker, so they land here too.
   - A `container` override that leaves out the default's script clause
@@ -70,9 +72,9 @@ ordinary terminals, the last one included:
   added by script after it is parsed lands here too — so confirm the page
   before trusting what you scrape next.
 - **`TimedOut { saw_challenge }`** — the deadline elapsed. `true` means
-  a real challenge sat on the page and never resolved; `false` means the
-  run never saw the page parsed: it was still loading, or changing under
-  every look, until the deadline.
+  a real challenge sat on the page and never resolved; `false` means no
+  marker was seen and the last look did not find the page parsed: it was
+  still loading, or changing under the look, at the deadline.
 
 [`ClearanceOutcome`]: https://docs.rs/zendriver/latest/zendriver/enum.ClearanceOutcome.html
 
@@ -117,7 +119,8 @@ it, shadow root or not. The tick then resolves in this order:
    without anything to click.
    **No marker at the first look returns `AlreadyClear`.** The first tick
    that sees the page parsed, with no marker on it or on any tick before,
-   ends the run.
+   ends the run. With a `wait_for_challenge` window, only such a tick
+   after the window ends it.
 2. **Measure, scroll, measure, click.** On a tick that may click, the
    widget is measured first, so one that is no click target never
    scrolls the page. Raw mouse events carry viewport coordinates, so a
@@ -359,11 +362,42 @@ else is a terminal you decide about: "no challenge found on this page"
 (`AlreadyClear`) and "a gate we could not pass"
 (`TimedOut { saw_challenge: true }`) want opposite handling.
 
+### Widgets that a script adds later
+
+Some pages add the widget by script after the page has loaded: a
+single-page app, a form that renders Turnstile when it is submitted, or
+a page that asks its server first whether the visitor needs a
+challenge. On the first look there is nothing to find, and the run would
+return `AlreadyClear`. Give such a page a window in which the run keeps
+looking:
+
+```rust,ignore
+tab.find().css("button[type=submit]").one().await?.click().await?;
+
+let outcome = tab.cloudflare()
+    .wait_for_challenge(Duration::from_secs(10))
+    .wait_for_clearance(Duration::from_secs(30))
+    .await?;
+```
+
+A marker seen within the window makes the run go on as usual, until a
+terminal or the clearance timeout; with none seen, the run returns
+`AlreadyClear` once the window has passed. A window longer than the
+clearance timeout counts as equal to it.
+
+One run handles one challenge: it ends at the first token. A page that
+can show its widget again later, e.g. when its server asks for a fresh
+token, needs another run then.
+
 ## Tuning
 
 - `.poll_interval(Duration::from_millis(200))` — tighter polling burns
   more CPU but reacts faster to clearance. Defaults to 500 ms which
   balances responsiveness against load.
+- `.wait_for_challenge(Duration::from_secs(10))` — keep looking for a
+  challenge for that long before returning `AlreadyClear`, for a page
+  whose script adds the widget later. Defaults to zero. See [Widgets
+  that a script adds later](#widgets-that-a-script-adds-later).
 - `.selectors(..)` / `.click_policy(..)` / `.on_click(..)` — the markers
   and the click, covered in [Markers and clicks are
   yours](#markers-and-clicks-are-yours).

@@ -93,9 +93,33 @@ const GUARDED: &str = r#"<!doctype html>
 <script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>
 <p>guarded content</p>"#;
 
+/// A site's own page that adds a Turnstile widget by script a second after
+/// it has loaded, as a page that asks its server first whether the visitor
+/// needs a challenge does. Checking the box fills in the token.
+const LATE: &str = r#"<!doctype html>
+<title>Sign up</title>
+<form id="form"></form>
+<script>
+  setTimeout(() => {
+    const host = document.createElement("div");
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = "cf-turnstile-response";
+    document.getElementById("form").append(host, input);
+    const frame = document.createElement("iframe");
+    frame.src = location.protocol + "//b.test:" + location.port + "/fake-turnstile";
+    frame.style.cssText = "width: 300px; height: 65px; border: 0";
+    host.attachShadow({ mode: "closed" }).appendChild(frame);
+    addEventListener("message", (event) => {
+      if (event.data && event.data.passed === true) input.value = "late-token";
+    });
+  }, 1000);
+</script>"#;
+
 fn routes() -> Router {
     Router::new()
         .route("/challenge", get(|| async { Html(CHALLENGE) }))
+        .route("/late", get(|| async { Html(LATE) }))
         .route(WIDGET_PATH, get(|| async { Html(WIDGET) }))
         .route("/precursor", get(|| async { Html(PRECURSOR) }))
         .route("/guarded", get(|| async { Html(GUARDED) }))
@@ -205,5 +229,38 @@ async fn a_page_without_a_challenge_is_already_clear_at_once() {
         "took {:?}",
         started.elapsed()
     );
+    browser.close().await;
+}
+
+/// A widget that a page's script adds after the page has loaded is not
+/// there on the first look, so only a `wait_for_challenge` window lets the
+/// run find it, click it, and return the page's token.
+#[tokio::test]
+async fn wait_for_challenge_clicks_a_widget_that_a_script_adds_later() {
+    let server = FixtureServer::start_with(routes()).await;
+    let browser = launch_for_test(Browser::builder()).await;
+    let tab = browser.main_tab();
+    tab.goto(server.url(SITE_A, "/late")).await.unwrap();
+    tab.wait_for_load().await.unwrap();
+    let bare: bool = tab
+        .evaluate("document.querySelector('[name=cf-turnstile-response]') === null")
+        .await
+        .unwrap();
+    assert!(bare, "the widget was added before the run's first look");
+
+    let outcome = tab
+        .cloudflare()
+        .selectors(TurnstileSelectors {
+            iframe_src_contains: WIDGET_PATH.into(),
+            ..TurnstileSelectors::default()
+        })
+        .wait_for_challenge(Duration::from_secs(10))
+        .wait_for_clearance(Duration::from_secs(20))
+        .await
+        .unwrap();
+    match outcome {
+        ClearanceOutcome::TokenAcquired(token) => assert_eq!(token, "late-token"),
+        other => panic!("expected TokenAcquired, got {other:?}"),
+    }
     browser.close().await;
 }
