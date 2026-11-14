@@ -8,7 +8,7 @@
 //! stuck on the old literals until it ships.
 //!
 //! So they are data here, not literals: [`TurnstileSelectors`] is what the
-//! injected evaluators are built from, and [`ClickPolicy`] decides whether
+//! widget is looked for by, and [`ClickPolicy`] decides whether
 //! and where to click. Both are plain structs with public fields — no
 //! setters, no closures — so they survive a trip through JSON and can be
 //! filled in by an agent, a config file, or a hotfix in the calling program.
@@ -19,9 +19,9 @@ use crate::detection::BoundingBox;
 
 /// The page markers that identify a Cloudflare Turnstile widget.
 ///
-/// Every injected evaluator is templated from these, so overriding one here
-/// changes the detector, the poll loop and the scroll-and-measure step
-/// together — there is no second copy to keep in sync.
+/// The injected evaluator is templated from these, and the frame lookup
+/// reads them too, so overriding one here changes the presence probe and
+/// the poll loop together — there is no second copy to keep in sync.
 ///
 /// ```no_run
 /// # async fn ex(tab: &zendriver_transport::SessionHandle)
@@ -43,12 +43,14 @@ use crate::detection::BoundingBox;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnstileSelectors {
-    /// Substring an `<iframe>`'s `src` must contain for that iframe to be
-    /// the challenge widget. Matched with `String.prototype.includes`, so a
-    /// bare hostname is enough. Defaults to `"challenges.cloudflare.com"`.
-    /// An empty string disables the iframe signal — it never matches — since
-    /// `includes("")` would otherwise match every iframe on the page and
-    /// send the click at whichever one came first.
+    /// Substring that the URL of the frame an `<iframe>` holds must contain
+    /// for that iframe to be the challenge widget — normally the iframe's
+    /// `src`. A bare hostname is enough. Defaults to
+    /// `"challenges.cloudflare.com"`. Only iframes held directly by the main
+    /// frame count, in a shadow root (closed ones included) or not. An
+    /// empty string disables the iframe signal — it never matches — since
+    /// every URL contains the empty string, and the click would go to
+    /// whichever frame came first.
     pub iframe_src_contains: String,
     /// CSS selector for the challenge *container* — the element a site
     /// author drops into their own HTML for Turnstile to mount into. Used

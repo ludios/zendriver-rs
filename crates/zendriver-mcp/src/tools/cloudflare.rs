@@ -8,8 +8,9 @@
 //!
 //! - `Ok(ClearanceOutcome::TokenAcquired(t))` — a configured token input
 //!   (`cf-turnstile-response` by default) picked up a token.
-//! - `Ok(ClearanceOutcome::ChallengeGone)` — the challenge stopped being
-//!   actionable without a token (e.g. clearance cookie shortcut).
+//! - `Ok(ClearanceOutcome::ChallengeGone)` — every challenge marker is gone
+//!   without a token, from a page that has settled (for Cloudflare's
+//!   full-page challenge, the page it navigates to once passed).
 //! - `Ok(ClearanceOutcome::TimedOut { saw_challenge })` — the per-call
 //!   deadline elapsed (whether or not a challenge was ever seen).
 //!
@@ -180,12 +181,14 @@ pub enum Outcome {
     /// `selectors.token_inputs` entry, `cf-turnstile-response` by default.
     /// The token is available in [`SolveOutput::token`].
     Solved,
-    /// The challenge stopped being actionable without yielding a token
-    /// (e.g. a clearance cookie shortcut). `token` will be `None`.
+    /// Every challenge marker seen earlier is gone without a token, and the
+    /// page has settled: a navigation replaced it with a parsed document
+    /// (how Cloudflare's full-page challenge ends), or it stayed without
+    /// markers for ten seconds. `token` will be `None`.
     ///
-    /// Not proof the gate was passed: this also fires when the widget is
-    /// still mounted but hidden or zero-size, so verify the page before
-    /// treating what you read next as post-challenge content.
+    /// Not proof the gate was passed: a replacement page that is a fresh
+    /// challenge, whose widget mounts late, lands here too, so verify the
+    /// page before treating what you read next as post-challenge content.
     ChallengeGone,
     /// `timeout_ms` elapsed without reaching either success state. `token`
     /// will be `None`. Not a hard error — agents can retry or give up.
@@ -283,33 +286,43 @@ mod tests {
     /// wiring branches from the tool left this module green.
     ///
     /// So drive a real bypass over a mock CDP connection and read the wire.
-    /// The markers must reach the evaluator the driver dispatches, and the
-    /// click must land where the request's fractions put it — 15% / 50% of
-    /// the same box would be (112, 220), so neither coordinate can be
-    /// produced by a driver that quietly kept its defaults.
+    /// The fake page puts the widget's frame at the request's host, so the
+    /// driver finds the widget only if the request's marker reached the
+    /// frame lookup; and the click must land where the request's fractions
+    /// put it — 15% / 50% of the same box would be (112, 220), so neither
+    /// coordinate can be produced by a driver that quietly kept its
+    /// defaults.
     #[tokio::test]
     async fn request_overrides_reach_the_driver() {
         use serde_json::{Value, json};
         use zendriver::{CloudflareBypass, SessionHandle};
         use zendriver_transport::testing::MockConnection;
 
-        /// Widget box: 80×40 at (100, 200).
-        fn widget() -> Value {
-            json!({ "x": 100.0, "y": 200.0, "width": 80.0, "height": 40.0 })
-        }
-        fn eval_reply(value: Value) -> Value {
-            json!({ "result": { "type": "object", "value": value } })
-        }
-        async fn next_eval(mock: &mut MockConnection) -> (u64, String) {
-            let id =
-                tokio::time::timeout(Duration::from_secs(5), mock.expect_cmd("Runtime.evaluate"))
-                    .await
-                    .expect("driver never dispatched an evaluator");
-            let expr = mock.last_sent()["params"]["expression"]
-                .as_str()
-                .unwrap()
-                .to_string();
-            (id, expr)
+        /// The fake page's answer to each command the driver sends: a
+        /// challenge page whose widget, an 80×40 box at (100, 200), is held
+        /// by a frame at the request's host. Its token shows from the
+        /// second poll on.
+        fn answer(method: &str, polls: usize) -> Value {
+            let widget = json!({ "x": 100.0, "y": 200.0, "width": 80.0, "height": 40.0 });
+            match method {
+                "Runtime.evaluate" => {
+                    let token = if polls > 1 { json!("T") } else { Value::Null };
+                    json!({ "result": { "type": "object", "value": {
+                        "token": token, "markers": true, "loading": false,
+                    } } })
+                }
+                "Page.getFrameTree" => json!({ "frameTree": {
+                    "frame": { "id": "MAIN", "loaderId": "D1" },
+                    "childFrames": [{ "frame": { "id": "W", "url": "https://gate.alien.invalid/w" } }],
+                } }),
+                "Target.getTargets" => json!({ "targetInfos": [] }),
+                "DOM.getFrameOwner" => json!({ "backendNodeId": 7 }),
+                "DOM.resolveNode" => json!({ "object": { "objectId": "O" } }),
+                "Runtime.callFunctionOn" => {
+                    json!({ "result": { "type": "object", "value": widget } })
+                }
+                _ => json!({}),
+            }
         }
 
         let (mut mock, conn) = MockConnection::pair();
@@ -338,56 +351,26 @@ mod tests {
         };
 
         let serving = async {
-            let (id, expr) = next_eval(&mut mock).await;
-            assert!(
-                expr.contains("gate.alien.invalid"),
-                "the request's marker never reached the page"
-            );
-            assert!(
-                !expr.contains("challenges.cloudflare.com"),
-                "the driver kept its default marker despite the request"
-            );
-            mock.reply(
-                id,
-                eval_reply(json!({ "token": null, "bbox": widget(), "hasMarkers": true })),
-            )
-            .await;
-
-            // Scroll-and-re-measure, then the three events of one click.
-            let (id, expr) = next_eval(&mut mock).await;
-            assert!(expr.contains("scrollIntoView"));
-            mock.reply(id, eval_reply(widget())).await;
-
-            let mut point = (f64::NAN, f64::NAN);
-            for _ in 0..3 {
-                let id = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    mock.expect_cmd("Input.dispatchMouseEvent"),
-                )
-                .await
-                .expect("driver never clicked");
-                let sent = mock.last_sent().clone();
-                point = (
-                    sent["params"]["x"].as_f64().unwrap(),
-                    sent["params"]["y"].as_f64().unwrap(),
-                );
-                mock.reply(id, json!({})).await;
+            let mut polls = 0;
+            let mut point = None;
+            while let Some((method, id)) = mock.recv_cmd_timeout(Duration::from_millis(300)).await {
+                let params = mock.last_sent()["params"].clone();
+                if method == "Runtime.evaluate" {
+                    polls += 1;
+                }
+                if params["type"] == "mousePressed" {
+                    point = Some((params["x"].as_f64().unwrap(), params["y"].as_f64().unwrap()));
+                }
+                mock.reply(id, answer(&method, polls)).await;
             }
-
-            let (id, _) = next_eval(&mut mock).await;
-            mock.reply(
-                id,
-                eval_reply(json!({ "token": "T", "bbox": null, "hasMarkers": true })),
-            )
-            .await;
             point
         };
 
         let (outcome, point) = tokio::join!(driver, serving);
         assert_eq!(
             point,
-            (140.0, 210.0),
-            "the click ignored the request's fractions"
+            Some((140.0, 210.0)),
+            "the click missed the widget at the request's host, or ignored the request's fractions"
         );
         assert!(matches!(
             outcome.unwrap(),

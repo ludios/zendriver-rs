@@ -10,16 +10,17 @@
 //!
 //! Drives the Turnstile checkbox click flow:
 //!
-//! 1. Detect the Turnstile iframe via a shadow-DOM-aware walk of the page's
-//!    main world.
+//! 1. Find the Turnstile iframe through CDP. Turnstile mounts it in a
+//!    *closed* shadow root, which no script in the page can enter; see
+//!    [`detection`] for how the frame is found instead.
 //! 2. Scroll it into view, re-measure it, and dispatch a raw left-click at
 //!    the 15% × 50% offset inside its box (the default Turnstile checkbox
 //!    location), retrying a swallowed click a few times.
-//! 3. Poll for either the token input gaining a value, or the challenge
-//!    ceasing to be actionable — the clicked iframe no longer a valid click
-//!    target, or every challenge marker gone. See
-//!    [`ClearanceOutcome::ChallengeGone`] for why the first of those is not
-//!    proof the gate was passed.
+//! 3. Poll for either the token input gaining a value, or every challenge
+//!    marker being gone from a page that has settled — for Cloudflare's
+//!    full-page challenge, the page it navigates to once passed. See
+//!    [`ClearanceOutcome::ChallengeGone`] for what that does and does not
+//!    prove.
 //!
 //! **The markers and the click are caller data.** What to look for is
 //! [`TurnstileSelectors`], whether and where to click is a [`ClickPolicy`],

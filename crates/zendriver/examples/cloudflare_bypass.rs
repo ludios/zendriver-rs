@@ -7,14 +7,14 @@
 //!      to the tab's session.
 //!   3. Call [`CloudflareBypass::wait_for_clearance`] with a 30s budget.
 //!      The driver runs a single CDP poll loop that, per tick, looks for
-//!      the clearance token, the Turnstile challenge iframe's bounding box
-//!      (shadow-DOM aware), and any challenge marker on the page. When the
-//!      interactive iframe is present, the driver scrolls it into view,
-//!      re-measures it, and dispatches a raw left-click at the canonical
-//!      (15% x, 50% y) offset (Turnstile checkbox), retrying up to three
-//!      times in case the widget swallowed the first one. Resolves the
-//!      first tick a token is observed, or the challenge stops being
-//!      actionable.
+//!      the clearance token, any challenge marker on the page, and the
+//!      Turnstile iframe — through CDP, since Turnstile mounts it in a
+//!      closed shadow root. When the iframe is a click target, the driver
+//!      scrolls it into view, re-measures it, and dispatches a raw
+//!      left-click at the canonical (15% x, 50% y) offset (Turnstile
+//!      checkbox), retrying up to three times in case the widget swallowed
+//!      the first one. Resolves the first tick a token is observed, or once
+//!      every marker is gone from a page that has settled.
 //!   4. Print the [`ClearanceOutcome`] enum variant + the page title.
 //!
 //! Which markers to look for and how to click are caller data —
@@ -27,11 +27,11 @@
 //!   - `TokenAcquired(_)` — Turnstile yielded a `cf-turnstile-response`
 //!     token, either after clicking the checkbox or directly (invisible
 //!     Turnstile, where the iframe never mounts).
-//!   - `ChallengeGone` — the challenge stopped being actionable without a
-//!     token (e.g. clearance-cookie shortcut): the clicked iframe is no
-//!     longer a valid click target, or every marker seen earlier is gone.
-//!     A widget that is merely hidden or zero-size is also not a valid
-//!     click target, so this is not by itself proof the gate was passed.
+//!   - `ChallengeGone` — every marker seen earlier is gone without a
+//!     token, and the page has settled: Cloudflare's full-page challenge
+//!     navigated to the page it guards and that page has been parsed, or
+//!     the markers stayed gone for ten seconds on the same page. Not by
+//!     itself proof the gate was passed.
 //!   - `TimedOut { saw_challenge: false }` — the full timeout window
 //!     elapsed without any challenge markers ever being observed (no
 //!     container, no hidden input, no iframe). The page likely has no

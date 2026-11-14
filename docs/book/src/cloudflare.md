@@ -34,17 +34,17 @@ ordinary terminals, the last one included:
 - **`TokenAcquired(token)`** — the `cf-turnstile-response` input picked
   up a non-empty value. The page can now proceed; the token is also
   forwarded to Cloudflare server-side on the next request.
-- **`ChallengeGone`** — the challenge stopped being actionable without
-  yielding a token, typically because Cloudflare honored a clearance
-  cookie and short-circuited the gate. Either the iframe the driver
-  clicked is no longer a valid click target, or every challenge marker
-  seen on an earlier tick has vanished. The first case is weaker than it
-  sounds: a widget that is still mounted but hidden or zero-sized is also
-  not a valid click target, so once a click has landed this outcome can
-  arrive on a tick where the widget simply is not clickable at that
-  moment. That case says the driver ran out of things to click, not that
-  the gate is behind you; confirm the page before trusting what you
-  scrape next.
+- **`ChallengeGone`** — every challenge marker seen on an earlier tick
+  is gone without a token having shown, and the page has settled. This
+  is how Cloudflare's full-page "Just a moment…" challenge ends: once
+  passed, it removes its widget and its token input, and a second or two
+  later navigates to the page it was guarding. So the driver waits for a
+  new document, and for that document to be parsed, before it returns. A
+  challenge that clears in place, with no navigation, returns once its
+  markers have stayed gone for ten seconds. It says no marker is left,
+  not that the server let you through — a replacement page that is a
+  fresh challenge, whose widget mounts late, lands here too — so confirm
+  the page before trusting what you scrape next.
 - **`TimedOut { saw_challenge }`** — the deadline elapsed.
   `saw_challenge` separates the two cases worth telling apart: `true`
   means a real challenge sat on the page and never resolved, `false`
@@ -70,13 +70,20 @@ and the second is `TimedOut { saw_challenge: true }`.
 
 ## How it works
 
-The driver runs a single poll loop, and each tick costs one CDP
-round-trip. A shadow-DOM-aware walk of the page's main world reports
-three things at once: the
-`cf-turnstile-response` token if one is present, the challenge iframe's
-box if that iframe is a valid click target, and whether any Cloudflare
-marker at all (container, hidden input, or live iframe) is on the page.
-The tick then resolves in this order:
+The driver runs a single poll loop. Each tick, one evaluator in the
+page's main world reads the light DOM: the `cf-turnstile-response` token
+if one is present, and whether the container or the token input is
+there. The widget's iframe is found differently. Turnstile mounts it
+inside a *closed* shadow root — Cloudflare's full-page challenge does —
+and no script in the page can enter one, so the driver asks Chrome
+instead. Chrome lists the frames in a process of their own in
+`Target.getTargets` (where the cross-site widget runs under Chrome's
+default site isolation) and the frames in the page's own process in
+`Page.getFrameTree` (where it runs when site isolation is off, as with
+`--disable-site-isolation-trials`). The
+widget is the main frame's child frame whose URL contains the iframe
+marker, and `DOM.getFrameOwner` names the `<iframe>` element that holds
+it, shadow root or not. The tick then resolves in this order:
 
 1. **A token wins outright.** A non-empty token returns `TokenAcquired`
    immediately. This is also the invisible-Turnstile path, where no
@@ -84,7 +91,9 @@ The tick then resolves in this order:
    without anything to click.
 2. **Scroll, re-measure, click.** Raw mouse events carry viewport
    coordinates, so a widget below the fold has to be scrolled in and
-   re-measured before a click can land on it. The click goes to
+   re-measured before a click can land on it. The scroll is CDP's
+   `DOM.scrollIntoViewIfNeeded`, which no script in the page sees. The
+   click goes to
    `(bbox.x + bbox.width * 0.15, bbox.y + bbox.height * 0.5)` — by
    default the 15%-from-left, 50%-from-top position of the checkbox
    inside the iframe. No Bezier-path motion; Cloudflare wants a real click on a
@@ -95,7 +104,11 @@ The tick then resolves in this order:
    at least four poll ticks after the last (about two seconds at the
    default interval). A swallowed first click no longer strands the run
    until the deadline.
-4. **Otherwise keep polling** — every 500 ms by default, override via
+4. **Markers gone, page settled.** Once every marker seen earlier is
+   gone, the driver waits for the page to settle — a new, parsed document,
+   or ten seconds without markers on the same one — and returns
+   `ChallengeGone`.
+5. **Otherwise keep polling** — every 500 ms by default, override via
    [`poll_interval`](https://docs.rs/zendriver/latest/zendriver/struct.CloudflareBypass.html#method.poll_interval)
    — until a terminal fires or the deadline passes.
 
@@ -271,7 +284,8 @@ match tab.cloudflare()
     .await?
 {
     ClearanceOutcome::TokenAcquired(_) | ClearanceOutcome::ChallengeGone => {
-        // Past the gate.
+        // Past the gate. After the full-page challenge, the tab now shows
+        // the page it navigated to.
     }
     ClearanceOutcome::TimedOut { saw_challenge: false } => {
         // No Cloudflare marker ever appeared — this page has no gate.
@@ -301,6 +315,8 @@ could not pass" want opposite handling.
   and the click, covered in [Markers and clicks are
   yours](#markers-and-clicks-are-yours).
 - Pass a generous `wait_for_clearance` timeout (30-60 s) for the first
-  challenge; subsequent navigations on the same `user_data_dir` are
-  usually cookie-shortcut clears and resolve in &lt;1 s via
-  `ChallengeGone`.
+  challenge. Later navigations with the same `user_data_dir` usually
+  carry Cloudflare's clearance cookie and get no challenge at all — and a
+  run on a page that never shows a marker lasts its whole timeout before
+  it returns `TimedOut { saw_challenge: false }`, so that is the cost of
+  calling it after every navigation.
